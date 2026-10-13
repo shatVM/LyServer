@@ -4,7 +4,8 @@
   "private": true,
   "description": "Автономний локальний вебсервер навчальних матеріалів для роботи в укритті.",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node test.js"
   },
   "dependencies": {
     "canvas": "^3.2.3",
