@@ -1,21 +1,18 @@
 const config = require("../config");
+const auth = require("../utils/auth");
 const fileService = require("../services/fileService");
 const stateService = require("../services/stateService");
 const slideService = require("../services/slideService");
 
 class ApiController {
   verifyAuth(req, res) {
-    const { pin } = req.body || {};
-    if (pin === config.portalPin) {
-      return res.json({ ok: true, role: "teacher" });
-    }
-    return res.status(403).json({ ok: false, message: "Невірний PIN викладача" });
+    if (!auth.requirePinJson(req, res)) return;
+    res.json({ ok: true, role: "teacher" });
   }
 
   getFiles(req, res) {
     try {
-      const clientPin = req.headers["x-portal-pin"] || req.query.pin;
-      const isTeacher = clientPin === config.portalPin;
+      const isTeacher = auth.isTeacher(req);
       const files = fileService.getFilesList(isTeacher);
       res.json(files);
     } catch (error) {
@@ -29,10 +26,7 @@ class ApiController {
 
   updateControl(req, res) {
     const { pin, ...data } = req.body || {};
-
-    if (pin !== config.portalPin) {
-      return res.status(403).send("Неправильний PIN");
-    }
+    if (!auth.requirePin(req, res)) return;
 
     try {
       const result = stateService.updateState(data);
@@ -43,10 +37,7 @@ class ApiController {
   }
 
   async uploadFile(req, res) {
-    const clientPin = req.headers["x-portal-pin"] || req.query.pin;
-    if (clientPin !== config.portalPin) {
-      return res.status(403).send("Неправильний PIN");
-    }
+    if (!auth.requirePin(req, res)) return;
 
     const originalName = req.query.name;
     if (!originalName) {
@@ -63,9 +54,7 @@ class ApiController {
 
   toggleHide(req, res) {
     const { pin, file, hidden } = req.body || {};
-    if (pin !== config.portalPin) {
-      return res.status(403).send("Неправильний PIN");
-    }
+    if (!auth.requirePin(req, res)) return;
 
     try {
       const result = fileService.toggleHide(file, Boolean(hidden));
@@ -77,9 +66,7 @@ class ApiController {
 
   deleteFile(req, res) {
     const { pin, file } = req.body || {};
-    if (pin !== config.portalPin) {
-      return res.status(403).send("Неправильний PIN");
-    }
+    if (!auth.requirePin(req, res)) return;
 
     try {
       const result = fileService.deleteFile(file);
@@ -98,6 +85,9 @@ class ApiController {
    * The conversion is async — client may need to poll if it takes time.
    */
   async prepareSlides(req, res) {
+    // Issue #2: конвертація витратна — тільки для викладача
+    if (!auth.requirePin(req, res)) return;
+
     const { file } = req.body || {};
     if (!file) return res.status(400).send("Не вказано file");
 
