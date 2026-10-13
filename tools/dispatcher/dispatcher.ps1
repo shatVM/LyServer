@@ -249,7 +249,11 @@ if ($issuesRaw.ExitCode -ne 0) { Stop-Dispatcher ('gh issue list failed: {0}' -f
 
 $issues = @()
 if (-not [string]::IsNullOrWhiteSpace($issuesRaw.StdOut)) {
-    try { $issues = @($issuesRaw.StdOut | ConvertFrom-Json) }
+    try {
+        # PS 5.1 quirk: ConvertFrom-Json returns a JSON array as ONE Object[]
+        # element; pipe through ForEach-Object to flatten into a real array.
+        $issues = @(($issuesRaw.StdOut | ConvertFrom-Json) | ForEach-Object { $_ })
+    }
     catch { Stop-Dispatcher ('gh returned invalid JSON: {0}' -f $_.Exception.Message) }
 }
 
