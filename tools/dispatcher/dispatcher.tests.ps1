@@ -104,7 +104,8 @@ $pongCases = @(
     @{ In = "NOT PONG`n";               Expect = $false; Label = 'NOT PONG rejected' }
     @{ In = "pong`n";                   Expect = $false; Label = 'lowercase rejected' }
     @{ In = "PONG`nextra text`n";       Expect = $false; Label = 'multi-line blob rejected' }
-    @{ In = "`e[32mPONG`e[0m`n";        Expect = $true;  Label = 'ANSI-wrapped accepted' }
+    # PS 5.1 has no `e escape; build ESC via [char]27
+    @{ In = ([char]27 + '[32mPONG' + [char]27 + '[0m' + "`n"); Expect = $true;  Label = 'ANSI-wrapped accepted' }
     @{ In = '';                          Expect = $false; Label = 'empty rejected' }
     @{ In = "`n`n";                      Expect = $false; Label = 'blank-only rejected' }
 )
@@ -171,14 +172,13 @@ $run = Invoke-Dispatcher -ConfigPath $cfgOk
 Test-Case 'T9 full preview run -> exit 0' ($run.ExitCode -eq 0 -and $run.Output -match 'Preview completed') ("exit {0}" -f $run.ExitCode)
 
 # === T10: GitHub state unchanged by the whole suite
-$labelsNow = & gh issue list -R shatVM/LyServer --state open --json number,labels | Out-String
-$prsNow = & gh pr list -R shatVM/LyServer --state all --json number | Out-String
-$expectedLabels = @'
-{"labels":["in-progress"],"number":3}
-{"labels":["ready-for-opencode"],"number":2}
-{"labels":[],"number":1}
-'@
-$labelsOk = ($labelsNow -match '"number":3' -and $labelsNow -match '"labels":\["in-progress"\]' -and $labelsNow -match '"number":2' -and $labelsNow -match '"labels":\["ready-for-opencode"\]')
+$issuesNow = @(((& gh issue list -R shatVM/LyServer --state open --json number,labels) | Out-String) | ConvertFrom-Json | ForEach-Object { $_ })
+$prsNow = (& gh pr list -R shatVM/LyServer --state all --json number | Out-String)
+function Get-LabelNames($issue) { return @($issue.labels | ForEach-Object { $_.name }) }
+$issue3 = @($issuesNow | Where-Object { $_.number -eq 3 })
+$issue2 = @($issuesNow | Where-Object { $_.number -eq 2 })
+$labelsOk = ($issue3.Count -eq 1 -and (Get-LabelNames $issue3[0]) -contains 'in-progress' -and
+             $issue2.Count -eq 1 -and (Get-LabelNames $issue2[0]) -contains 'ready-for-opencode')
 $prsOk = ($prsNow -match '"number":4' -and $prsNow -notmatch '"number":5')
 Test-Case 'T10a GitHub issue labels unchanged' $labelsOk '#3 in-progress, #2 ready'
 Test-Case 'T10b no new PRs created (only pre-existing #4)' $prsOk ''
