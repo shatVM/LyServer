@@ -81,7 +81,9 @@ Write-Host ''
 Write-Host ('Test workspace: {0}' -f $testRoot) -ForegroundColor Cyan
 Write-Host ''
 
-# === T1: argument quoting round-trip (spaces, quotes, backslash, Cyrillic)
+# === T1: argument quoting round-trip through a REAL child process:
+#         powershell.exe -File echo-args.ps1 writes received $args to a file;
+#         we compare what the child actually received, not the string builder
 $echoScript = Join-Path $testRoot 'echo-args.ps1'
 Set-Content -LiteralPath $echoScript -Encoding UTF8 -Value @'
 param([string]$OutFile)
@@ -184,6 +186,77 @@ Test-Case 'T10a GitHub issue labels unchanged' $labelsOk '#3 in-progress, #2 rea
 Test-Case 'T10b no new PRs created (only pre-existing #4)' $prsOk ''
 $gitStatus = & git -C $repoPath status --porcelain | Out-String
 Test-Case 'T10c repository working tree clean' ([string]::IsNullOrWhiteSpace($gitStatus)) 'no probe/temp files left'
+
+# === T11: Test-PathInside boundary rules (unit on the real function)
+$pathCases = @(
+    @{ Child = 'C:\LyServerLogs';              Parent = 'C:\LyServer';        Expect = $false; Label = 'sibling prefix is NOT inside' }
+    @{ Child = 'C:\LyServer\logs';             Parent = 'C:\LyServer';        Expect = $true;  Label = 'true subdirectory is inside' }
+    @{ Child = 'C:\lyserver\LOGS';             Parent = 'C:\LYSERVER';        Expect = $true;  Label = 'case-insensitive match' }
+    @{ Child = 'C:\LyServer';                  Parent = 'C:\LyServer\';       Expect = $true;  Label = 'same path, trailing sep on parent' }
+    @{ Child = 'C:\LyServer\';                 Parent = 'C:\LyServer';        Expect = $true;  Label = 'same path, trailing sep on child' }
+    @{ Child = 'C:\LyServer';                  Parent = 'C:\LyServer\sub';    Expect = $false; Label = 'parent nested in child' }
+    @{ Child = 'C:\Other';                     Parent = 'C:\LyServer';        Expect = $false; Label = 'unrelated path' }
+)
+$pathOk = $true
+foreach ($c in $pathCases) {
+    $got = Test-PathInside -Child $c.Child -Parent $c.Parent
+    if ($got -ne $c.Expect) { $pathOk = $false; Write-Host ("    path case '{0}': expected {1}, got {2}" -f $c.Label, $c.Expect, $got) -ForegroundColor Yellow }
+}
+Test-Case 'T11 Test-PathInside boundaries (7 cases)' $pathOk 'sibling prefix C:\LyServerLogs excluded'
+
+# === T12: timeout kills the process TREE, spares unrelated processes,
+#           and reports the timeout instead of masking it
+$sentinel = Start-Process powershell.exe -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep 300') -PassThru -WindowStyle Hidden
+$treeTarget = Join-Path $testRoot 'tree-target.ps1'
+$pidFile = Join-Path $testRoot 'grandchild.pid'
+$treeTargetBody = @'
+$gc = Start-Process powershell.exe -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep 300') -PassThru -WindowStyle Hidden
+Set-Content -LiteralPath '__PIDFILE__' -Value $gc.Id
+Start-Sleep 300
+'@ -replace '__PIDFILE__', $pidFile
+Set-Content -LiteralPath $treeTarget -Value $treeTargetBody -Encoding UTF8
+try {
+    $treeRun = Invoke-Native -Tool 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $treeTarget) -TimeoutSec 5
+    $reportedTimeout = ($treeRun.TimedOut -eq $true)
+    $gcId = if (Test-Path $pidFile) { [int]([IO.File]::ReadAllText($pidFile).Trim()) } else { 0 }
+    $grandchildDead = $false
+    if ($gcId -gt 0) {
+        Start-Sleep -Milliseconds 500
+        try { $left = Get-Process -Id $gcId -ErrorAction Stop; $null = $left } catch { $grandchildDead = $true }
+    }
+    Test-Case 'T12a timeout reported as TimedOut (reason not masked)' $reportedTimeout ''
+    Test-Case 'T12b grandchild process killed by tree kill' ($gcId -gt 0 -and $grandchildDead) ("grandchild pid {0}" -f $gcId)
+    $sentinelAlive = $false
+    try { $s = Get-Process -Id $sentinel.Id -ErrorAction Stop; $sentinelAlive = ($s.Id -eq $sentinel.Id) } catch { }
+    Test-Case 'T12c unrelated sentinel process survives' $sentinelAlive ("sentinel pid {0}" -f $sentinel.Id)
+}
+finally {
+    try { Stop-Process -Id $sentinel.Id -Force -ErrorAction SilentlyContinue } catch { }
+    Remove-Item -LiteralPath $pidFile, $treeTarget -Force -ErrorAction SilentlyContinue
+}
+
+# === T13: full-run ORDER of stages, read from the real log of T9
+#     (T6-T9 already execute dispatcher.ps1 as a whole child process;
+#      this asserts the execution order inside that full run)
+$latestLogPath = $null
+$logDirT = Join-Path $testRoot 'logs'
+if (Test-Path $logDirT) {
+    $allLogs = @(Get-ChildItem $logDirT -Filter '*.log' | Sort-Object LastWriteTime)
+    if ($allLogs.Count -gt 0) { $latestLogPath = $allLogs[-1].FullName }
+}
+function Get-LineIndex($text, $pattern) {
+    $lines = @($text -split "`r?`n")
+    for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match $pattern) { return $i } }
+    return -1
+}
+$logTextT = if ($latestLogPath) { [IO.File]::ReadAllText($latestLogPath) } else { '' }
+$iTree = Get-LineIndex $logTextT 'working tree is clean'
+$iPing = Get-LineIndex $logTextT 'Pinging model'
+$iPong = Get-LineIndex $logTextT 'Model ping succeeded'
+$iDisc = Get-LineIndex $logTextT 'Found \d+ candidate'
+$iPrev = Get-LineIndex $logTextT 'Preview completed'
+$orderOk = ($iTree -ge 0 -and $iPing -gt $iTree -and $iPong -gt $iPing -and $iDisc -gt $iPong -and $iPrev -gt $iDisc)
+Test-Case 'T13 full run order: tree -> ping -> pong -> discovery -> preview' $orderOk ("lines {0}<{1}<{2}<{3}<{4}" -f $iTree, $iPing, $iPong, $iDisc, $iPrev)
 
 # --- summary --------------------------------------------------------------
 $failed = @($script:Results | Where-Object { -not $_.Passed })
