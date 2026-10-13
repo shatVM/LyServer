@@ -1,0 +1,36 @@
+<div class="page-title-area">
+  <h2>📖 Перегляд матеріалів</h2>
+  <p class="hint" id="materialsSubtitle">
+    Оберіть матеріал для індивідуального вивчення. Особистий перегляд не впливає на показ інших учасників.
+  </p>
+</div>
+
+<div class="grid-2col">
+  <section class="panel">
+    <div class="panel-header-row">
+      <h2 id="catalogTitle">Каталог матеріалів</h2>
+      <button id="refresh" class="secondary btn-sm">🔄 Оновити</button>
+    </div>
+    <div id="status" class="status">Завантаження каталогу матеріалів…</div>
+    <div id="files" class="files-list">
+      <div class="empty">Завантаження списку…</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-header-row">
+      <h2 id="viewerTitle">Особистий перегляд</h2>
+      <div id="pdfControls" class="row pdf-controls" style="display:none">
+        <button id="prevPage" class="secondary btn-sm">← Попередня</button>
+        <span id="pageLabel" class="hint">Сторінка 1</span>
+        <button id="nextPage" class="secondary btn-sm">Наступна →</button>
+      </div>
+    </div>
+    <div id="viewer">
+      <div class="empty">Оберіть файл зі списку та натисніть «Відкрити для себе».</div>
+    </div>
+    <div class="hint" style="margin-top:12px">
+      💡 Особистий перегляд дозволяє читати PDF чи переглядати відео у власному темпі.
+    </div>
+  </section>
+</div>

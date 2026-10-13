@@ -1,0 +1,48 @@
+<div class="page-title-area">
+  <h2>🖥️ Спільна демонстрація</h2>
+  <p class="hint" id="demoSubtitle">
+    Синхронний показ навчальних матеріалів для всієї аудиторії або укриття в режимі реального часу.
+  </p>
+</div>
+
+<div class="grid-demo" id="demoGridContainer">
+  <!-- Shared Display Panel -->
+  <section class="panel demo-screen-panel">
+    <div class="panel-header-row">
+      <h2 id="viewerTitle">Спільний екран</h2>
+      <div class="row">
+        <div id="syncIndicator" class="badge-live">● Синхронізація активна</div>
+        <button id="showShared" class="secondary btn-sm">🔄 Оновити</button>
+      </div>
+    </div>
+
+    <div id="status" class="status">Підключення до спільної трансляції…</div>
+
+    <!-- Teacher Shared Control Bar (shown only for teacher) -->
+    <div class="row shared-nav-bar teacher-only" id="teacherDemoControls" style="display:none; margin-bottom:12px; justify-content:space-between">
+      <div class="row">
+        <button id="prevPage" class="secondary btn-sm">← Попередня сторінка</button>
+        <span id="pageLabel" class="hint">PDF: сторінка 1</span>
+        <button id="nextPage" class="secondary btn-sm">Наступна сторінка →</button>
+      </div>
+      <span class="hint">Керування показом (викладач)</span>
+    </div>
+
+    <!-- Live Viewer for everyone -->
+    <div id="viewer">
+      <div class="empty">Очікування початку демонстрації від викладача…</div>
+    </div>
+  </section>
+
+  <!-- Teacher Panel (shown only for teacher) -->
+  <section class="panel demo-controls-panel teacher-only" id="teacherBroadcastPanel" style="display:none">
+    <div class="panel-header-row">
+      <h3>Запуск показу</h3>
+      <button id="refresh" class="secondary btn-sm">🔄 Оновити</button>
+    </div>
+    <p class="hint">Оберіть матеріал (включно з прихованими від учнів) для трансляції на спільний екран:</p>
+    <div id="files" class="files-list">
+      <div class="empty">Завантаження списку…</div>
+    </div>
+  </section>
+</div>

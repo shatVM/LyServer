@@ -1,0 +1,27 @@
+<nav class="nav-bar">
+  <div class="nav-container">
+    <div class="nav-left">
+      <a href="/materials" class="nav-link {{isActive activeMenu 'materials'}}">
+        <span class="nav-icon">📖</span> Перегляд матеріалів
+      </a>
+      <a href="/upload" class="nav-link teacher-only {{isActive activeMenu 'upload'}}" id="navUploadLink">
+        <span class="nav-icon">📤</span> Додавання матеріалів
+      </a>
+      <a href="/demonstration" class="nav-link {{isActive activeMenu 'demonstration'}}">
+        <span class="nav-icon">🖥️</span> Демонстрація
+      </a>
+      <a href="/students" class="nav-link teacher-only {{isActive activeMenu 'students'}}" id="navStudentsLink">
+        <span class="nav-icon">👥</span> Учні
+      </a>
+    </div>
+
+    <div class="nav-right">
+      <div id="roleIndicator" class="role-pill">
+        <span id="roleLabel">👤 Учень</span>
+        <button id="btnSwitchRole" class="btn-role-switch" title="Змінити роль">
+          🔑 Вхід викладача
+        </button>
+      </div>
+    </div>
+  </div>
+</nav>

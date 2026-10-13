@@ -1,0 +1,58 @@
+<div class="page-title-area">
+  <h2>📤 Додавання матеріалів</h2>
+  <p class="hint">Завантаження навчальних посібників, презентацій та відеоматеріалів на локальний сервер.</p>
+</div>
+
+<!-- Student Block (shown if role is student) -->
+<div id="studentUploadBlock" class="panel student-notice-box" style="display:none; text-align:center; padding: 40px 20px;">
+  <div style="font-size: 48px; margin-bottom: 12px;">🔒</div>
+  <h2>Доступ обмежено</h2>
+  <p class="hint" style="max-width: 500px; margin: 0 auto 20px;">
+    Цей розділ призначений виключно для викладача. Учні можуть переглядати матеріали у відповідному розділі.
+  </p>
+  <div class="row" style="justify-content: center; gap: 12px;">
+    <a href="/materials" class="button secondary">📖 Перейти до матеріалів</a>
+    <button id="btnPromptTeacherLogin" class="button">🔑 Увійти як викладач</button>
+  </div>
+</div>
+
+<!-- Teacher Block (shown if role is teacher) -->
+<div id="teacherUploadBlock" class="grid-2col">
+  <section class="panel">
+    <h2>Завантажити новий файл</h2>
+
+    <div class="upload-box" style="margin-top:16px">
+      <label for="uploadFile"><strong>Виберіть файл на пристрої:</strong></label>
+      <div style="margin-top:8px">
+        <input id="uploadFile" type="file" accept=".pdf,.mp4,.webm,.m4v,.mov,.ogg,.mp3,.wav">
+      </div>
+      <button id="upload" style="margin-top:14px; width:100%">
+        🚀 Завантажити на сервер
+      </button>
+    </div>
+
+    <div id="status" class="status">Оберіть файл для завантаження на сервер.</div>
+
+    <div class="info-card" style="margin-top:16px">
+      <h3>ℹ️ Підтримувані формати</h3>
+      <ul>
+        <li><strong>PDF документи:</strong> <code>.pdf</code></li>
+        <li><strong>Відеофайли:</strong> <code>.mp4</code>, <code>.webm</code>, <code>.m4v</code>, <code>.mov</code></li>
+        <li><strong>Аудіозаписи:</strong> <code>.mp3</code>, <code>.wav</code>, <code>.ogg</code></li>
+      </ul>
+      <p class="hint">
+        Підтримуються файли розміром до 1 ГБ. Передавання виконується без перевантаження оперативної пам'яті сервера.
+      </p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-header-row">
+      <h2>Матеріали на сервері</h2>
+      <button id="refresh" class="secondary btn-sm">🔄 Оновити</button>
+    </div>
+    <div id="files" class="files-list">
+      <div class="empty">Завантаження списку…</div>
+    </div>
+  </section>
+</div>

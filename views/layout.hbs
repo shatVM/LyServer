@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#153e75">
+  <title>{{title}} — Навчальний простір</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  {{> header}}
+  {{> nav}}
+
+  <main class="main-container">
+    {{{body}}}
+  </main>
+
+  {{> footer}}
+
+  <!-- Toast container (teacher disconnect notifications) -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <!-- Role Selection Modal -->
+  <div id="roleModal" class="modal-backdrop" style="display:none">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>Оберіть режим доступу</h2>
+        <p class="hint">Оберіть роль для налаштування зручного інтерфейсу</p>
+      </div>
+      <div class="role-grid">
+        <!-- Student Option -->
+        <div class="role-option-card student-card">
+          <div class="role-icon">👤</div>
+          <h3>Я учень</h3>
+          <p>Простий і чистий інтерфейс: перегляд дозволених матеріалів та участь у спільній демонстрації уроку.</p>
+          <div class="student-name-box">
+            <input id="modalStudentSurname" type="text" placeholder="Прізвище" autocomplete="off" maxlength="40">
+            <input id="modalStudentName" type="text" placeholder="Ім'я" autocomplete="off" maxlength="40">
+            <div id="modalStudentError" class="modal-error" style="display:none"></div>
+            <button id="btnChooseStudent" class="btn-student">Увійти як учень</button>
+          </div>
+        </div>
+        
+        <!-- Teacher Option -->
+        <div class="role-option-card teacher-card">
+          <div class="role-icon">🎓</div>
+          <h3>Я викладач</h3>
+          <p>Повний доступ: керування трансляцією, завантаження, приховування та видалення матеріалів.</p>
+          <div class="teacher-login-box">
+            <input id="modalTeacherPin" type="password" placeholder="Введіть PIN викладача" autocomplete="off">
+            <button id="btnChooseTeacher" class="btn-teacher">Увійти як викладач</button>
+            <div id="modalPinError" class="modal-error" style="display:none"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>
