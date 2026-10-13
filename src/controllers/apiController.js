@@ -1,4 +1,5 @@
 const config = require("../config");
+const path = require("node:path");
 const auth = require("../utils/auth");
 const fileService = require("../services/fileService");
 const stateService = require("../services/stateService");
@@ -46,6 +47,16 @@ class ApiController {
 
     try {
       const result = await fileService.saveFileStream(req, originalName);
+
+      // Issue #8: PDF/PPTX конвертуються у PNG-слайди одразу після завантаження
+      // (в фоні; спільний lock у slideService захищає від повторних конвертацій)
+      const ext = path.extname(result.id).toLowerCase();
+      if (config.slideExtensions.has(ext)) {
+        slideService.ensureSlides(result.id).catch(err => {
+          console.error("Конвертація слайдів (" + result.id + "):", err.message);
+        });
+      }
+
       res.status(201).json({ ok: true, id: result.id, name: result.name, size: result.size });
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Помилка завантаження");

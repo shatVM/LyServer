@@ -24,7 +24,7 @@
     <div class="upload-box" style="margin-top:16px">
       <label for="uploadFile"><strong>Виберіть файл на пристрої:</strong></label>
       <div style="margin-top:8px">
-        <input id="uploadFile" type="file" accept=".pdf,.mp4,.webm,.m4v,.mov,.ogg,.mp3,.wav">
+        <input id="uploadFile" type="file" accept=".pdf,.pptx,.mp4,.webm,.m4v,.mov,.ogg,.mp3,.wav">
       </div>
       <button id="upload" style="margin-top:14px; width:100%">
         🚀 Завантажити на сервер
@@ -37,11 +37,14 @@
       <h3>ℹ️ Підтримувані формати</h3>
       <ul>
         <li><strong>PDF документи:</strong> <code>.pdf</code></li>
+        <li><strong>Презентації:</strong> <code>.pptx</code></li>
         <li><strong>Відеофайли:</strong> <code>.mp4</code>, <code>.webm</code>, <code>.m4v</code>, <code>.mov</code></li>
         <li><strong>Аудіозаписи:</strong> <code>.mp3</code>, <code>.wav</code>, <code>.ogg</code></li>
       </ul>
       <p class="hint">
-        Підтримуються файли розміром до 1 ГБ. Передавання виконується без перевантаження оперативної пам'яті сервера.
+        PDF та PPTX після завантаження автоматично конвертуються у PNG-слайди —
+        учні отримують зображення, що відкриваються на будь-якому пристрої.
+        Підтримуються файли розміром до 1 ГБ.
       </p>
     </div>
   </section>
