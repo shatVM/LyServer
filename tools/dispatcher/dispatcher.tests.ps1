@@ -42,6 +42,21 @@ New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 
 $repoPath = "$HOME\Documents\LyServer"
 
+# === T0: the harness refuses to run against a dirty repository ============
+#     (Two earlier runs produced false FAILs when the harness itself was
+#      launched with uncommitted changes; commit or stash first.)
+$preStatus = & git -C $repoPath status --porcelain | Out-String
+if (-not [string]::IsNullOrWhiteSpace($preStatus)) {
+    Write-Host 'FAIL T0: repository working tree is NOT clean. Commit or stash first:' -ForegroundColor Red
+    Write-Host $preStatus -ForegroundColor Red
+    exit 1
+}
+Test-Case 'T0 repository tree clean before the suite' $true 'precondition enforced'
+
+# === Snapshot of GitHub state BEFORE the suite (used by T10) ==============
+$prsBefore = (& gh pr list -R shatVM/LyServer --state all --json number,title,url | Out-String)
+$issuesBefore = (& gh issue list -R shatVM/LyServer --state open --json number,title,labels | Out-String)
+
 function New-TestConfig {
     # Builds a valid config psd1 in $testRoot, with optional overrides.
     param([hashtable]$Overrides = @{})
@@ -89,7 +104,9 @@ Set-Content -LiteralPath $echoScript -Encoding UTF8 -Value @'
 param([string]$OutFile)
 [System.IO.File]::WriteAllLines($OutFile, $args, (New-Object System.Text.UTF8Encoding($false)))
 '@
-$expectedArgs = @('plain', 'with space', 'quo"te', 'trail\', 'back\slash', 'mix \"quoted\" tail', 'Кирилиця перевірка', 'tab	value')
+# T1 covers the empty argument: it must round-trip as an empty string,
+# not get lost when the command line is assembled.
+$expectedArgs = @('plain', '', 'with space', 'quo"te', 'trail\', 'back\slash', 'mix \"quoted\" tail', 'Кирилиця перевірка', 'tab	value')
 $outFile = Join-Path $testRoot 'args-out.txt'
 $run = Invoke-Native -Tool 'powershell.exe' -ArgumentList (@('-NoProfile', '-File', $echoScript, $outFile) + $expectedArgs)
 $actualArgs = if (Test-Path $outFile) { @([IO.File]::ReadAllLines($outFile)) } else { @() }
@@ -97,7 +114,7 @@ $t1ok = ($run.ExitCode -eq 0) -and ($actualArgs.Count -eq $expectedArgs.Count)
 if ($t1ok) {
     for ($i = 0; $i -lt $expectedArgs.Count; $i++) { if ($actualArgs[$i] -cne $expectedArgs[$i]) { $t1ok = $false; break } }
 }
-Test-Case 'T1 quoting round-trip (space/quotes/backslash/Cyrillic/tab)' $t1ok ("received {0}/{1} args" -f $actualArgs.Count, $expectedArgs.Count)
+Test-Case 'T1 quoting round-trip (empty/space/quotes/backslash/Cyrillic/tab)' $t1ok ("received {0}/{1} args" -f $actualArgs.Count, $expectedArgs.Count)
 
 # === T2: PONG answer exactness (unit on the real function)
 $pongCases = @(
@@ -173,19 +190,24 @@ $cfgOk = New-TestConfig
 $run = Invoke-Dispatcher -ConfigPath $cfgOk
 Test-Case 'T9 full preview run -> exit 0' ($run.ExitCode -eq 0 -and $run.Output -match 'Preview completed') ("exit {0}" -f $run.ExitCode)
 
-# === T10: GitHub state unchanged by the whole suite
-$issuesNow = @(((& gh issue list -R shatVM/LyServer --state open --json number,labels) | Out-String) | ConvertFrom-Json | ForEach-Object { $_ })
-$prsNow = (& gh pr list -R shatVM/LyServer --state all --json number | Out-String)
+# === T10: GitHub state unchanged by the whole suite.
+#     Full lists captured BEFORE the suite (top of this file) are compared
+#     with the current state - not just spot checks on issue numbers.
+$issuesAfter = (& gh issue list -R shatVM/LyServer --state open --json number,title,labels | Out-String)
+$prsAfter = (& gh pr list -R shatVM/LyServer --state all --json number,title,url | Out-String)
+$issuesNow = @(($issuesAfter | ConvertFrom-Json) | ForEach-Object { $_ })
 function Get-LabelNames($issue) { return @($issue.labels | ForEach-Object { $_.name }) }
 $issue3 = @($issuesNow | Where-Object { $_.number -eq 3 })
 $issue2 = @($issuesNow | Where-Object { $_.number -eq 2 })
-$labelsOk = ($issue3.Count -eq 1 -and (Get-LabelNames $issue3[0]) -contains 'in-progress' -and
+$labelsSanity = ($issue3.Count -eq 1 -and (Get-LabelNames $issue3[0]) -contains 'in-progress' -and
              $issue2.Count -eq 1 -and (Get-LabelNames $issue2[0]) -contains 'ready-for-opencode')
-$prsOk = ($prsNow -match '"number":4' -and $prsNow -notmatch '"number":5')
-Test-Case 'T10a GitHub issue labels unchanged' $labelsOk '#3 in-progress, #2 ready'
-Test-Case 'T10b no new PRs created (only pre-existing #4)' $prsOk ''
+$issuesUnchanged = ($issuesBefore -ceq $issuesAfter)
+$prsUnchanged = ($prsBefore -ceq $prsAfter)
+Test-Case 'T10a full open-issue list unchanged (before vs after)' $issuesUnchanged 'exact string comparison of JSON'
+Test-Case 'T10b full PR list unchanged (before vs after)' $prsUnchanged 'exact string comparison of JSON'
+Test-Case 'T10c label sanity: #3 in-progress, #2 ready' $labelsSanity ''
 $gitStatus = & git -C $repoPath status --porcelain | Out-String
-Test-Case 'T10c repository working tree clean' ([string]::IsNullOrWhiteSpace($gitStatus)) 'no probe/temp files left'
+Test-Case 'T10d repository working tree clean' ([string]::IsNullOrWhiteSpace($gitStatus)) 'no probe/temp files left'
 
 # === T11: Test-PathInside boundary rules (unit on the real function)
 $pathCases = @(
@@ -257,6 +279,44 @@ $iDisc = Get-LineIndex $logTextT 'Found \d+ candidate'
 $iPrev = Get-LineIndex $logTextT 'Preview completed'
 $orderOk = ($iTree -ge 0 -and $iPing -gt $iTree -and $iPong -gt $iPing -and $iDisc -gt $iPong -and $iPrev -gt $iDisc)
 Test-Case 'T13 full run order: tree -> ping -> pong -> discovery -> preview' $orderOk ("lines {0}<{1}<{2}<{3}<{4}" -f $iTree, $iPing, $iPong, $iDisc, $iPrev)
+
+# === T14: REAL .cmd wrapper launch through cmd.exe /d /c
+#     The wrapper mirrors real npm-style .cmd shims: it forwards %* to
+#     powershell.exe -File echo-args.ps1. This exercises cmd.exe
+#     metacharacter parsing (&, parens), path-with-space quoting and a
+#     quoted argument end-to-end - CommandLineToArgvW rules alone do not
+#     cover cmd.exe shell parsing, so this test is mandatory.
+$wrapDir = Join-Path $testRoot 'wrap dir'   # space in the path on purpose
+New-Item -ItemType Directory -Path $wrapDir -Force | Out-Null
+$wrapCmd = Join-Path $wrapDir 'fakecmd.cmd'
+Set-Content -LiteralPath $wrapCmd -Encoding ASCII -Value @"
+@echo off
+powershell.exe -NoProfile -File "$echoScript" %*
+"@
+$env:Path = "$wrapDir;$env:Path"
+$cmdOutFile = Join-Path $testRoot 'cmd-args-out.txt'
+$cmdArgs = @($cmdOutFile, 'with space', 'a&b', 'x(y)', 'quo"te', 'Кирилиця')
+$run = Invoke-Native -Tool 'fakecmd.cmd' -ArgumentList $cmdArgs
+$cmdActual = if (Test-Path $cmdOutFile) { @([IO.File]::ReadAllLines($cmdOutFile)) } else { @() }
+$cmdOk = ($run.ExitCode -eq 0) -and ($cmdActual.Count -eq ($cmdArgs.Count - 1))
+if ($cmdOk) {
+    $expectedTail = @($cmdArgs | Select-Object -Skip 1)
+    for ($i = 0; $i -lt $expectedTail.Count; $i++) { if ($cmdActual[$i] -cne $expectedTail[$i]) { $cmdOk = $false; break } }
+}
+Test-Case 'T14 .cmd wrapper round-trip (space/&/parens/quote/Cyrillic, dir with space)' $cmdOk ("received {0}/{1} args" -f $cmdActual.Count, ($cmdArgs.Count - 1))
+
+# === T15: Resolve-Command handles every supported command type explicitly
+$rExe = Resolve-Command -Name 'powershell.exe'
+$rCmd = Resolve-Command -Name 'fakecmd.cmd'
+$ps1Wrap = Join-Path $wrapDir 'fakeps.ps1'
+Set-Content -LiteralPath $ps1Wrap -Encoding UTF8 -Value '"ps1-wrapper-ran"'
+$t15a = ($null -ne $rExe -and $rExe.FilePath -match 'powershell\.exe$' -and $rExe.PrefixArgs.Count -eq 0)
+$t15b = ($null -ne $rCmd -and $rCmd.FilePath -eq 'cmd.exe' -and ($rCmd.PrefixArgs -join ' ') -eq ('/d /c ' + $wrapCmd))
+$rPs1 = Resolve-Command -Name 'fakeps'
+$t15c = ($null -ne $rPs1 -and $rPs1.FilePath -eq 'powershell.exe' -and ($rPs1.PrefixArgs -contains '-File') -and ($rPs1.PrefixArgs -contains $ps1Wrap))
+Test-Case 'T15a Resolve-Command .exe type (direct, no prefix)' $t15a ''
+Test-Case 'T15b Resolve-Command .cmd type (cmd.exe /d /c)' $t15b ''
+Test-Case 'T15c Resolve-Command .ps1 type (powershell -File)' $t15c ''
 
 # --- summary --------------------------------------------------------------
 $failed = @($script:Results | Where-Object { -not $_.Passed })

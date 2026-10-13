@@ -57,15 +57,21 @@ function Stop-Dispatcher {
 
 # ---------------------------------------------------------------------------
 # Windows command-line argument escaping (CommandLineToArgvW rules):
+#   - empty arguments are emitted as "" so they survive argument parsing;
 #   - backslashes are literal unless followed by a double quote;
 #   - a run of backslashes before a double quote is doubled, the quote is
 #     escaped with a backslash;
 #   - trailing backslashes inside a quoted argument are doubled.
+#   - arguments containing cmd.exe metacharacters (& | < > ^ ( )) are quoted
+#     as well: .cmd wrappers are launched via `cmd /d /c`, where
+#     CommandLineToArgvW rules alone do NOT protect against shell parsing.
+#     Known limitation: % expansion inside .cmd files is not prevented by
+#     quoting; .cmd wrappers must not forward such arguments unchecked.
 # ---------------------------------------------------------------------------
 function ConvertTo-WinArg {
     param([string]$Value)
-    if ($null -eq $Value) { return '""' }
-    if ($Value -notmatch '[\s"]') { return $Value }
+    if ([string]::IsNullOrEmpty($Value)) { return '""' }
+    if ($Value -notmatch '[\s"&|<>^()]') { return $Value }
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append('"')
     $pendingBackslashes = 0
@@ -93,16 +99,23 @@ function ConvertTo-WinArg {
 # ---------------------------------------------------------------------------
 function Resolve-Command {
     param([Parameter(Mandatory)][string]$Name)
-    $cmd = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue
-    if (-not $cmd) { return $null }
-    # Application commands: take the first resolution result only
-    $src = @($cmd)[0].Source
+    # Supported types are requested EXPLICITLY:
+    #   Application    - real executables (.exe);
+    #   ExternalScript - .ps1 shims (e.g. npm's opencode.ps1). A plain
+    #                    -CommandType Application would exclude them and
+    #                    make the .ps1 branch below unreachable.
+    $candidates = @(Get-Command $Name -All -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandType -eq 'Application' -or $_.CommandType -eq 'ExternalScript' })
+    if ($candidates.Count -eq 0) { return $null }
+    # Take the first resolution result only (PATH order)
+    $src = $candidates[0].Source
     switch -Regex ($src) {
         '\.ps1$' {
             return @{ FilePath = 'powershell.exe'; PrefixArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $src) }
         }
         '\.(cmd|bat)$' {
-            return @{ FilePath = 'cmd.exe'; PrefixArgs = @('/c', $src) }
+            # /d disables registry AutoRun scripts for this cmd.exe instance
+            return @{ FilePath = 'cmd.exe'; PrefixArgs = @('/d', '/c', $src) }
         }
         default {
             return @{ FilePath = $src; PrefixArgs = @() }
