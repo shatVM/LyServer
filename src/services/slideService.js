@@ -202,6 +202,10 @@ try {
 // Public API
 // ---------------------------------------------------------------------------
 
+// Issue #3: карта «триваючих» конвертацій. Другий і подальші запити щодо того
+// самого файлу отримують той самий проміс замість запуску повторної конвертації.
+const inFlight = new Map();
+
 /**
  * Ensure slides exist for a file. Returns manifest { pageCount, generatedAt, source }.
  * Checks mtime of source file vs manifest – re-converts if source is newer.
@@ -220,22 +224,33 @@ async function ensureSlides(name) {
     }
   }
 
+  // Конвертація цього файлу вже виконується — чекаємо на неї
+  const pending = inFlight.get(name);
+  if (pending) return pending;
+
   const ext = path.extname(name).toLowerCase();
-  if (ext === ".pdf") {
-    return convertPdf(name);
-  } else if (ext === ".pptx") {
-    return convertPptx(name);
-  } else {
-    throw Object.assign(new Error("Конвертація не підтримується для цього типу файлу"), { status: 400 });
-  }
+  const run = () => {
+    if (ext === ".pdf") return convertPdf(name);
+    if (ext === ".pptx") return convertPptx(name);
+    return Promise.reject(
+      Object.assign(new Error("Конвертація не підтримується для цього типу файлу"), { status: 400 })
+    );
+  };
+
+  const task = run().finally(() => inFlight.delete(name));
+  inFlight.set(name, task);
+  return task;
 }
 
 /**
  * Get manifest info without triggering conversion.
  * Returns null if slides not yet generated.
+ * Якщо конвертація зараз виконується — { converting: true }.
  */
 function getManifest(name) {
-  return readManifest(name);
+  const manifest = readManifest(name);
+  if (manifest) return manifest;
+  return inFlight.has(name) ? { converting: true } : null;
 }
 
 /** Get absolute path to a specific page PNG (1-indexed). */

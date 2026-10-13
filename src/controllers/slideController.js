@@ -4,9 +4,13 @@
  * :name  — file name stored in materials/ (e.g. "lecture.pdf" or "slides.pptx")
  * :page  — 1-indexed page number
  *
- * Returns 202 if slides are not ready yet (triggering background conversion).
+ * Перший запит сторінки неявно запускає конвертацію (спільний lock у slideService),
+ * тому учні отримують слайди без окремого виклику /api/slides/prepare.
  */
+const fs = require("node:fs");
 const slideService = require("../services/slideService");
+const fileService = require("../services/fileService");
+const auth = require("../utils/auth");
 const config = require("../config");
 const path = require("node:path");
 
@@ -27,6 +31,17 @@ class SlideController {
     const ext = path.extname(name).toLowerCase();
     if (!config.slideExtensions.has(ext)) {
       return res.status(400).send("Файл цього типу не підтримує перегляд слайдів");
+    }
+
+    const filePath = fileService.getFilePath(name);
+    if (!filePath || !fs.existsSync(filePath)) {
+      return res.status(404).send("Файл не знайдено");
+    }
+
+    // Issue #4: приховані файли недоступні учням (навіть за відомим id),
+    // включаючи запуск конвертації
+    if (!fileService.canAccess(name, auth.isTeacher(req))) {
+      return res.status(404).send("Файл не знайдено");
     }
 
     try {
@@ -56,4 +71,3 @@ class SlideController {
 }
 
 module.exports = new SlideController();
-

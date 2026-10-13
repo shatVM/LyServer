@@ -108,6 +108,7 @@ class ApiController {
     if (!file) return res.status(400).send("Не вказано file");
     const manifest = slideService.getManifest(file);
     if (!manifest) return res.status(404).json({ ready: false });
+    if (manifest.converting) return res.json({ ready: false, converting: true });
     res.json({ ready: true, ...manifest });
   }
 }

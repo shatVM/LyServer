@@ -189,6 +189,17 @@ class FileService {
   getFilePath(name) {
     return getFilePath(name);
   }
+
+  /**
+   * Issue #4: чи доступний файл для ролі.
+   * Приховані файли бачить лише викладач (за PIN).
+   */
+  canAccess(name, isTeacher = false) {
+    if (isTeacher) return true;
+    const metadata = this.getMetadata();
+    const hiddenSet = new Set(metadata.hidden || []);
+    return !hiddenSet.has(name);
+  }
 }
 
 module.exports = new FileService();
