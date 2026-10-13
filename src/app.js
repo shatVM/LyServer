@@ -24,6 +24,8 @@ hbs.registerHelper("eq", (a, b) => a === b);
 
 // Middleware for parsing JSON requests (used by /api/control)
 app.use(express.json());
+// Issue #7: navigator.sendBeacon надсилає form-data
+app.use(express.urlencoded({ extended: true }));
 
 // Serve static assets from public/ directory
 app.use(express.static(path.join(__dirname, "..", "public")));
