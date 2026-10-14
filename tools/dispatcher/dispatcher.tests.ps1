@@ -41,6 +41,9 @@ $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('lyserver-dispatcher-tests-' +
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 
 $repoPath = "$HOME\Documents\LyServer"
+# Single source of truth for the repository under test; Get-GhJsonSnapshot
+# reads $script:GitHubRepo, so the suite cannot silently switch repos.
+$GitHubRepo = 'shatVM/LyServer'
 
 # === T0: the harness refuses to run against a dirty repository ============
 #     (Two earlier runs produced false FAILs when the harness itself was
@@ -54,8 +57,85 @@ if (-not [string]::IsNullOrWhiteSpace($preStatus)) {
 Test-Case 'T0 repository tree clean before the suite' $true 'precondition enforced'
 
 # === Snapshot of GitHub state BEFORE the suite (used by T10) ==============
-$prsBefore = (& gh pr list -R shatVM/LyServer --state all --json number,title,url | Out-String)
-$issuesBefore = (& gh issue list -R shatVM/LyServer --state open --json number,title,labels | Out-String)
+# Get-GhJsonSnapshot THROWS on gh failure, empty output or invalid JSON,
+# so a broken snapshot can never be mistaken for "state unchanged".
+function Get-GhJsonSnapshot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Issues', 'PullRequests')]
+        [string]$Kind
+    )
+
+    if ($Kind -eq 'Issues') {
+        $raw = & gh issue list `
+            --repo $script:GitHubRepo `
+            --state open `
+            --limit 1000 `
+            --json number,title,labels 2>&1
+    }
+    else {
+        $raw = & gh pr list `
+            --repo $script:GitHubRepo `
+            --state all `
+            --limit 1000 `
+            --json number,title,url 2>&1
+    }
+
+    $exitCode = $LASTEXITCODE
+
+    if ($exitCode -ne 0) {
+        throw "gh $Kind snapshot failed with exit code $exitCode. Output: $($raw -join "`n")"
+    }
+
+    $jsonText = $raw -join "`n"
+
+    if ([string]::IsNullOrWhiteSpace($jsonText)) {
+        throw "gh $Kind snapshot returned empty output."
+    }
+
+    try {
+        $items = @($jsonText | ConvertFrom-Json -ErrorAction Stop)
+    }
+    catch {
+        throw "gh $Kind snapshot returned invalid JSON: $($_.Exception.Message)"
+    }
+
+    if ($Kind -eq 'Issues') {
+        $normalized = @(
+            foreach ($item in $items) {
+                [PSCustomObject]@{
+                    number = [int]$item.number
+                    title  = [string]$item.title
+                    labels = @(
+                        $item.labels |
+                            ForEach-Object { [string]$_.name } |
+                            Sort-Object
+                    )
+                }
+            }
+        )
+    }
+    else {
+        $normalized = @(
+            foreach ($item in $items) {
+                [PSCustomObject]@{
+                    number = [int]$item.number
+                    title  = [string]$item.title
+                    url    = [string]$item.url
+                }
+            }
+        )
+    }
+
+    $normalized = @(
+        $normalized | Sort-Object number
+    )
+
+    return ConvertTo-Json -InputObject @($normalized) -Depth 10 -Compress
+}
+
+$prsBefore = Get-GhJsonSnapshot -Kind PullRequests
+$issuesBefore = Get-GhJsonSnapshot -Kind Issues
 
 function New-TestConfig {
     # Builds a valid config psd1 in $testRoot, with optional overrides.
@@ -191,27 +271,29 @@ $run = Invoke-Dispatcher -ConfigPath $cfgOk
 Test-Case 'T9 full preview run -> exit 0' ($run.ExitCode -eq 0 -and $run.Output -match 'Preview completed') ("exit {0}" -f $run.ExitCode)
 
 # === T10: GitHub state unchanged by the whole suite.
-#     SCOPE OF THIS CHECK (be precise): it compares full JSON listings of
+#     SCOPE OF THIS CHECK (be precise): it compares normalized JSON listings
 #       (a) OPEN issues with fields number,title,labels, and
 #       (b) PRs in ALL states with fields number,title,url,
-#     captured before the suite vs after it, as exact strings.
+#     captured before the suite vs after it, via Get-GhJsonSnapshot (which
+#     throws on gh failure, empty output or invalid JSON, and sorts items
+#     by number and labels by name so the comparison is order-insensitive).
 #     It does NOT snapshot: closed issues, issue bodies/comments, PR
 #     diff/review state, labels metadata, workflow runs, or any repo
 #     content beyond the git working tree check in T10d. It proves the
 #     suite created no new PRs and changed no open issues/labels - it is
 #     not a byte-level snapshot of the entire GitHub account state.
-$issuesAfter = (& gh issue list -R shatVM/LyServer --state open --json number,title,labels | Out-String)
-$prsAfter = (& gh pr list -R shatVM/LyServer --state all --json number,title,url | Out-String)
+$issuesAfter = Get-GhJsonSnapshot -Kind Issues
+$prsAfter = Get-GhJsonSnapshot -Kind PullRequests
 $issuesNow = @(($issuesAfter | ConvertFrom-Json) | ForEach-Object { $_ })
-function Get-LabelNames($issue) { return @($issue.labels | ForEach-Object { $_.name }) }
+function Get-LabelNames($issue) { return @($issue.labels | ForEach-Object { $_ }) }
 $issue3 = @($issuesNow | Where-Object { $_.number -eq 3 })
 $issue2 = @($issuesNow | Where-Object { $_.number -eq 2 })
 $labelsSanity = ($issue3.Count -eq 1 -and (Get-LabelNames $issue3[0]) -contains 'in-progress' -and
              $issue2.Count -eq 1 -and (Get-LabelNames $issue2[0]) -contains 'ready-for-opencode')
 $issuesUnchanged = ($issuesBefore -ceq $issuesAfter)
 $prsUnchanged = ($prsBefore -ceq $prsAfter)
-Test-Case 'T10a full open-issue list unchanged (before vs after)' $issuesUnchanged 'exact string comparison of JSON'
-Test-Case 'T10b full PR list unchanged (before vs after)' $prsUnchanged 'exact string comparison of JSON'
+Test-Case 'T10a open Issues unchanged (normalized snapshot, before vs after)' $issuesUnchanged 'gh exit code + JSON validity enforced'
+Test-Case 'T10b PRs unchanged (normalized snapshot, before vs after)' $prsUnchanged 'gh exit code + JSON validity enforced'
 Test-Case 'T10c label sanity: #3 in-progress, #2 ready' $labelsSanity ''
 $gitStatus = & git -C $repoPath status --porcelain | Out-String
 Test-Case 'T10d repository working tree clean' ([string]::IsNullOrWhiteSpace($gitStatus)) 'no probe/temp files left'

@@ -168,11 +168,13 @@ function Invoke-Native {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $resolved.FilePath
     if ($resolved.ContainsKey('UseCmdQuoting')) {
-        # cmd.exe wrapper: build /d /c ""script" "arg1" "arg2"" - see
+        # cmd.exe wrapper: build /d /s /c ""script" "arg1" "arg2"" - see
         # ConvertTo-WinCmdArg for why CommandLineToArgvW quoting fails here.
+        # /s makes cmd strip exactly the outer quote pair (predictable
+        # handling of the surrounding quotes); /d disables registry AutoRun.
         $core = @($allArgs | Select-Object -Skip 2)   # skip the fixed /d /c
         $quoted = ($core | ForEach-Object { ConvertTo-WinCmdArg $_ }) -join ' '
-        $psi.Arguments = '/d /c "' + $quoted + '"'
+        $psi.Arguments = '/d /s /c "' + $quoted + '"'
     }
     else {
         $psi.Arguments = ($allArgs | ForEach-Object { ConvertTo-WinArg $_ }) -join ' '
