@@ -2,3 +2,5 @@ node_modules/
 materials/
 .DS_Store
 Thumbs.db
+# LyServer dispatcher local config (paths only, no secrets)
+tools/dispatcher/config.psd1
