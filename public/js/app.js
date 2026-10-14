@@ -70,15 +70,101 @@ function ensureStudentId() {
 }
 
 /** Send presence heartbeat to server */
-async function sendHeartbeat() {
+async function sendHeartbeat(activeOverride) {
   if (role !== "student" || !studentDisplayName) return;
+  const active = activeOverride !== undefined
+    ? activeOverride
+    : document.visibilityState !== "hidden";
   try {
     await fetch("/api/presence/heartbeat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ studentId: ensureStudentId(), name: studentDisplayName })
+      body: JSON.stringify({ studentId: ensureStudentId(), name: studentDisplayName, active })
     });
   } catch { /* silent */ }
+}
+
+/**
+ * Негайно повідомити сервер про зміну активності сеансу (Issue #7).
+ * sendBeacon працює навіть під час закриття вкладки / засинання пристрою.
+ */
+function reportActivityChange(active) {
+  if (role !== "student" || !studentDisplayName) return;
+  const payload = new URLSearchParams({
+    studentId: ensureStudentId(),
+    name: studentDisplayName,
+    active: String(active)
+  });
+  try {
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon("/api/presence/heartbeat", payload);
+      return;
+    }
+  } catch { /* fallback нижче */ }
+  sendHeartbeat(active);
+}
+
+// ---------------------------------------------------------------------------
+// Presence polling for teacher (Issue #7)
+// ---------------------------------------------------------------------------
+let prevPresence = {};
+
+/** Опитування списку присутності викладачем: тости про неактивних учнів */
+async function pollPresence() {
+  if (role !== "teacher") return;
+  try {
+    const headers = {};
+    if (pin) headers["X-Portal-Pin"] = pin;
+    const response = await api("/api/presence/students", { headers });
+    const list = await response.json();
+
+    const prev = prevPresence;
+    const next = {};
+    for (const s of list) next[s.id] = s;
+
+    // Тости лише за наявності попереднього стану (щоб не спамити при старті)
+    for (const s of list) {
+      const before = prev[s.id];
+      if (!before) continue;
+      if (before.online && !s.online) {
+        showToast("⚠️ Учень «" + s.name + "»: сеанс неактивний", "warning", 8000);
+      } else if (!before.online && s.online) {
+        showToast("✅ Учень «" + s.name + "» повернувся", "success");
+      }
+    }
+    prevPresence = next;
+
+    renderStudentsList(list);
+  } catch { /* silent */ }
+}
+
+/** Рендер списку учнів на сторінці «Учні» */
+function renderStudentsList(list) {
+  const root = $("studentsList");
+  if (!root) return;
+
+  const onlineCount = list.filter(s => s.online).length;
+  if ($("studentsOnlineCount")) {
+    $("studentsOnlineCount").style.display = list.length ? "" : "none";
+    $("studentsOnlineCount").textContent = "● " + onlineCount + " з " + list.length + " онлайн";
+  }
+
+  root.replaceChildren();
+  if (!list.length) {
+    root.innerHTML = '<div class="empty">Ще ніхто не підключився. Нехай учні вкажуть своє прізвище та ім\'я при вході.</div>';
+    return;
+  }
+
+  for (const s of list) {
+    const item = document.createElement("div");
+    item.className = "student-row" + (s.online ? "" : " student-offline");
+    const badgeClass = s.online ? "badge-online" : "badge-offline";
+    const badgeText = s.online ? "● Онлайн" : "○ Неактивний";
+    item.innerHTML =
+      '<span class="student-name">' + esc(s.name) + "</span>" +
+      '<span class="badge ' + badgeClass + '">' + badgeText + "</span>";
+    root.append(item);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +222,8 @@ function renderSlideImage(name, page, totalPages) {
     const ext = extOf(name).toUpperCase();
     $("pageLabel").textContent = ext.slice(1) + ": слайд " + page + " / " + totalPages;
   }
+  // Issue #9: поле номера слайду синхронізується з поточним сторінкою
+  if ($("pageInput")) $("pageInput").value = page;
 
   // Build or reuse <img>
   let img = viewer.querySelector("img.slide-img");
@@ -168,13 +256,27 @@ async function prepareAndShowSlides(name, page, onReady) {
   }
 
   try {
-    const res = await api("/api/slides/prepare", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file: name })
-    });
-    const manifest = await res.json();
-    onReady(manifest.pageCount);
+    let pageCount = null;
+    if (role === "teacher") {
+      // Викладач може явно запустити конвертацію (Issue #2: prepare — тільки для викладача)
+      const res = await api("/api/slides/prepare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file: name })
+      });
+      pageCount = (await res.json()).pageCount;
+    } else {
+      // Учень: перший запит PNG сам запускає конвертацію на сервері,
+      // усі клієнти чекають одну конвертацію (спільний lock, Issue #3)
+      const probe = await fetch(slideUrl(name, page));
+      if (!probe.ok) throw new Error(await probe.text());
+      const infoRes = await fetch("/api/slides/info?file=" + encodeURIComponent(name));
+      if (infoRes.ok) {
+        const info = await infoRes.json();
+        if (info.ready) pageCount = info.pageCount;
+      }
+    }
+    onReady(pageCount || 1);
   } catch (e) {
     if (viewer) {
       viewer.innerHTML = '<div class="empty">❌ Помилка конвертації: ' + esc(e.message) + '</div>';
@@ -232,14 +334,8 @@ function openRoleModal() {
     if ($("modalPinError")) $("modalPinError").style.display = "none";
     if ($("modalTeacherPin")) $("modalTeacherPin").value = "";
     if ($("modalStudentError")) $("modalStudentError").style.display = "none";
-    // Pre-fill student name if already set
-    if ($("modalStudentSurname")) $("modalStudentSurname").value = "";
-    if ($("modalStudentName")) $("modalStudentName").value = "";
-    if (studentDisplayName) {
-      const parts = studentDisplayName.split(" ");
-      if ($("modalStudentSurname")) $("modalStudentSurname").value = parts[0] || "";
-      if ($("modalStudentName")) $("modalStudentName").value = parts.slice(1).join(" ") || "";
-    }
+    // Pre-fill full name if already set (Issue #6: одне поле для ПІБ)
+    if ($("modalStudentName")) $("modalStudentName").value = studentDisplayName || "";
   }
 }
 
@@ -278,25 +374,28 @@ function setRole(newRole, newPin = "", newName = "") {
   refreshFiles();
 }
 
+// Issue #6: одне поле для прізвища та імені
+const NAME_PART_RE = /^[А-Яа-яЄєІіЇїҐґA-Za-z'’\-]+$/;
+
 // Student login button
 if ($("btnChooseStudent")) {
   $("btnChooseStudent").onclick = () => {
-    const surname = ($("modalStudentSurname") ? $("modalStudentSurname").value.trim() : "");
-    const firstName = ($("modalStudentName") ? $("modalStudentName").value.trim() : "");
-    if (!surname || !firstName) {
+    const fullName = ($("modalStudentName") ? $("modalStudentName").value.trim() : "");
+    const parts = fullName.split(/\s+/).filter(Boolean);
+    const valid = parts.length >= 2 && parts.length <= 4 && parts.every(p => NAME_PART_RE.test(p));
+    if (!valid) {
       if ($("modalStudentError")) {
-        $("modalStudentError").textContent = "Будь ласка, введіть Прізвище та Ім'я.";
+        $("modalStudentError").textContent = "Введіть прізвище та ім'я (2-4 слова, літери, дефіс або апостроф). Напр. Коваленко Олена";
         $("modalStudentError").style.display = "block";
       }
       return;
     }
-    const fullName = surname + " " + firstName;
-    setRole("student", "", fullName);
+    setRole("student", "", parts.join(" "));
   };
 }
 
-// Enter key in student name fields
-["modalStudentSurname", "modalStudentName"].forEach(id => {
+// Enter key in student name field
+["modalStudentName"].forEach(id => {
   if ($(id)) {
     $(id).addEventListener("keydown", e => {
       if (e.key === "Enter") $("btnChooseStudent").click();
@@ -511,12 +610,14 @@ function displayLocalFile(fileId) {
   $("viewer").append(video);
 }
 
-function stepLocalPage(delta) {
+function setLocalPage(page) {
   if (!localCurrentFile || !SLIDE_EXTS.has(extOf(localCurrentFile))) return;
-  const next = Math.max(1, Math.min(localPageCount, localPageNum + delta));
-  if (next === localPageNum) return;
-  localPageNum = next;
-  renderSlideImage(localCurrentFile, localPageNum, localPageCount);
+  localPageNum = Math.max(1, Math.min(localPageCount || 1, page));
+  renderSlideImage(localCurrentFile, localPageNum, localPageCount || 1);
+}
+
+function stepLocalPage(delta) {
+  setLocalPage(localPageNum + delta);
 }
 
 // ---------------------------------------------------------------------------
@@ -622,13 +723,18 @@ async function sendVideoState(playing) {
   } catch (e) { console.error("Video sync:", e.message); }
 }
 
-async function changeSharedPage(delta) {
+async function setSharedPage(page) {
   if (role !== "teacher" || !sharedState || !sharedState.file) return;
-  const page = Math.max(1, Math.min(demoPageCount || 9999, (sharedState.page || 1) + delta));
+  const next = Math.max(1, Math.min(demoPageCount || 9999, page));
   try {
-    await postControl({ file: sharedState.file, kind: "slides", page });
+    await postControl({ file: sharedState.file, kind: "slides", page: next });
     await pollState(true);
-  } catch (e) { alert("Не вдалося змінити слайд: " + e.message); }
+  } catch (e) { alert("Не вдалося перейти до слайду: " + e.message); }
+}
+
+async function changeSharedPage(delta) {
+  if (!sharedState || !sharedState.file) return;
+  await setSharedPage((sharedState.page || 1) + delta);
 }
 
 async function pollState(force = false) {
@@ -714,6 +820,32 @@ if ($("nextPage")) {
   };
 }
 
+// Issue #9: перехід на потрібний слайд за номером з клавіатури
+function gotoPageInput() {
+  const input = $("pageInput");
+  if (!input) return;
+  const target = parseInt(input.value, 10);
+  if (!Number.isFinite(target)) {
+    setStatus("Введіть номер сторінки.");
+    return;
+  }
+  const count = isDemoPage ? (demoPageCount || 1) : (localPageCount || 1);
+  const page = Math.max(1, Math.min(count, target));
+  input.value = page;
+  if (isDemoPage) setSharedPage(page);
+  else setLocalPage(page);
+}
+
+if ($("gotoPage")) $("gotoPage").onclick = gotoPageInput;
+if ($("pageInput")) {
+  $("pageInput").addEventListener("keydown", e => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      gotoPageInput();
+    }
+  });
+}
+
 if ($("refresh")) $("refresh").onclick = refreshFiles;
 if ($("showShared")) $("showShared").onclick = () => pollState(true);
 
@@ -739,11 +871,14 @@ if ($("upload") && $("uploadFile")) {
 
       const uploadedId = uploadResult.id || file.name;
 
-      // Auto-convert slide files in the background after upload
+      // Issue #8: сервер конвертує PDF/PPTX у PNG одразу після завантаження;
+      // клієнт лише чекає завершення (спільний lock на сервері)
       if (SLIDE_EXTS.has(extOf(uploadedId))) {
-        setStatus("Файл завантажено: " + file.name + " — генерація слайдів у фоні…");
+        setStatus("Файл завантажено: " + file.name + " — конвертація слайдів у фоні…");
         prepareSlidesBg(uploadedId).then(() => {
-          setStatus("Файл готовий до демонстрації: " + file.name);
+          setStatus("✅ Файл готовий до демонстрації: " + file.name);
+        }).catch(() => {
+          setStatus("⚠️ Файл завантажено, але конвертація слайдів ще триває. Натисніть «Оновити».");
         });
       }
 
@@ -770,4 +905,19 @@ if (!role) {
 if (isDemoPage) {
   pollState(true);
   setInterval(() => pollState(false), 1000);
+}
+
+// Issue #7: учень повідомляє сервер про активність свого сеансу
+if (role === "student" && studentDisplayName) {
+  document.addEventListener("visibilitychange", () => {
+    reportActivityChange(document.visibilityState !== "hidden");
+  });
+  window.addEventListener("pagehide", () => reportActivityChange(false));
+  setInterval(() => sendHeartbeat(), 5000);
+}
+
+// Issue #7: викладач опитує список присутності та отримує тости
+if (role === "teacher") {
+  pollPresence();
+  setInterval(pollPresence, 5000);
 }

@@ -1,10 +1,33 @@
+const os = require("node:os");
 const app = require("./src/app");
 const config = require("./src/config");
+
+/** Локальні IPv4-адреси для відображення адреси порталу в мережі */
+function lanAddresses() {
+  const out = [];
+  for (const interfaces of Object.values(os.networkInterfaces())) {
+    for (const i of interfaces || []) {
+      if (i.family === "IPv4" && !i.internal) out.push(i.address);
+    }
+  }
+  return out;
+}
 
 app.listen(config.port, config.host, () => {
   console.log("Навчальний портал запущено");
   console.log("На ПК: http://localhost:" + config.port);
-  console.log("У локальній мережі: http://192.168.1.141:" + config.port);
+  const addrs = lanAddresses();
+  console.log(
+    "У локальній мережі: " +
+      (addrs.length
+        ? addrs.map((ip) => `http://${ip}:${config.port}`).join("  |  ")
+        : "(немає підключених мережевих адаптерів)")
+  );
   console.log("Каталог матеріалів: " + config.dataDir);
-  console.log("PIN викладача: " + config.portalPin);
+  // Не друкуємо сам PIN у консоль (див. Issue #1) — лише джерело значення
+  if (process.env.PORTAL_PIN) {
+    console.log("PIN викладача: задано через змінну PORTAL_PIN");
+  } else {
+    console.log("PIN викладача: значення за замовчуванням (рекомендовано задати PORTAL_PIN)");
+  }
 });

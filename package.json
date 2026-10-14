@@ -4,15 +4,15 @@
   "private": true,
   "description": "Автономний локальний вебсервер навчальних матеріалів для роботи в укритті.",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node test.js"
   },
   "dependencies": {
     "canvas": "^3.2.3",
     "express": "^5.3.0",
     "hbs": "^4.3.1",
     "pdf-poppler": "^0.2.3",
-    "pdfjs-dist": "^3.11.174",
-    "ws": "^8.22.0"
+    "pdfjs-dist": "^3.11.174"
   },
   "allowScripts": {
     "canvas@3.2.3": true

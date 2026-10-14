@@ -8,6 +8,10 @@ const config = {
   slidesDir: path.join(__dirname, "..", "..", "materials", ".slides"),
   metadataFile: path.join(__dirname, "..", "..", "materials", ".metadata.json"),
   maxUpload: 1024 * 1024 * 1024, // 1 GB
+  // Захист PIN від перебору (див. utils/pinLimiter.js)
+  pinMaxAttempts: Number(process.env.PIN_MAX_ATTEMPTS) || 5,
+  pinWindowMs: Number(process.env.PIN_WINDOW_MS) || 15 * 60 * 1000,
+  pinBlockMs: Number(process.env.PIN_BLOCK_MS) || 15 * 60 * 1000,
   // PDF render scale (higher = better quality, but slower & larger files)
   pdfScale: Number(process.env.PDF_SCALE) || 1.8,
   // PPTX slide export resolution
