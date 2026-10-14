@@ -92,6 +92,22 @@ function ConvertTo-WinArg {
     return $sb.ToString()
 }
 
+# Quoting for cmd.exe wrappers (.cmd/.bat via `cmd /d /c`).
+# cmd.exe does NOT understand CommandLineToArgvW backslash escaping, and it
+# applies its own quote-stripping heuristic to the /c command line. The only
+# reliable form is: cmd /d /c ""script" "arg1" "arg2"" (double-wrapped), with
+# every argument in plain double quotes. cmd.exe has NO escaping mechanism
+# for an embedded double quote inside an argument, so such arguments are
+# rejected loudly instead of being silently corrupted.
+function ConvertTo-WinCmdArg {
+    param([string]$Value)
+    if ($Value -match '"') {
+        throw "cmd.exe wrappers cannot receive arguments containing a double quote: '$Value'"
+    }
+    if ([string]::IsNullOrEmpty($Value)) { return '""' }
+    return '"' + $Value + '"'
+}
+
 # ---------------------------------------------------------------------------
 # Command resolution: PATH entries may be shims (.ps1/.cmd from npm) which
 # System.Diagnostics.Process cannot start directly; wrap them in a shell.
@@ -114,8 +130,10 @@ function Resolve-Command {
             return @{ FilePath = 'powershell.exe'; PrefixArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $src) }
         }
         '\.(cmd|bat)$' {
-            # /d disables registry AutoRun scripts for this cmd.exe instance
-            return @{ FilePath = 'cmd.exe'; PrefixArgs = @('/d', '/c', $src) }
+            # /d disables registry AutoRun scripts for this cmd.exe instance.
+            # UseCmdQuoting: arguments must be quoted with cmd.exe rules
+            # (double-wrapped command line), not CommandLineToArgvW rules.
+            return @{ FilePath = 'cmd.exe'; PrefixArgs = @('/d', '/c', $src); UseCmdQuoting = $true }
         }
         default {
             return @{ FilePath = $src; PrefixArgs = @() }
@@ -135,7 +153,16 @@ function Invoke-Native {
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $resolved.FilePath
-    $psi.Arguments = ($allArgs | ForEach-Object { ConvertTo-WinArg $_ }) -join ' '
+    if ($resolved.ContainsKey('UseCmdQuoting')) {
+        # cmd.exe wrapper: build /d /c ""script" "arg1" "arg2"" - see
+        # ConvertTo-WinCmdArg for why CommandLineToArgvW quoting fails here.
+        $core = @($allArgs | Select-Object -Skip 2)   # skip the fixed /d /c
+        $quoted = ($core | ForEach-Object { ConvertTo-WinCmdArg $_ }) -join ' '
+        $psi.Arguments = '/d /c "' + $quoted + '"'
+    }
+    else {
+        $psi.Arguments = ($allArgs | ForEach-Object { ConvertTo-WinArg $_ }) -join ' '
+    }
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false

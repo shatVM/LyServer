@@ -30,7 +30,7 @@ function Test-Case {
 # --- extract functions from dispatcher.ps1 (test the real code) -----------
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($DispatcherPath, [ref]$null, [ref]$null)
 $fnAsts = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true))
-foreach ($fnName in @('ConvertTo-WinArg', 'Resolve-Command', 'Invoke-Native', 'Test-PongResponse', 'Test-PathInside')) {
+foreach ($fnName in @('ConvertTo-WinArg', 'ConvertTo-WinCmdArg', 'Resolve-Command', 'Invoke-Native', 'Test-PongResponse', 'Test-PathInside')) {
     $match = @($fnAsts | Where-Object { $_.Name -eq $fnName })
     if ($match.Count -eq 0) { Write-Host ("FAIL: function {0} not found in dispatcher.ps1" -f $fnName); exit 1 }
     Invoke-Expression $match[0].Extent.Text
@@ -283,9 +283,10 @@ Test-Case 'T13 full run order: tree -> ping -> pong -> discovery -> preview' $or
 # === T14: REAL .cmd wrapper launch through cmd.exe /d /c
 #     The wrapper mirrors real npm-style .cmd shims: it forwards %* to
 #     powershell.exe -File echo-args.ps1. This exercises cmd.exe
-#     metacharacter parsing (&, parens), path-with-space quoting and a
-#     quoted argument end-to-end - CommandLineToArgvW rules alone do not
-#     cover cmd.exe shell parsing, so this test is mandatory.
+#     metacharacter parsing (&, parens), path-with-space quoting and
+#     Cyrillic end-to-end. NOTE: an embedded double quote CANNOT be passed
+#     through cmd.exe (no escaping exists there) - ConvertTo-WinCmdArg
+#     rejects it; that refusal is tested in T14b.
 $wrapDir = Join-Path $testRoot 'wrap dir'   # space in the path on purpose
 New-Item -ItemType Directory -Path $wrapDir -Force | Out-Null
 $wrapCmd = Join-Path $wrapDir 'fakecmd.cmd'
@@ -295,7 +296,7 @@ powershell.exe -NoProfile -File "$echoScript" %*
 "@
 $env:Path = "$wrapDir;$env:Path"
 $cmdOutFile = Join-Path $testRoot 'cmd-args-out.txt'
-$cmdArgs = @($cmdOutFile, 'with space', 'a&b', 'x(y)', 'quo"te', 'Кирилиця')
+$cmdArgs = @($cmdOutFile, 'with space', 'a&b', 'x(y)', 'trail\', 'Кирилиця', '')
 $run = Invoke-Native -Tool 'fakecmd.cmd' -ArgumentList $cmdArgs
 $cmdActual = if (Test-Path $cmdOutFile) { @([IO.File]::ReadAllLines($cmdOutFile)) } else { @() }
 $cmdOk = ($run.ExitCode -eq 0) -and ($cmdActual.Count -eq ($cmdArgs.Count - 1))
@@ -303,7 +304,15 @@ if ($cmdOk) {
     $expectedTail = @($cmdArgs | Select-Object -Skip 1)
     for ($i = 0; $i -lt $expectedTail.Count; $i++) { if ($cmdActual[$i] -cne $expectedTail[$i]) { $cmdOk = $false; break } }
 }
-Test-Case 'T14 .cmd wrapper round-trip (space/&/parens/quote/Cyrillic, dir with space)' $cmdOk ("received {0}/{1} args" -f $cmdActual.Count, ($cmdArgs.Count - 1))
+Test-Case 'T14 .cmd wrapper round-trip (space/&/parens/backslash/empty/Cyrillic, dir with space)' $cmdOk ("received {0}/{1} args" -f $cmdActual.Count, ($cmdArgs.Count - 1))
+
+# T14b: an argument containing a double quote must be REFUSED, not corrupted
+$t14b = $false
+try {
+    $null = Invoke-Native -Tool 'fakecmd.cmd' -ArgumentList @($cmdOutFile, 'quo"te')
+}
+catch { $t14b = ($_.Exception.Message -match 'double quote') }
+Test-Case 'T14b .cmd wrapper refuses embedded double quote (no silent corruption)' $t14b 'cmd.exe has no escaping for "'
 
 # === T15: Resolve-Command handles every supported command type explicitly
 $rExe = Resolve-Command -Name 'powershell.exe'
