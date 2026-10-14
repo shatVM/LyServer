@@ -28,4 +28,25 @@
 
     # Захист від паралельного запуску: каталог lock-файлів
     LockDir        = 'C:\Users\Admin\Documents\LyServerDispatcherLogs\locks'
+
+    # ---- Stage 2 (контрольоване виконання; вмикається лише ключем -Stage2) ----
+    # Джерело завдань: 'GitHub' (через gh, потрібна автентифікація) або
+    # 'Local' (тестовий режим: JSON-файл, жодного звернення до GitHub).
+    TaskSource     = 'GitHub'
+
+    # Команда-агент (ім'я з PATH). Реальний запуск: opencode.
+    # У тестовому режимі - підроблений агент.
+    AgentCommand   = 'opencode'
+
+    # TaskSource='Local': шлях до JSON-файлу з завданням(и)
+    # [{ "number": 901, "title": "...", "state": "open",
+    #    "labels": ["ready-for-opencode"], "body": "..." }]
+    LocalTaskFile  = ''
+
+    # TaskSource='Local': базова гілка, з якої створюється worktree
+    BaseBranch     = ''
+
+    # Безпечна обробка застарілого lock-файлу (секунди): старший за цей
+    # вік lock вважається застарілим, архівується і береться заново.
+    LockStaleSec   = 900
 }
