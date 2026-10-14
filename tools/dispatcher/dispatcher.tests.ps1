@@ -94,10 +94,16 @@ function Get-GhJsonSnapshot {
     }
 
     try {
-        $items = @($jsonText | ConvertFrom-Json -ErrorAction Stop)
+        # PS 5.1 quirk (same as in dispatcher.ps1): ConvertFrom-Json returns
+        # a JSON array as ONE Object[] element; flatten it into real items.
+        $items = @(($jsonText | ConvertFrom-Json) | ForEach-Object { $_ })
     }
     catch {
         throw "gh $Kind snapshot returned invalid JSON: $($_.Exception.Message)"
+    }
+
+    if ($items.Count -eq 0) {
+        throw "gh $Kind snapshot returned no items (unexpected empty listing)."
     }
 
     if ($Kind -eq 'Issues') {
