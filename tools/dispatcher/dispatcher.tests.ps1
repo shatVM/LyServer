@@ -191,8 +191,15 @@ $run = Invoke-Dispatcher -ConfigPath $cfgOk
 Test-Case 'T9 full preview run -> exit 0' ($run.ExitCode -eq 0 -and $run.Output -match 'Preview completed') ("exit {0}" -f $run.ExitCode)
 
 # === T10: GitHub state unchanged by the whole suite.
-#     Full lists captured BEFORE the suite (top of this file) are compared
-#     with the current state - not just spot checks on issue numbers.
+#     SCOPE OF THIS CHECK (be precise): it compares full JSON listings of
+#       (a) OPEN issues with fields number,title,labels, and
+#       (b) PRs in ALL states with fields number,title,url,
+#     captured before the suite vs after it, as exact strings.
+#     It does NOT snapshot: closed issues, issue bodies/comments, PR
+#     diff/review state, labels metadata, workflow runs, or any repo
+#     content beyond the git working tree check in T10d. It proves the
+#     suite created no new PRs and changed no open issues/labels - it is
+#     not a byte-level snapshot of the entire GitHub account state.
 $issuesAfter = (& gh issue list -R shatVM/LyServer --state open --json number,title,labels | Out-String)
 $prsAfter = (& gh pr list -R shatVM/LyServer --state all --json number,title,url | Out-String)
 $issuesNow = @(($issuesAfter | ConvertFrom-Json) | ForEach-Object { $_ })
@@ -284,10 +291,10 @@ Test-Case 'T13 full run order: tree -> ping -> pong -> discovery -> preview' $or
 #     The wrapper mirrors real npm-style .cmd shims: it forwards %* to
 #     powershell.exe -File echo-args.ps1. This exercises cmd.exe
 #     metacharacter parsing (&, parens), path-with-space quoting,
-#     empty args and Cyrillic end-to-end. NOTE: embedded double quotes
-#     and trailing backslashes CANNOT cross the cmd.exe -> final-receiver
-#     (CommandLineToArgvW) boundary faithfully - ConvertTo-WinCmdArg
-#     refuses both; refusals are tested in T14b/T14c.
+#     empty args and Cyrillic end-to-end. NOTE: embedded double quotes,
+#     trailing backslashes and % CANNOT cross the cmd.exe -> final-receiver
+#     boundary faithfully - ConvertTo-WinCmdArg refuses all three; refusals
+#     are tested in T14b/T14c/T14d.
 $wrapDir = Join-Path $testRoot 'wrap dir'   # space in the path on purpose
 New-Item -ItemType Directory -Path $wrapDir -Force | Out-Null
 $wrapCmd = Join-Path $wrapDir 'fakecmd.cmd'
@@ -322,6 +329,16 @@ try {
 }
 catch { $t14c = ($_.Exception.Message -match 'backslash') }
 Test-Case 'T14c .cmd wrapper refuses trailing backslash (would merge args)' $t14c 'two-layer parse boundary'
+
+# T14d: an argument containing % must be REFUSED - cmd.exe expands %VAR%
+# even inside double quotes, so passing it would corrupt the value in an
+# environment-dependent way.
+$t14d = $false
+try {
+    $null = Invoke-Native -Tool 'fakecmd.cmd' -ArgumentList @($cmdOutFile, 'a%PATH%b')
+}
+catch { $t14d = ($_.Exception.Message -match "cannot receive arguments containing '%'") }
+Test-Case 'T14d .cmd wrapper refuses % (cmd expands %VAR% inside quotes)' $t14d 'no environment-dependent corruption'
 
 # === T15: Resolve-Command handles every supported command type explicitly
 $rExe = Resolve-Command -Name 'powershell.exe'

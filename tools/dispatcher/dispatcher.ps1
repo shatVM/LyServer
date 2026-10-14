@@ -102,7 +102,11 @@ function ConvertTo-WinArg {
 #   - a trailing backslash: cmd passes it literally, but the FINAL receiver
 #     (node/powershell via CommandLineToArgvW) decodes \" as a literal quote,
 #     merging neighbouring arguments. Fidelity across both layers is
-#     impossible, so such arguments are rejected with a clear message.
+#     impossible, so such arguments are rejected with a clear message;
+#   - any % character: cmd.exe expands %VAR% (and lone %) even INSIDE
+#     double quotes, so an argument containing % cannot be passed without
+#     environment-dependent corruption. Callers must avoid % entirely
+#     (e.g. pass long prompts via a UTF-8 temp file instead).
 function ConvertTo-WinCmdArg {
     param([string]$Value)
     if ($Value -match '"') {
@@ -110,6 +114,9 @@ function ConvertTo-WinCmdArg {
     }
     if ($Value.EndsWith('\')) {
         throw "cmd.exe wrappers cannot receive arguments ending with a backslash (would corrupt argument parsing downstream): '$Value'"
+    }
+    if ($Value -match '%') {
+        throw "cmd.exe wrappers cannot receive arguments containing '%' (cmd expands %VAR% even inside quotes): '$Value'"
     }
     if ([string]::IsNullOrEmpty($Value)) { return '""' }
     return '"' + $Value + '"'
