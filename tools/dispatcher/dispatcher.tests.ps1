@@ -340,6 +340,25 @@ try {
 catch { $t14d = ($_.Exception.Message -match "cannot receive arguments containing '%'") }
 Test-Case 'T14d .cmd wrapper refuses % (cmd expands %VAR% inside quotes)' $t14d 'no environment-dependent corruption'
 
+# T14e: the wrapper PATH goes through the SAME ConvertTo-WinCmdArg
+# validation as the arguments (Invoke-Native keeps $src in $core and only
+# skips the fixed /d /c). A wrapper living in a directory with % in its
+# name must be refused before any process is started.
+$wrapDirPct = Join-Path $testRoot 'pct%dir'
+New-Item -ItemType Directory -Path $wrapDirPct -Force | Out-Null
+$wrapCmdPct = Join-Path $wrapDirPct 'fakepct.cmd'
+Set-Content -LiteralPath $wrapCmdPct -Encoding ASCII -Value "@echo off`r`necho ran"
+$env:Path = "$wrapDirPct;$env:Path"
+$t14e = $false
+try {
+    $null = Invoke-Native -Tool 'fakepct.cmd' -ArgumentList @('x')
+}
+catch {
+    # the message must cite the PATH (fakepct), not an argument
+    $t14e = ($_.Exception.Message -match "containing '%'" -and $_.Exception.Message -match 'fakepct')
+}
+Test-Case 'T14e .cmd wrapper PATH with % refused (same validation as args)' $t14e 'no process started'
+
 # === T15: Resolve-Command handles every supported command type explicitly
 $rExe = Resolve-Command -Name 'powershell.exe'
 $rCmd = Resolve-Command -Name 'fakecmd.cmd'
