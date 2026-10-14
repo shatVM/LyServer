@@ -96,13 +96,20 @@ function ConvertTo-WinArg {
 # cmd.exe does NOT understand CommandLineToArgvW backslash escaping, and it
 # applies its own quote-stripping heuristic to the /c command line. The only
 # reliable form is: cmd /d /c ""script" "arg1" "arg2"" (double-wrapped), with
-# every argument in plain double quotes. cmd.exe has NO escaping mechanism
-# for an embedded double quote inside an argument, so such arguments are
-# rejected loudly instead of being silently corrupted.
+# every argument in plain double quotes.
+# Refused loudly instead of being silently corrupted:
+#   - an embedded double quote: cmd.exe has NO escaping for `"` at all;
+#   - a trailing backslash: cmd passes it literally, but the FINAL receiver
+#     (node/powershell via CommandLineToArgvW) decodes \" as a literal quote,
+#     merging neighbouring arguments. Fidelity across both layers is
+#     impossible, so such arguments are rejected with a clear message.
 function ConvertTo-WinCmdArg {
     param([string]$Value)
     if ($Value -match '"') {
         throw "cmd.exe wrappers cannot receive arguments containing a double quote: '$Value'"
+    }
+    if ($Value.EndsWith('\')) {
+        throw "cmd.exe wrappers cannot receive arguments ending with a backslash (would corrupt argument parsing downstream): '$Value'"
     }
     if ([string]::IsNullOrEmpty($Value)) { return '""' }
     return '"' + $Value + '"'
