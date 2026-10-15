@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
 .SYNOPSIS
     Stage 1 test harness for dispatcher.ps1 (PowerShell 5.1).
@@ -49,6 +49,18 @@ foreach ($fnName in @(
     $match = @($fnAsts | Where-Object { $_.Name -eq $fnName })
     if ($match.Count -eq 0) { Write-Host ("FAIL: function {0} not found in dispatcher.ps1" -f $fnName); exit 1 }
     Invoke-Expression $match[0].Extent.Text
+}
+
+# Test-only logger: console output without filesystem side effects.
+function Write-Log {
+    param([string]$Level, [string]$Message)
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
+    switch ($Level) {
+        'ERROR' { Write-Host $line -ForegroundColor Red }
+        'WARN'  { Write-Host $line -ForegroundColor Yellow }
+        'OK'    { Write-Host $line -ForegroundColor Green }
+        default { Write-Host $line }
+    }
 }
 
 # --- temp workspace (outside the repository) ------------------------------
