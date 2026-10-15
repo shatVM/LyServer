@@ -12,10 +12,14 @@
     Stage 2 (-Stage2, opt-in) executes at most ONE task in an isolated git
     worktree under a dispatcher lock, verifies the real git diff afterwards
     and reports a single outcome (SUCCESS / NO_CHANGES / ERROR / TIMEOUT /
-    REFUSED). Stage 2 still performs NO git push, NO PR creation and NO
-    GitHub mutations of any kind - publishing is intentionally NOT
-    implemented. The switch itself is the opt-in gate; there is no config
-    key that can turn GitHub mutations on.
+    REFUSED). Stage 2 performs NO git push, NO PR creation and NO GitHub
+    mutations EXCEPT one opt-in report comment (Issue #9): with the config
+    key PublishReport = $true a structured report comment is posted to the
+    SAME Issue that was verified and executed (never to a number supplied by
+    the agent). The comment is confirmed by a GitHub response URL; on any
+    failure the report and the publication error are saved next to the log,
+    and a retry updates the existing report comment instead of duplicating
+    it. PublishReport defaults to OFF; nothing else can mutate GitHub.
 .NOTES
     PowerShell 5.1 compatible. No secrets are stored or logged.
     Task text (Issue body/comments) is UNTRUSTED data: it can never
@@ -550,12 +554,247 @@ function Get-WorktreeChanges {
 }
 
 # ---------------------------------------------------------------------------
+# Stage 2 report publishing (Issue #9).
+#   Publishes a structured comment to the SAME Issue that the dispatcher
+#   re-read and executed. The issue number comes from task discovery and is
+#   re-verified against GitHub - NEVER from the agent's output.
+#   Uses `gh issue comment` - the ONLY GitHub mutation of Stage 2, opt-in
+#   via the config key PublishReport (default OFF).
+#   NEVER pushes, creates PRs, merges, or closes Issues.
+#   Every failure: the report AND the publication error are saved locally;
+#   success is never claimed without a GitHub confirmation (comment URL).
+#   An existing report comment is UPDATED via an invisible marker so a retry
+#   does not duplicate comments; if the existence check itself cannot be
+#   completed, publication is ABORTED instead of risking a duplicate.
+# ---------------------------------------------------------------------------
+
+function New-Stage2ReportComment {
+    # Pure builder: assembles the structured Markdown report. Kept separate
+    # from publishing so a failed publication can save the SAME text locally.
+    param(
+        [Parameter(Mandatory)][int]$IssueNumber,
+        [Parameter(Mandatory)][string]$Status,
+        [Parameter(Mandatory)][string]$BaseSha,
+        [Parameter(Mandatory)][string]$AgentExitCode,
+        [Parameter(Mandatory)][string]$ChangedFiles,
+        [Parameter(Mandatory)][string]$DiffStat,
+        [Parameter(Mandatory)][string]$VerificationCommands,
+        [Parameter(Mandatory)][string]$VerificationResults,
+        [Parameter(Mandatory)][string]$AgentClaims,
+        [Parameter(Mandatory)][string]$ErrorMessage,
+        [Parameter(Mandatory)][string]$LogPath,
+        [Parameter(Mandatory)][string]$WorktreePath,
+        [string]$NoChangesReason = ''
+    )
+    $dateStr = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    # Invisible HTML marker: makes an already-published report findable so a
+    # retry UPDATEs it instead of posting a duplicate comment.
+    $marker = "<!-- dispatcher-report issue=$IssueNumber status=$Status base=$BaseSha -->"
+    $noChangesLine = if (-not [string]::IsNullOrWhiteSpace($NoChangesReason)) { "- No Changes Reason: $NoChangesReason" } else { '' }
+
+    return @"
+$marker
+## Stage 2 Execution Report
+
+**Issue:** #$IssueNumber
+**Execution Time:** $dateStr
+**Base SHA:** $BaseSha
+**Dispatcher Status:** $Status
+**Agent Exit Code:** $AgentExitCode
+
+### Verified Facts (Dispatcher)
+- Issue: #$IssueNumber - the issue re-read, verified and executed by the dispatcher (never taken from agent output)
+- Base SHA: $BaseSha
+- Changed Files: $ChangedFiles
+- Verification Commands: $VerificationCommands
+- Verification Results:<pre>$VerificationResults</pre>
+- Diff Summary (git diff --stat HEAD):<pre>$DiffStat</pre>
+$noChangesLine
+
+### Agent Claims (NOT Verified by Dispatcher)
+Raw agent process output below. It is NOT evidence - only the git checks above are verified facts.<pre>$AgentClaims</pre>
+
+### Error / Failure Reason
+$ErrorMessage
+
+### Log Locations
+- Dispatcher Log: $LogPath
+- Task Worktree: $WorktreePath
+"@
+}
+
+function Save-LocalIssueReport {
+    # Saves the report next to the dispatcher log TOGETHER WITH the
+    # publication error, so a failed publication is never lost.
+    param(
+        [Parameter(Mandatory)][int]$IssueNumber,
+        [Parameter(Mandatory)][string]$LogPath,
+        [Parameter(Mandatory)][string]$Comment,
+        [Parameter(Mandatory)][string]$PublishError
+    )
+    $localReportPath = ([string]$LogPath) -replace '\.log$', ('-issue-{0}-report.md' -f $IssueNumber)
+    if ($localReportPath -eq [string]$LogPath) {
+        # The path had no .log suffix: NEVER overwrite the log itself.
+        $localReportPath = ('{0}-issue-{1}-report.md' -f $LogPath, $IssueNumber)
+    }
+    $trailer = @"
+
+
+---
+### Publication status (local copy)
+- Published to GitHub: NO
+- Reason: $PublishError
+- Saved: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+"@
+    $saved = $false
+    $saveErr = ''
+    try {
+        Set-Content -LiteralPath $localReportPath -Value ($Comment + $trailer) -Encoding UTF8 -ErrorAction Stop
+        $saved = $true
+    } catch { $saveErr = $_.Exception.Message }
+    return @{ Path = $localReportPath; Saved = $saved; SaveError = $saveErr }
+}
+
+function Publish-IssueReport {
+    param(
+        [Parameter(Mandatory)][int]$IssueNumber,
+        [Parameter(Mandatory)][string]$Status,
+        [Parameter(Mandatory)][string]$BaseSha,
+        [Parameter(Mandatory)][string]$AgentExitCode,
+        [Parameter(Mandatory)][string]$ChangedFiles,
+        [Parameter(Mandatory)][string]$DiffStat,
+        [Parameter(Mandatory)][string]$LogPath,
+        [Parameter(Mandatory)][string]$WorktreePath,
+        [Parameter(Mandatory)][string]$ErrorMessage,
+        [Parameter(Mandatory)][string]$VerificationCommands,
+        [Parameter(Mandatory)][string]$VerificationResults,
+        [Parameter(Mandatory)][string]$AgentClaims,
+        [string]$NoChangesReason = '',
+        # Optional pre-publication guard: the issue must exist, be open,
+        # carry LabelReady and STILL be the very issue we are publishing to.
+        [switch]$VerifyIssue,
+        [string]$GitHubRepo = '',
+        [string]$LabelReady = ''
+    )
+
+    $comment = New-Stage2ReportComment -IssueNumber $IssueNumber -Status $Status -BaseSha $BaseSha -AgentExitCode $AgentExitCode -ChangedFiles $ChangedFiles -DiffStat $DiffStat -VerificationCommands $VerificationCommands -VerificationResults $VerificationResults -AgentClaims $AgentClaims -ErrorMessage $ErrorMessage -LogPath $LogPath -WorktreePath $WorktreePath -NoChangesReason $NoChangesReason
+
+    # --- 1. optional verification (existence / open / label / identity) -----
+    if ($VerifyIssue) {
+        $v = Verify-IssueForPublish -IssueNumber $IssueNumber -GitHubRepo $GitHubRepo -LabelReady $LabelReady
+        if (-not $v.Ok) {
+            $err = "issue verification refused publication: $($v.Message)"
+            $loc = Save-LocalIssueReport -IssueNumber $IssueNumber -LogPath $LogPath -Comment $comment -PublishError $err
+            $saveMsg = if ($loc.Saved) { "Local report saved to: $($loc.Path)" } else { "Local report could NOT be saved either: $($loc.SaveError)" }
+            return @{ Ok = $false; Confirmed = $false; Message = "$err. $saveMsg"; LocalReportPath = $loc.Path; PublishError = $err }
+        }
+    }
+
+    # --- 2. idempotency pre-check: find an already-published report comment.
+    # The comment list is fetched as JSON and parsed HERE (no shell/jq
+    # quoting of untrusted bodies). If this check CANNOT be completed the
+    # publication is ABORTED: posting blindly could duplicate a report that
+    # a previous (unconfirmed) attempt already created.
+    $existing = Invoke-Native -Tool 'gh' -ArgumentList @('issue', 'view', ([string]$IssueNumber), '--json', 'comments')
+    if ($existing.ExitCode -ne 0) {
+        $err = "idempotency check failed (gh issue view exit $($existing.ExitCode)): $($existing.StdErr.Trim())"
+        $loc = Save-LocalIssueReport -IssueNumber $IssueNumber -LogPath $LogPath -Comment $comment -PublishError $err
+        $saveMsg = if ($loc.Saved) { "Local report saved to: $($loc.Path)" } else { "Local report could NOT be saved either: $($loc.SaveError)" }
+        return @{ Ok = $false; Confirmed = $false; Message = "$err. Publication ABORTED (no duplicate risk). $saveMsg"; LocalReportPath = $loc.Path; PublishError = $err }
+    }
+    $commentId = ''
+    try {
+        $viewObj = $existing.StdOut | ConvertFrom-Json
+        foreach ($c in @($viewObj.comments)) {
+            if ($null -ne $c -and $c.PSObject.Properties['body'] -and ([string]$c.body).Contains('dispatcher-report')) {
+                $commentId = [string]$c.id
+                break
+            }
+        }
+    } catch {
+        $err = "idempotency check could not parse comments JSON: $($_.Exception.Message)"
+        $loc = Save-LocalIssueReport -IssueNumber $IssueNumber -LogPath $LogPath -Comment $comment -PublishError $err
+        $saveMsg = if ($loc.Saved) { "Local report saved to: $($loc.Path)" } else { "Local report could NOT be saved either: $($loc.SaveError)" }
+        return @{ Ok = $false; Confirmed = $false; Message = "$err. Publication ABORTED (no duplicate risk). $saveMsg"; LocalReportPath = $loc.Path; PublishError = $err }
+    }
+
+    # --- 3. the actual publication (the ONLY GitHub mutation of stage 2) ----
+    if ($commentId) {
+        Write-Log 'INFO' ("Report comment already exists on Issue #{0} (comment id {1}); updating it instead of posting a duplicate." -f $IssueNumber, $commentId)
+        $result = Invoke-Native -Tool 'gh' -ArgumentList @('issue', 'comment', ([string]$IssueNumber), '--edit', $commentId, '--body', $comment)
+    }
+    else {
+        $result = Invoke-Native -Tool 'gh' -ArgumentList @('issue', 'comment', ([string]$IssueNumber), '--body', $comment)
+    }
+
+    if ($result.ExitCode -ne 0) {
+        $err = "gh issue comment failed (exit $($result.ExitCode)): $($result.StdErr.Trim())"
+        $loc = Save-LocalIssueReport -IssueNumber $IssueNumber -LogPath $LogPath -Comment $comment -PublishError $err
+        $saveMsg = if ($loc.Saved) { "Local report saved to: $($loc.Path)" } else { "Local report could NOT be saved either: $($loc.SaveError)" }
+        return @{ Ok = $false; Confirmed = $false; Message = "$err. $saveMsg"; LocalReportPath = $loc.Path; PublishError = $err }
+    }
+
+    # --- 4. confirmation from GitHub: `gh issue comment` prints the
+    # created/edited comment URL. Exit code 0 WITHOUT a URL means the result
+    # cannot be confirmed - success is NOT claimed in that case.
+    $url = $result.StdOut.Trim()
+    if ([string]::IsNullOrWhiteSpace($url)) {
+        $err = 'gh exited 0 but returned no comment URL: publication CANNOT be confirmed'
+        $loc = Save-LocalIssueReport -IssueNumber $IssueNumber -LogPath $LogPath -Comment $comment -PublishError $err
+        $saveMsg = if ($loc.Saved) { "Local report saved to: $($loc.Path)" } else { "Local report could NOT be saved either: $($loc.SaveError)" }
+        return @{ Ok = $false; Confirmed = $false; Message = "$err. $saveMsg"; LocalReportPath = $loc.Path; PublishError = $err }
+    }
+
+    return @{ Ok = $true; Confirmed = $true; Message = "Comment published (URL: $url)"; LocalReportPath = $null; PublishError = '' }
+}
+
+# Verifies that the Issue exists, is open, and still has the required label.
+# This is a TOCTOU guard before publishing.
+function Verify-IssueForPublish {
+    param(
+        [Parameter(Mandatory)][int]$IssueNumber,
+        [Parameter(Mandatory)][string]$GitHubRepo,
+        [Parameter(Mandatory)][string]$LabelReady
+    )
+
+    $view = Invoke-Native -Tool 'gh' -ArgumentList @(
+        'issue', 'view', ([string]$IssueNumber), '--repo', $GitHubRepo,
+        '--json', 'number,state,labels'
+    )
+    if ($view.ExitCode -ne 0) {
+        return @{ Ok = $false; Message = "gh issue view failed (exit $($view.ExitCode)): $($view.StdErr.Trim())" }
+    }
+    try {
+        $issue = @(($view.StdOut | ConvertFrom-Json) | ForEach-Object { $_ })[0]
+    } catch {
+        return @{ Ok = $false; Message = "Failed to parse issue view JSON: $($_.Exception.Message)" }
+    }
+    if ($null -eq $issue) {
+        return @{ Ok = $false; Message = "Issue #$IssueNumber not found in $GitHubRepo" }
+    }
+    # Identity guard: the report must go to the very issue the dispatcher
+    # executed - never to a number supplied by the agent or a stale object.
+    $returnedNumber = 0
+    if (-not $issue.PSObject.Properties['number'] -or -not [int]::TryParse([string]$issue.number, [ref]$returnedNumber) -or $returnedNumber -ne $IssueNumber) {
+        return @{ Ok = $false; Message = "GitHub returned issue #$([string]$issue.number) for the requested #$IssueNumber - refusing to publish to a different issue" }
+    }
+    if ([string]$issue.state -ne 'open') {
+        return @{ Ok = $false; Message = "Issue #$IssueNumber is not open (state: $($issue.state))" }
+    }
+    $labelNames = @($issue.labels | ForEach-Object { $_.name })
+    if ($labelNames -notcontains $LabelReady) {
+        return @{ Ok = $false; Message = "Issue #$IssueNumber no longer has the '$LabelReady' label" }
+    }
+    return @{ Ok = $true; Message = '' }
+}
+
+# ---------------------------------------------------------------------------
 # Configuration: load and validate BEFORE any process is started
 # ---------------------------------------------------------------------------
 Write-Host ''
 if ($Stage2) {
     Write-Host 'LyServer dispatcher v0.2 (stage 2: controlled task execution)' -ForegroundColor Cyan
-    Write-Host 'Mode: isolated worktree; NO push, NO PR, NO GitHub mutations.' -ForegroundColor Cyan
+    Write-Host 'Mode: isolated worktree; NO push, NO PR; report comment only if PublishReport = $true.' -ForegroundColor Cyan
 }
 else {
     Write-Host 'LyServer dispatcher v0.2 (stage 1: checks + preview)' -ForegroundColor Cyan
@@ -580,11 +819,13 @@ catch {
 
 # --- Stage 2 keys: defaults when absent (Stage 1 configs keep working) ----
 foreach ($d in @(
-    @{ K = 'TaskSource';    V = 'GitHub' }
-    @{ K = 'AgentCommand';  V = 'opencode' }
-    @{ K = 'LocalTaskFile'; V = '' }
-    @{ K = 'BaseBranch';    V = '' }
-    @{ K = 'LockStaleSec';  V = 900 }
+    @{ K = 'TaskSource';             V = 'GitHub' }
+    @{ K = 'AgentCommand';           V = 'opencode' }
+    @{ K = 'LocalTaskFile';          V = '' }
+    @{ K = 'BaseBranch';             V = '' }
+    @{ K = 'LockStaleSec';           V = 900 }
+    @{ K = 'PublishReport';          V = $false }
+    @{ K = 'VerifyIssueBeforePublish'; V = $true }
 )) {
     if (-not $cfg.ContainsKey($d.K)) { $cfg[$d.K] = $d.V }
 }
@@ -621,6 +862,18 @@ if ($cfg.AgentCommand -notmatch '^[A-Za-z0-9._-]+$') {
 $lockStaleParsed = 0
 if (-not [int]::TryParse([string]$cfg.LockStaleSec, [ref]$lockStaleParsed) -or $lockStaleParsed -le 0) {
     $validationErrors += "must be a positive integer: LockStaleSec = '$($cfg.LockStaleSec)'"
+}
+# --- PublishReport / VerifyIssueBeforePublish validation ---
+# Accepts real booleans (PublishReport = $false in psd1) as well as the
+# strings 'True'/'False' (e.g. generated configs); anything else is rejected.
+foreach ($boolKey in @('PublishReport', 'VerifyIssueBeforePublish')) {
+    $boolVal = $cfg[$boolKey]
+    if ($boolVal -is [bool]) { continue }
+    if ($boolVal -is [string] -and $boolVal -match '^(true|false)$') {
+        $cfg[$boolKey] = [bool]::Parse($boolVal)
+        continue
+    }
+    $validationErrors += "$boolKey must be a boolean (`$true / `$false or 'True' / 'False'): '$boolVal'"
 }
 if ($cfg.TaskSource -eq 'Local') {
     if ([string]::IsNullOrWhiteSpace([string]$cfg.LocalTaskFile)) {
@@ -914,7 +1167,8 @@ if (-not $Stage2) {
 #   - the task text is UNTRUSTED: forbidden directives cause a refusal;
 #   - AgentCommand runs with a hard timeout (process tree is killed);
 #   - success = verified git changes, never the agent's own claim;
-#   - NO git push, NO PR, NO GitHub mutations of any kind (not implemented).
+#   - NO git push, NO PR, NO label/issue-state changes; the only allowed
+#     GitHub mutation is the opt-in report comment (PublishReport = $true).
 # Exit codes: 0 = SUCCESS | NO_CHANGES(no task); 1 = ERROR; 2 = TIMEOUT;
 #             4 = REFUSED by a safety check.
 # ===========================================================================
@@ -945,6 +1199,11 @@ $worktreeBranch = $null
 $baseShaVerified = $null
 $stageExitCode = 1
 $stageResult = 'ERROR'
+# Pre-initialized so the post-stage report block can read them under
+# StrictMode even when the stage failed BEFORE the agent/verification ran.
+$changes = $null
+$exec = $null
+$caughtMsg = ''
 
 try {
     # --- re-read the task from its source (state may have changed) ---------
@@ -1166,6 +1425,132 @@ finally {
 }
 
 Write-Log 'INFO' ("Stage 2 result: {0} (exit code {1})" -f $stageResult, $stageExitCode)
-Write-Log 'INFO' 'No push, no PR and no GitHub mutations were performed (publishing is not implemented in stage 2).'
+
+# --- publish report to the SAME Issue that was executed (Issue #9) ---------
+# The issue number comes from task discovery ($taskNum, re-verified against
+# GitHub) - NEVER from the agent's output. The ONLY GitHub mutation is a
+# comment on that one issue: no push, no PR, no merge, no close, no labels.
+# Opt-in via config key PublishReport (default OFF).
+# On any failure the report AND the publication error are saved locally, and
+# success is logged ONLY with a GitHub confirmation (comment URL).
+if ([bool]$cfg.PublishReport) {
+    # --- report fields: guarded for attempts that failed BEFORE the agent --
+    $reportBaseSha = if ($baseShaVerified) { $baseShaVerified } else { '(base was never resolved)' }
+    $reportWorktree = if ($worktreePath) { $worktreePath } else { '(worktree was never created)' }
+    if ($changes -and $changes.Ok) {
+        $changedFilesStr = if (@($changes.Files).Count -gt 0) { @($changes.Files) -join ', ' } else { '(none)' }
+        $diffStatStr = if (-not [string]::IsNullOrWhiteSpace($changes.DiffStat)) { $changes.DiffStat.Trim() } else { '(none)' }
+        $checkText = if ([string]::IsNullOrWhiteSpace($changes.Check)) { 'no whitespace/conflict-marker findings' } else { $changes.Check.Trim() }
+        $nStaged = @($changes.Staged).Count
+        $nModified = @($changes.Modified).Count
+        $nUntracked = @($changes.Untracked).Count
+        $verificationResults = "git status --porcelain -> exit 0; git diff --check HEAD -> exit 0 or 2 ($checkText); git diff --stat HEAD -> exit 0; classified: $nStaged staged, $nModified modified in worktree, $nUntracked untracked"
+    }
+    elseif ($changes) {
+        $changedFilesStr = '(verification did not complete)'
+        $diffStatStr = '(verification did not complete)'
+        $verificationResults = "VERIFICATION DID NOT COMPLETE (worktree state unknown): $($changes.Message)"
+    }
+    else {
+        $changedFilesStr = '(not verified - no git checks were reached)'
+        $diffStatStr = '(not verified - no git checks were reached)'
+        $verificationResults = '(no verification was reached - the stage failed before the git checks)'
+    }
+    $verificationCommands = 'git status --porcelain; git diff --check HEAD; git diff --stat HEAD (run in the task worktree against HEAD)'
+
+    if ($null -eq $exec) { $agentExitCodeStr = '(agent was never started)' }
+    elseif ($exec.TimedOut) { $agentExitCodeStr = 'null (agent process tree killed on timeout)' }
+    else { $agentExitCodeStr = [string]$exec.ExitCode }
+
+    if ($null -eq $exec) {
+        $agentClaimsText = '(the agent was never started)'
+    }
+    else {
+        $aOut = [string]$exec.StdOut
+        $aErrOut = [string]$exec.StdErr
+        if ($aOut.Length -gt 1500) { $aOut = $aOut.Substring(0, 1500) + "`n...[truncated by dispatcher]" }
+        if ($aErrOut.Length -gt 500) { $aErrOut = $aErrOut.Substring(0, 500) + "...[truncated by dispatcher]" }
+        $agentClaimsText = ''
+        if (-not [string]::IsNullOrWhiteSpace($aOut)) { $agentClaimsText = $aOut.Trim() }
+        if (-not [string]::IsNullOrWhiteSpace($aErrOut)) {
+            $agentClaimsText = if ($agentClaimsText) { $agentClaimsText + "`n[stderr] " + $aErrOut.Trim() } else { '[stderr] ' + $aErrOut.Trim() }
+        }
+        if (-not $agentClaimsText) { $agentClaimsText = '(the agent produced no output)' }
+    }
+
+    # Human-readable cause per status (stage sentinels are translated; an
+    # unexpected message is passed through verbatim).
+    switch ($stageResult) {
+        'SUCCESS' { $failureReason = '(none - stage completed successfully)' }
+        'NO_CHANGES' { $failureReason = 'No changes: the agent exited 0, but git status/diff reported zero changed paths (staged, modified and untracked alike).' }
+        'REFUSED' {
+            if ($caughtMsg -eq 'stage2-refused') { $failureReason = 'Refused by a dispatcher safety check (the exact rule is in the dispatcher log).' }
+            elseif ($caughtMsg) { $failureReason = $caughtMsg }
+            else { $failureReason = 'Refused by a safety check (no detail recorded; see the dispatcher log).' }
+        }
+        'TIMEOUT' {
+            if ($caughtMsg -eq 'stage2-timeout') { $failureReason = "Agent exceeded TaskTimeoutSec=$([int]$cfg.TaskTimeoutSec)s; the process tree was killed." }
+            elseif ($caughtMsg) { $failureReason = $caughtMsg }
+            else { $failureReason = "Agent exceeded TaskTimeoutSec=$([int]$cfg.TaskTimeoutSec)s." }
+        }
+        default {
+            if ($caughtMsg -eq 'stage2-error') { $failureReason = 'Agent exited with a non-zero code, worktree creation failed, or verification did not complete (see the dispatcher log).' }
+            elseif ($caughtMsg) { $failureReason = $caughtMsg }
+            else { $failureReason = 'Unknown error (no stage detail recorded; see the dispatcher log).' }
+        }
+    }
+    $noChangesReasonStr = if ($stageResult -eq 'NO_CHANGES') { 'All three verification commands completed successfully and reported no changed paths in the worktree.' } else { '' }
+
+    $reportFields = @{
+        IssueNumber           = $taskNum
+        Status                = $stageResult
+        BaseSha               = $reportBaseSha
+        AgentExitCode         = $agentExitCodeStr
+        ChangedFiles          = $changedFilesStr
+        DiffStat              = $diffStatStr
+        VerificationCommands  = $verificationCommands
+        VerificationResults   = $verificationResults
+        AgentClaims           = $agentClaimsText
+        ErrorMessage          = $failureReason
+        LogPath               = $script:LogFile
+        WorktreePath          = $reportWorktree
+        NoChangesReason       = $noChangesReasonStr
+    }
+
+    Write-Log 'INFO' ("Publishing Stage 2 report to Issue #{0} (result: {1})..." -f $taskNum, $stageResult)
+    try {
+        $pub = Publish-IssueReport @reportFields -VerifyIssue:([bool]$cfg.VerifyIssueBeforePublish) -GitHubRepo ([string]$cfg.GitHubRepo) -LabelReady ([string]$cfg.LabelReady)
+        if ($pub.Ok) {
+            Write-Log 'OK' ("Report published AND confirmed for Issue #{0}: {1}" -f $taskNum, $pub.Message)
+        }
+        else {
+            Write-Log 'ERROR' ("Report publication FAILED for Issue #{0}: {1}" -f $taskNum, $pub.Message)
+            if ($pub.LocalReportPath) { Write-Log 'WARN' ("Publication error and report kept locally: {0}" -f $pub.LocalReportPath) }
+        }
+    }
+    catch {
+        # The publication itself threw (e.g. gh is not installed): save the
+        # report + error locally; never claim success.
+        $pubErr = $_.Exception.Message
+        Write-Log 'ERROR' ("Report publication for Issue #{0} threw: {1}" -f $taskNum, $pubErr)
+        try {
+            $comment = New-Stage2ReportComment @reportFields
+            $loc = Save-LocalIssueReport -IssueNumber $taskNum -LogPath $script:LogFile -Comment $comment -PublishError $pubErr
+            if ($loc.Saved) { Write-Log 'WARN' ("Report and publication error saved locally: {0}" -f $loc.Path) }
+            else { Write-Log 'ERROR' ("Local report could NOT be saved either: {0}" -f $loc.SaveError) }
+        }
+        catch { Write-Log 'ERROR' ("Local report save also failed: {0}" -f $_.Exception.Message) }
+    }
+}
+else {
+    Write-Log 'INFO' 'Report publishing is disabled (PublishReport = $false in config). No GitHub comment was created.'
+}
+
+if ([bool]$cfg.PublishReport) {
+    Write-Log 'INFO' 'No push, no PR, no merges and no issue/label changes were performed (at most one report comment on the processed Issue).'
+}
+else {
+    Write-Log 'INFO' 'No push, no PR and no GitHub mutations were performed (report publishing is disabled).'
+}
 Write-Log 'INFO' '=== Dispatcher finished (stage 2) ==='
 exit $stageExitCode

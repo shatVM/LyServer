@@ -44,7 +44,9 @@ foreach ($fnName in @(
     'Write-Log',
     'Test-ProcessAlive', 'Get-DispatcherLockInfo', 'Enter-DispatcherLock', 'Exit-DispatcherLock',
     'Get-VerifiedBaseSha', 'Test-BaseShaRequirement', 'Get-UntrustedFindings',
-    'New-TaskWorktree', 'Remove-TaskWorktree', 'Get-WorktreeChanges'
+    'New-TaskWorktree', 'Remove-TaskWorktree', 'Get-WorktreeChanges',
+    # Issue #9: publishing
+    'New-Stage2ReportComment', 'Save-LocalIssueReport', 'Publish-IssueReport', 'Verify-IssueForPublish'
 )) {
     $match = @($fnAsts | Where-Object { $_.Name -eq $fnName })
     if ($match.Count -eq 0) { Write-Host ("FAIL: function {0} not found in dispatcher.ps1" -f $fnName); exit 1 }
@@ -758,12 +760,31 @@ Remove-Item -LiteralPath (Join-Path $lockDir26 'dispatcher.lock') -Force -ErrorA
 Test-Case 'T26 active lock blocks parallel run: exit 4, task not executed' ($run26.ExitCode -eq 4 -and $run26.Output -match 'another dispatcher instance is active') ("exit {0}" -f $run26.ExitCode)
 
 # --- T27: dispatcher source contains NO forbidden GitHub operations --------
+# Issue #9 exception: `gh issue comment` (create/edit) is authorized ONLY
+# inside the Publish-IssueReport function - the opt-in report comment.
+# Everywhere else (and push / PR / label / issue-close regardless of place)
+# remains forbidden.
 $srcText = [IO.File]::ReadAllText($DispatcherPath)
 $badOps = @()
 if ($srcText -match '(?i)Invoke-Native[^\r\n]*\bpush\b') { $badOps += 'git push invocation' }
-if ($srcText -match '(?i)Invoke-Native[^\r\n]*\bgh\b[^\r\n]*(pr|label|issue)[^\r\n]*(create|close|edit|comment|merge|delete)') { $badOps += 'gh mutation invocation' }
 if ($srcText -match '(?i)&\s*git\s+push') { $badOps += 'direct git push' }
-Test-Case 'T27 no push/PR/label/issue-mutation commands in dispatcher source' ($badOps.Count -eq 0) ($badOps -join '; ')
+$pubAsts = @($fnAsts | Where-Object { $_.Name -eq 'Publish-IssueReport' })
+$pubText = if ($pubAsts.Count -gt 0) { $pubAsts[0].Extent.Text } else { '' }
+$srcNoPub = if ($pubText) { $srcText.Replace($pubText, '') } else { $srcText }
+if ($srcNoPub -match '(?i)Invoke-Native[^\r\n]*\bgh\b[^\r\n]*(\bpr\b|\blabel\b|\bissue\b)[^\r\n]*\b(create|close|edit|comment|merge|delete)\b') { $badOps += 'gh mutation invocation outside Publish-IssueReport' }
+if (-not $pubText) { $badOps += 'Publish-IssueReport function not found (authorization zone missing)' }
+foreach ($pubLine in @($pubText -split "`r?`n")) {
+    if ($pubLine -notmatch 'Invoke-Native') { continue }
+    if ($pubLine -match '(?i)\bgh\b' -and $pubLine -match '(?i)(\bpr\b|\blabel\b)') { $badOps += "gh PR/label mutation inside Publish-IssueReport: $($pubLine.Trim())" }
+    if ($pubLine -match '(?i)\bissue\b.{0,50}\b(close|delete|reopen|label)\b') { $badOps += "issue-state mutation inside Publish-IssueReport: $($pubLine.Trim())" }
+}
+# The ONLY authorized mutation lines must all target `issue comment`
+foreach ($m in [regex]::Matches($srcText, '(?i)Invoke-Native[^\r\n]*\bgh\b[^\r\n]*')) {
+    if ($m.Value -match '(?i)\bissue\b' -and $m.Value -match '(?i)\b(create|close|edit|comment|merge|delete)\b') {
+        if ($m.Value -notmatch "(?i)'issue',\s*'comment'") { $badOps += "unrecognized gh mutation: $($m.Value.Trim())" }
+    }
+}
+Test-Case 'T27 no push/PR/label/issue-mutation commands in dispatcher source (issue comment only inside Publish-IssueReport)' ($badOps.Count -eq 0) ($badOps -join '; ')
 
 # --- T28: agent ERROR after writing a file -> data preserved ----------------
 $task28 = New-LocalTaskFile -Number 908 -Body 'Write a file into the worktree, then fail.'
@@ -888,6 +909,279 @@ Test-Case 'T33a unverifiable worktree -> ERROR: exit 1, no success declared' ($r
 Test-Case 'T33b unknown state: worktree and file preserved' ($wt33.Count -eq 1 -and $file33) ("worktrees {0}, file {1}" -f $wt33.Count, $file33)
 Test-Case 'T33c lock released although cleanup could not verify the worktree' ($lockLeft33 -eq 0) ("locks left {0}" -f $lockLeft33)
 Test-Case 'T33d output reports an unknown state (not a success)' ($run33.Output -match 'state UNKNOWN|state unknown') ''
+
+# =============================================================================
+# T35-T38: Issue #9 - Stage 2 report publishing (fake gh, NO real GitHub).
+# A fake `gh.ps1` shadows the real gh on PATH for this block ONLY (the PATH
+# is restored before T34). FAKE_GH_MODE selects the behavior, every gh call
+# (and its --body payload) is appended to FAKE_GH_LOG. The real GitHub
+# project is never contacted or mutated by these tests.
+# =============================================================================
+$fakeGhDir = Join-Path $testRoot 'fakegh'
+New-Item -ItemType Directory -Path $fakeGhDir -Force | Out-Null
+$fakeGhScript = @'
+# Fake GitHub CLI for dispatcher tests: NEVER contacts GitHub.
+$mode = $env:FAKE_GH_MODE
+if ([string]::IsNullOrEmpty($mode)) { $mode = 'ok' }
+$logPath = $env:FAKE_GH_LOG
+$a = @($args)
+if ($logPath) {
+    [System.IO.File]::AppendAllText($logPath, ('ARGS: ' + ($a -join ' | ') + "`r`n"))
+    for ($i = 0; $i -lt $a.Count; $i++) {
+        if ($a[$i] -eq '--body' -and ($i + 1) -lt $a.Count) {
+            [System.IO.File]::AppendAllText($logPath, ('---BODY---' + "`r`n" + $a[$i + 1] + "`r`n---END-BODY---" + "`r`n"))
+        }
+    }
+}
+if ($mode -eq 'fail') {
+    [Console]::Error.WriteLine('fake gh: simulated GitHub API failure')
+    exit 1
+}
+if ($a.Count -ge 2 -and $a[0] -eq 'issue' -and $a[1] -eq 'view') {
+    if ($mode -eq 'view-fail') { [Console]::Error.WriteLine('fake gh: simulated gh issue view failure'); exit 1 }
+    $joined = $a -join ' '
+    if ($joined -match '--json comments') {
+        if ($mode -eq 'comments-bad-json') { Write-Output '{ this is not valid json'; exit 0 }
+        if ($mode -eq 'exists') { Write-Output '{"comments":[{"id":"424242","body":"<!-- dispatcher-report issue=901 --> previous report"}]}'; exit 0 }
+        Write-Output '{"comments":[]}'
+        exit 0
+    }
+    $num = if ($a.Count -ge 3) { [string]$a[2] } else { '0' }
+    $state = 'open'
+    $labels = '[{"name":"ready-for-opencode"}]'
+    if ($mode -eq 'view-closed') { $state = 'closed' }
+    if ($mode -eq 'view-nolabel') { $labels = '[]' }
+    if ($mode -eq 'view-wrongnumber') { $num = '999999' }
+    Write-Output ('{"number":' + $num + ',"state":"' + $state + '","labels":' + $labels + '}')
+    exit 0
+}
+if ($a.Count -ge 2 -and $a[0] -eq 'issue' -and $a[1] -eq 'comment') {
+    if ($mode -eq 'comment-fail') { [Console]::Error.WriteLine('fake gh: simulated gh issue comment failure'); exit 1 }
+    if ($mode -eq 'silent-success') { exit 0 }
+    $num = if ($a.Count -ge 3) { [string]$a[2] } else { '?' }
+    Write-Output ('https://github.com/shatVM/LyServer/issues/' + $num + '#issuecomment-1')
+    exit 0
+}
+exit 0
+'@
+Set-Content -LiteralPath (Join-Path $fakeGhDir 'gh.ps1') -Value $fakeGhScript -Encoding UTF8
+$pathBeforeFakeGh = $env:Path
+$env:Path = "$fakeGhDir;$env:Path"
+$ghResolved = Resolve-Command -Name 'gh'
+Test-Case 'T35a fake gh shadows the real gh on PATH (test isolation)' ($null -ne $ghResolved -and $ghResolved.FilePath -eq 'powershell.exe' -and (($ghResolved.PrefixArgs -join ' ') -match 'fakegh')) $(if ($ghResolved) { $ghResolved.FilePath } else { 'NOT FOUND' })
+
+$fakeGhLog = Join-Path $testRoot 'fakegh.log'
+$unitLog = Join-Path $testRoot 'publish-unit.log'
+function Get-FakeGhLog {
+    if (Test-Path -LiteralPath $fakeGhLog) { return [IO.File]::ReadAllText($fakeGhLog) }
+    return ''
+}
+function Reset-FakeGh {
+    param([string]$Mode = 'ok')
+    $env:FAKE_GH_MODE = $Mode
+    $env:FAKE_GH_LOG = $fakeGhLog
+    if (Test-Path -LiteralPath $fakeGhLog) { Remove-Item -LiteralPath $fakeGhLog -Force }
+}
+function New-UnitReportParams {
+    # Standard unit-test payload for Publish-IssueReport.
+    param([int]$IssueNumber = 905, [string]$Status = 'SUCCESS', [string]$Claims = '(no agent output)')
+    return @{
+        IssueNumber          = $IssueNumber
+        Status               = $Status
+        BaseSha              = '0123456789abcdef0123456789abcdef01234567'
+        AgentExitCode        = '0'
+        ChangedFiles         = 'agent-output.txt'
+        DiffStat             = ' agent-output.txt | 1 +'
+        VerificationCommands = 'git status --porcelain; git diff --check HEAD; git diff --stat HEAD (run in the task worktree against HEAD)'
+        VerificationResults  = 'git status --porcelain -> exit 0; classified: 0 staged, 1 modified in worktree, 0 untracked'
+        AgentClaims          = $Claims
+        ErrorMessage         = '(none - stage completed successfully)'
+        LogPath              = $unitLog
+        WorktreePath         = (Join-Path $testRoot 'unit-worktree')
+        NoChangesReason      = ''
+    }
+}
+$readyLabel = 'ready-for-opencode'
+$repoName = 'shatVM/LyServer'
+
+# --- T35: successful publication + content of the report --------------------
+Reset-FakeGh -Mode 'ok'
+$u35 = New-UnitReportParams -IssueNumber 905 -Status 'SUCCESS'
+$r35 = Publish-IssueReport @u35 -VerifyIssue -GitHubRepo $repoName -LabelReady $readyLabel
+$log35 = Get-FakeGhLog
+$body35 = ''
+$m35 = [regex]::Match($log35, '(?s)---BODY---\r?\n(.*?)\r?\n---END-BODY---')
+if ($m35.Success) { $body35 = $m35.Groups[1].Value }
+Test-Case 'T35b successful publication confirmed (Ok + Confirmed)' ($r35.Ok -and $r35.Confirmed -and $r35.Message -match 'URL') $r35.Message
+Test-Case 'T35c gh was called with the DISPATCHER issue number (verify + comment)' (($log35 -match 'ARGS: issue \| view \| 905') -and ($log35 -match 'ARGS: issue \| comment \| 905')) ($log35 -replace "`r?`n", ' // ')
+$t35content = ($body35 -match 'issue=905') -and ($body35 -match '\*\*Issue:\*\* #905') -and
+    ($body35 -match '\*\*Dispatcher Status:\*\* SUCCESS') -and ($body35 -match '\*\*Base SHA:\*\* 0123456789abcdef') -and
+    ($body35 -match '\*\*Agent Exit Code:\*\* 0') -and ($body35 -match '\*\*Execution Time:\*\* \d{4}') -and
+    ($body35 -match '### Verified Facts \(Dispatcher\)') -and ($body35 -match '### Agent Claims \(NOT Verified by Dispatcher\)') -and
+    ($body35 -match 'git status --porcelain; git diff --check HEAD') -and
+    ($body35 -match 'classified') -and ($body35 -match 'agent-output.txt') -and
+    ($body35 -match '### Log Locations') -and ($body35 -match 'publish-unit\.log') -and
+    ($body35 -match 'unit-worktree')
+Test-Case 'T35d report contains all required fields (issue/time/base/status/exit code/checks/files/logs)' $t35content ($(if ($body35) { 'content checked: ' + $body35.Length + ' chars' } else { 'NO BODY CAPTURED' }))
+
+# The agent may CLAIM any issue number - the comment must still target the
+# number the dispatcher executed (requirement: never the agent's number).
+Reset-FakeGh -Mode 'ok'
+$u35e = New-UnitReportParams -IssueNumber 905 -Status 'SUCCESS' -Claims 'Done, see issue #1234 for details.'
+$r35e = Publish-IssueReport @u35e
+$log35e = Get-FakeGhLog
+Test-Case 'T35e agent-claimed issue number is never used as the comment target' (($r35e.Ok) -and ($log35e -match 'issue \| comment \| 905') -and ($log35e -notmatch 'issue \| comment \| 1234') -and ($log35e -match 'see issue #1234')) 'claim kept as text; target = dispatcher number'
+
+# --- T36: failure scenarios (unit on the real Publish-IssueReport) ---------
+# T36a/b: gh API error while creating the comment -> Ok=false + local report
+Reset-FakeGh -Mode 'comment-fail'
+$u36a = New-UnitReportParams -IssueNumber 906 -Status 'ERROR'
+$r36a = Publish-IssueReport @u36a
+$local36a = if ($r36a.LocalReportPath) { [IO.File]::ReadAllText($r36a.LocalReportPath) } else { '' }
+Test-Case 'T36a gh comment failure -> not confirmed, error + report saved locally' ((-not $r36a.Ok) -and (-not $r36a.Confirmed) -and ($r36a.Message -match 'gh issue comment failed') -and ($r36a.LocalReportPath -and (Test-Path -LiteralPath $r36a.LocalReportPath))) $r36a.Message
+Test-Case 'T36b local report file contains the report AND the publication error' (($local36a -match 'Stage 2 Execution Report') -and ($local36a -match 'Published to GitHub: NO') -and ($local36a -match 'simulated gh issue comment failure')) $(if ($r36a.LocalReportPath) { $r36a.LocalReportPath } else { 'no local file' })
+
+# T36c: gh exits 0 but returns NO comment URL -> publication cannot be
+# confirmed; success must not be claimed.
+Reset-FakeGh -Mode 'silent-success'
+$u36c = New-UnitReportParams -IssueNumber 907 -Status 'SUCCESS'
+$r36c = Publish-IssueReport @u36c
+Test-Case 'T36c exit 0 without confirmation URL -> treated as NOT published' ((-not $r36c.Ok) -and (-not $r36c.Confirmed) -and ($r36c.Message -match 'CANNOT be confirmed') -and ($r36c.LocalReportPath -and (Test-Path -LiteralPath $r36c.LocalReportPath))) $r36c.Message
+
+# T36d: retry with an existing report comment -> UPDATE (--edit), no duplicate
+Reset-FakeGh -Mode 'exists'
+$u36d = New-UnitReportParams -IssueNumber 908 -Status 'TIMEOUT'
+$r36d = Publish-IssueReport @u36d
+$log36d = Get-FakeGhLog
+Test-Case 'T36d existing report comment is edited, not duplicated (safe retry)' ($r36d.Ok -and ($log36d -match 'issue \| comment \| 908 \| --edit \| 424242') -and (@([regex]::Matches($log36d, 'ARGS: issue \| comment')).Count -eq 1)) ($log36d -replace "`r?`n", ' // ')
+
+# T36e: the idempotency check itself fails -> ABORT (posting blindly could
+# duplicate a report from a previous unconfirmed attempt).
+Reset-FakeGh -Mode 'view-fail'
+$u36e = New-UnitReportParams -IssueNumber 909 -Status 'SUCCESS'
+$r36e = Publish-IssueReport @u36e
+$log36e = Get-FakeGhLog
+Test-Case 'T36e idempotency check failure -> publication aborted, no comment posted' ((-not $r36e.Ok) -and ($r36e.Message -match 'ABORTED') -and ($log36e -notmatch 'ARGS: issue \| comment') -and ($r36e.LocalReportPath -and (Test-Path -LiteralPath $r36e.LocalReportPath))) $r36e.Message
+
+# T36f: invalid JSON from gh -> aborted instead of guessing
+Reset-FakeGh -Mode 'comments-bad-json'
+$u36f = New-UnitReportParams -IssueNumber 910 -Status 'SUCCESS'
+$r36f = Publish-IssueReport @u36f
+$log36f = Get-FakeGhLog
+Test-Case 'T36f unparsable comments JSON -> aborted, nothing posted' ((-not $r36f.Ok) -and ($r36f.Message -match 'parse comments JSON') -and ($log36f -notmatch 'ARGS: issue \| comment')) $r36f.Message
+
+# T36g: gh completely unavailable (mode fail) -> local report kept
+Reset-FakeGh -Mode 'fail'
+$u36g = New-UnitReportParams -IssueNumber 911 -Status 'ERROR'
+$r36g = Publish-IssueReport @u36g
+Test-Case 'T36g total gh failure -> Ok=false, local report + error saved' ((-not $r36g.Ok) -and ($r36g.Message -match 'idempotency check failed') -and ($r36g.LocalReportPath -and (Test-Path -LiteralPath $r36g.LocalReportPath))) $r36g.Message
+
+# --- T37: Verify-IssueForPublish (existence / open / label / identity) ------
+Reset-FakeGh -Mode 'ok'
+$v37a = Verify-IssueForPublish -IssueNumber 905 -GitHubRepo $repoName -LabelReady $readyLabel
+Test-Case 'T37a open issue with ready label -> verification passes' ($v37a.Ok) $v37a.Message
+Reset-FakeGh -Mode 'view-closed'
+$v37b = Verify-IssueForPublish -IssueNumber 905 -GitHubRepo $repoName -LabelReady $readyLabel
+Test-Case 'T37b closed issue -> verification refuses publication' ((-not $v37b.Ok) -and ($v37b.Message -match 'not open')) $v37b.Message
+Reset-FakeGh -Mode 'view-nolabel'
+$v37c = Verify-IssueForPublish -IssueNumber 905 -GitHubRepo $repoName -LabelReady $readyLabel
+Test-Case 'T37c missing ready label -> verification refuses publication' ((-not $v37c.Ok) -and ($v37c.Message -match 'ready-for-opencode')) $v37c.Message
+Reset-FakeGh -Mode 'view-wrongnumber'
+$v37d = Verify-IssueForPublish -IssueNumber 905 -GitHubRepo $repoName -LabelReady $readyLabel
+Test-Case 'T37d GitHub returns a DIFFERENT issue number -> refused (identity guard)' ((-not $v37d.Ok) -and ($v37d.Message -match 'different issue')) $v37d.Message
+Reset-FakeGh -Mode 'view-fail'
+$v37e = Verify-IssueForPublish -IssueNumber 905 -GitHubRepo $repoName -LabelReady $readyLabel
+Test-Case 'T37e gh issue view failure -> verification refuses publication' ((-not $v37e.Ok) -and ($v37e.Message -match 'gh issue view failed')) $v37e.Message
+
+# --- T38: FULL Stage 2 runs with publishing (fake gh, Local task source) ----
+# A fake agent that makes a REAL change and CLAIMS a different issue number
+# in its output: the report must still target the dispatcher's issue.
+$agentOkMentions = Join-Path $fakeBin 'fakeagent-ok-mentions.ps1'
+Set-Content -LiteralPath $agentOkMentions -Encoding UTF8 -Value @'
+param()
+Set-Content -LiteralPath 'agent-output.txt' -Value ('fake change ' + (Get-Date -Format o)) -Encoding UTF8
+Write-Output 'Finished issue #1234 - please review.'
+exit 0
+'@
+$env:Path = "$fakeBin;$env:Path"
+
+# T38a: SUCCESS + publication (report goes to the executed issue)
+Reset-FakeGh -Mode 'ok'
+$task38a = New-LocalTaskFile -Number 920 -Body 'Add a hello file.'
+$cfg38a = New-Stage2Config -TaskFile $task38a -Agent 'fakeagent-ok-mentions' -TaskTimeout '60' -RunRoot (Join-Path $testRoot 'runs-t38a')
+$cfg38aText = [IO.File]::ReadAllText($cfg38a).TrimEnd().TrimEnd('}') + "    PublishReport = 'True'`r`n    VerifyIssueBeforePublish = 'True'`r`n}"
+[IO.File]::WriteAllText($cfg38a, $cfg38aText)
+$run38a = Invoke-Dispatcher -ConfigPath $cfg38a -SkipModelPing -Stage2
+$log38a = Get-FakeGhLog
+$logDir38a = ([regex]::Match([IO.File]::ReadAllText($cfg38a), "LogDir\s*=\s*'([^']+)'")).Groups[1].Value
+$local38a = @(Get-ChildItem -LiteralPath $logDir38a -Filter '*-issue-920-report.md' -ErrorAction SilentlyContinue)
+Test-Case 'T38a full run SUCCESS -> report published AND confirmed on issue #920' (($run38a.ExitCode -eq 0) -and ($run38a.Output -match 'Report published AND confirmed for Issue #920') -and ($log38a -match 'issue \| view \| 920') -and ($log38a -match 'issue \| comment \| 920') -and ($run38a.Output -match 'result: SUCCESS')) ("exit {0}" -f $run38a.ExitCode)
+$t38aBody = ''
+$m38a = [regex]::Match($log38a, '(?s)---BODY---\r?\n(.*?)\r?\n---END-BODY---')
+if ($m38a.Success) { $t38aBody = $m38a.Groups[1].Value }
+Test-Case 'T38b report carries verification facts; agent claim stays UNVERIFIED text; wrong number never targeted' (($t38aBody -match 'Dispatcher Status:\*\* SUCCESS') -and ($t38aBody -match 'Agent Exit Code:\*\* 0') -and ($t38aBody -match 'Finished issue #1234') -and ($t38aBody -match 'NOT Verified') -and ($t38aBody -match 'git diff --stat HEAD') -and ($log38a -notmatch 'issue \| comment \| 1234') -and ($local38a.Count -eq 0)) $(if ($t38aBody) { 'body captured; no local file expected' } else { 'NO BODY CAPTURED' })
+
+# T38c: NO_CHANGES + publication (cause of "no changes" must be in the report)
+Reset-FakeGh -Mode 'ok'
+$task38c = New-LocalTaskFile -Number 921 -Body 'Do nothing.'
+$cfg38c = New-Stage2Config -TaskFile $task38c -Agent 'fakeagent-noop' -TaskTimeout '60' -RunRoot (Join-Path $testRoot 'runs-t38c')
+$cfg38cText = [IO.File]::ReadAllText($cfg38c).TrimEnd().TrimEnd('}') + "    PublishReport = 'True'`r`n}"
+[IO.File]::WriteAllText($cfg38c, $cfg38cText)
+$run38c = Invoke-Dispatcher -ConfigPath $cfg38c -SkipModelPing -Stage2
+$log38c = Get-FakeGhLog
+$t38cOk = ($run38c.ExitCode -eq 0) -and ($run38c.Output -match 'result: NO_CHANGES') -and ($run38c.Output -match 'Report published AND confirmed for Issue #921') -and ($log38c -match 'Dispatcher Status:\*\* NO_CHANGES') -and ($log38c -match 'No Changes Reason') -and ($log38c -match 'zero changed paths')
+Test-Case 'T38c NO_CHANGES -> report published with the no-changes cause' $t38cOk ("exit {0}" -f $run38c.ExitCode)
+
+# T38d: TIMEOUT + publication (timeout cause must be in the report)
+Reset-FakeGh -Mode 'ok'
+$task38d = New-LocalTaskFile -Number 922 -Body 'Hang forever.'
+$cfg38d = New-Stage2Config -TaskFile $task38d -Agent 'fakeagent-hang' -TaskTimeout '4' -RunRoot (Join-Path $testRoot 'runs-t38d')
+$cfg38dText = [IO.File]::ReadAllText($cfg38d).TrimEnd().TrimEnd('}') + "    PublishReport = 'True'`r`n}"
+[IO.File]::WriteAllText($cfg38d, $cfg38dText)
+$run38d = Invoke-Dispatcher -ConfigPath $cfg38d -SkipModelPing -Stage2
+$log38d = Get-FakeGhLog
+$t38dOk = ($run38d.ExitCode -eq 2) -and ($run38d.Output -match 'result: TIMEOUT') -and ($run38d.Output -match 'Report published AND confirmed for Issue #922') -and ($log38d -match 'Dispatcher Status:\*\* TIMEOUT') -and ($log38d -match 'TaskTimeoutSec=4s') -and ($log38d -match 'killed on timeout')
+Test-Case 'T38d TIMEOUT -> report published with timeout cause and killed-agent exit code' $t38dOk ("exit {0}" -f $run38d.ExitCode)
+
+# T38e: publishing DISABLED (default) -> the fake gh must see NO call at all
+$fakeGhLogDisabled = Join-Path $testRoot 'fakegh-disabled.log'
+$env:FAKE_GH_MODE = 'ok'
+$env:FAKE_GH_LOG = $fakeGhLogDisabled
+$task38e = New-LocalTaskFile -Number 923 -Body 'No publish expected.'
+$cfg38e = New-Stage2Config -TaskFile $task38e -Agent 'fakeagent-noop' -TaskTimeout '60' -RunRoot (Join-Path $testRoot 'runs-t38e')
+$run38e = Invoke-Dispatcher -ConfigPath $cfg38e -SkipModelPing -Stage2
+$t38eOk = ($run38e.ExitCode -eq 0) -and ($run38e.Output -match 'result: NO_CHANGES') -and
+    ($run38e.Output -match 'Report publishing is disabled') -and (-not (Test-Path -LiteralPath $fakeGhLogDisabled))
+Test-Case 'T38e PublishReport default OFF -> no gh call, no comment, explicit skip message' $t38eOk ("exit {0}; gh log created: {1}" -f $run38e.ExitCode, (Test-Path -LiteralPath $fakeGhLogDisabled))
+
+# T38f: publication fails mid-run -> stage result preserved, local report kept
+Reset-FakeGh -Mode 'comment-fail'
+$task38f = New-LocalTaskFile -Number 924 -Body 'Change, but publish will fail.'
+$cfg38f = New-Stage2Config -TaskFile $task38f -Agent 'fakeagent-ok' -TaskTimeout '60' -RunRoot (Join-Path $testRoot 'runs-t38f')
+$cfg38fText = [IO.File]::ReadAllText($cfg38f).TrimEnd().TrimEnd('}') + "    PublishReport = 'True'`r`n    VerifyIssueBeforePublish = 'True'`r`n}"
+[IO.File]::WriteAllText($cfg38f, $cfg38fText)
+$run38f = Invoke-Dispatcher -ConfigPath $cfg38f -SkipModelPing -Stage2
+$logDir38f = ([regex]::Match([IO.File]::ReadAllText($cfg38f), "LogDir\s*=\s*'([^']+)'")).Groups[1].Value
+$local38f = @(Get-ChildItem -LiteralPath $logDir38f -Filter '*-issue-924-report.md' -ErrorAction SilentlyContinue)
+$local38fText = if ($local38f.Count -eq 1) { [IO.File]::ReadAllText($local38f[0].FullName) } else { '' }
+Test-Case 'T38f publish failure during a full run -> stage exit kept, ERROR logged, local report saved' (($run38f.ExitCode -eq 0) -and ($run38f.Output -match 'Report publication FAILED for Issue #924') -and ($run38f.Output -notmatch 'published AND confirmed') -and ($local38f.Count -eq 1) -and ($local38fText -match 'Published to GitHub: NO') -and ($local38fText -match 'Stage 2 Execution Report')) ("exit {0}; local reports: {1}" -f $run38f.ExitCode, $local38f.Count)
+
+# T38g: issue verification refuses (closed issue) -> nothing posted, local copy
+Reset-FakeGh -Mode 'view-closed'
+$task38g = New-LocalTaskFile -Number 925 -Body 'Would run, but publish verify refuses.'
+$cfg38g = New-Stage2Config -TaskFile $task38g -Agent 'fakeagent-noop' -TaskTimeout '60' -RunRoot (Join-Path $testRoot 'runs-t38g')
+$cfg38gText = [IO.File]::ReadAllText($cfg38g).TrimEnd().TrimEnd('}') + "    PublishReport = 'True'`r`n    VerifyIssueBeforePublish = 'True'`r`n}"
+[IO.File]::WriteAllText($cfg38g, $cfg38gText)
+$run38g = Invoke-Dispatcher -ConfigPath $cfg38g -SkipModelPing -Stage2
+$log38g = Get-FakeGhLog
+$logDir38g = ([regex]::Match([IO.File]::ReadAllText($cfg38g), "LogDir\s*=\s*'([^']+)'")).Groups[1].Value
+$local38g = @(Get-ChildItem -LiteralPath $logDir38g -Filter '*-issue-925-report.md' -ErrorAction SilentlyContinue)
+Test-Case 'T38g verify refuses (issue closed) -> NO comment posted, local report saved, no success claimed' (($run38g.Output -match 'issue verification refused publication') -and ($log38g -notmatch 'ARGS: issue \| comment') -and ($local38g.Count -eq 1) -and ($run38g.Output -notmatch 'published AND confirmed')) ("exit {0}" -f $run38g.ExitCode)
+
+# --- restore PATH + env: the REAL gh must serve the T34 snapshots again -----
+$env:Path = $pathBeforeFakeGh
+Remove-Item Env:\FAKE_GH_MODE -ErrorAction SilentlyContinue
+Remove-Item Env:\FAKE_GH_LOG -ErrorAction SilentlyContinue
 
 # --- T34: final GitHub + repository invariants ------------------------------
 $issuesFinal = Get-GhJsonSnapshot -Kind Issues
