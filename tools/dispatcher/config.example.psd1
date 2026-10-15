@@ -49,4 +49,13 @@
     # Безпечна обробка застарілого lock-файлу (секунди): старший за цей
     # вік lock вважається застарілим, архівується і береться заново.
     LockStaleSec   = 900
+
+    # ---- Issue report publishing (Issue #9) ----
+    # Увімкнути публікацію звіту у GitHub Issue (COMMENT ONLY).
+    # За замовчуванням ВИМКНЕНО: публікація — це мутація, вона потребує явного opt-in.
+    PublishReport  = $false
+
+    # TaskSource='GitHub': перевіряти, що Issue існує, відкрите і має
+    # LabelReady перед публікацією (безпечна перевірка TOCTOU).
+    VerifyIssueBeforePublish = $true
 }
