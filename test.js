@@ -292,6 +292,16 @@ async function main() {
         "Issue #61: дотик не блокує прокручування та жести",
         css.includes("touch-action: manipulation") && jsSrc.includes("touchScrolled")
       );
+      // Регресія: глобальні button:hover (#144985) і button:active (scale) мають
+      // вищу специфікацію за .slide-zone — зони повинні явно скидати ці стилі
+      check(
+        "Issue #61: зони скидають глобальні стилі button (синій фон/transform)",
+        /\.slide-zone\s*\{[^}]*border-radius:\s*0/.test(css) &&
+          /\.slide-zone\s*\{[^}]*background:\s*transparent/.test(css) &&
+          /\.slide-zone\s*\{[^}]*transition:\s*none/.test(css) &&
+          /\.slide-zone:hover,\s*\.slide-zone:active\s*\{[^}]*background:\s*transparent/.test(css) &&
+          /\.slide-zone:hover,\s*\.slide-zone:active\s*\{[^}]*transform:\s*none/.test(css)
+      );
 
       // 8. Керування трансляцією потребує PIN
       r = await fetch(`${base}/api/control`, {

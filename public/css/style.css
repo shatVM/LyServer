@@ -800,11 +800,26 @@ footer {
   padding: 0;
   margin: 0;
   border: 0;
+  /* Скид глобальних стилів button: фон #185ba5, радіус, transform і їх transition.
+     Без цього під час наведення зона заливалася б синім (#144985). */
+  border-radius: 0;
   background: transparent;
+  color: inherit;
+  transform: none;
+  transition: none;
   cursor: pointer;
   /* Не блокує вертикальне прокручування, масштабування та стандартні жести */
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
+}
+
+/* button:hover і button:active (специфікація 0,1,1) вищі за .slide-zone (0,1,0),
+   тому фон і масштабування знімаємо окремими правилами зі специфікацією 0,2,0 —
+   у зоні відображається лише чорний градієнт з ::before */
+.slide-zone:hover,
+.slide-zone:active {
+  background: transparent;
+  transform: none;
 }
 
 .slide-zone-left { left: 0; justify-content: flex-start; }
