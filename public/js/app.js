@@ -24,6 +24,9 @@ let applyingRemote = false;
 // Current slide page count in demo
 let demoPageCount = 1;
 
+// Issue #61: файл, для якого вже показано початкову підказку навігації (демонстрація)
+let sharedNavHintFile = null;
+
 // Determine current page type
 const isDemoPage = Boolean(window.location.pathname.includes("demonstration"));
 const isUploadPage = Boolean(window.location.pathname.includes("upload"));
@@ -290,6 +293,9 @@ function renderSlideImage(name, page, totalPages) {
   img.onerror = () => {
     viewer.innerHTML = '<div class="empty">⚠️ Помилка завантаження зображення слайду ' + page + '</div>';
   };
+
+  // Issue #61: активні зони лівої/правої половини зображення (ліва — назад, права — уперед)
+  if (slideNavAllowed()) ensureSlideZones(viewer);
 }
 
 /**
@@ -332,6 +338,82 @@ async function prepareAndShowSlides(name, page, onReady) {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #61: навігація слайдами натисканням на ліву/праву зону зображення
+// ---------------------------------------------------------------------------
+
+const ARROW_SVG = {
+  prev: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><polyline points="15 5 8 12 15 19"></polyline></svg>',
+  next: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><polyline points="9 5 16 12 9 19"></polyline></svg>'
+};
+
+/** Issue #61: чи дозволено цьому клієнту перемикати слайди зонами */
+function slideNavAllowed() {
+  // Синхронізована демонстрація: спільний слайд змінює лише викладач (чинні правила)
+  if (isDemoPage) return role === "teacher";
+  return true; // самостійний перегляд — локальна навігація
+}
+
+/** Issue #61: єдиний шлях перемикання — та сама логіка, що й у кнопок «← / →» */
+function navigateSlide(delta) {
+  if (isDemoPage) changeSharedPage(delta);
+  else stepLocalPage(delta);
+}
+
+/** Issue #61: початкова підказка — обидві стрілки добре помітні до першої взаємодії */
+function setSlideNavHint(on) {
+  const viewer = $("viewer");
+  if (viewer) viewer.classList.toggle("nav-hint", Boolean(on));
+}
+
+/**
+ * Issue #61: активні зони лівої/правої половини зображення (без текстових підписів).
+ * Створюються один раз на контент глядача — обробники подій не дублюються.
+ */
+function ensureSlideZones(viewer) {
+  if (!viewer || viewer.querySelector(".slide-zone")) return;
+
+  ["prev", "next"].forEach(side => {
+    const zone = document.createElement("button");
+    zone.type = "button";
+    // Класи позиціювання: .slide-zone-left (ліва половина) / .slide-zone-right (права)
+    zone.className = "slide-zone slide-zone-" + (side === "prev" ? "left" : "right");
+    zone.dataset.side = side;
+    zone.setAttribute("aria-label", side === "prev" ? "Попередній слайд" : "Наступний слайд");
+    // Лише стрілка (SVG), жодних видимих підписів
+    zone.innerHTML = ARROW_SVG[side];
+
+    // Торкання не має блокувати вертикальне прокручування та жести браузера:
+    // якщо палець змістився більше ніж на 10 px — це прокручування, а не натискання
+    let touchStartY = null;
+    let touchScrolled = false;
+    zone.addEventListener("touchstart", e => {
+      touchStartY = e.touches[0] ? e.touches[0].clientY : null;
+      touchScrolled = false;
+    }, { passive: true });
+    zone.addEventListener("touchmove", e => {
+      if (touchStartY === null || !e.touches[0]) return;
+      if (Math.abs(e.touches[0].clientY - touchStartY) > 10) touchScrolled = true;
+    }, { passive: true });
+
+    // Короткочасне підсвічування зони: дотик на телефоні чи натискання мишею
+    zone.addEventListener("pointerdown", () => zone.classList.add("is-active"));
+    const clearActive = () => setTimeout(() => zone.classList.remove("is-active"), 220);
+    zone.addEventListener("pointerup", clearActive);
+    zone.addEventListener("pointercancel", clearActive);
+    zone.addEventListener("pointerleave", clearActive);
+
+    zone.addEventListener("click", () => {
+      if (touchScrolled) return;                 // було прокручування, а не натискання
+      if (!slideNavAllowed()) return;            // учень на демонстрації не змінює спільний слайд
+      if (viewer.classList.contains("nav-hint")) setSlideNavHint(false);
+      navigateSlide(side === "prev" ? -1 : 1);   // на межах перемикання не відбувається (кламп)
+    });
+
+    viewer.appendChild(zone);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Role Management & Modal
 // ---------------------------------------------------------------------------
 function updateRoleUI() {
@@ -364,6 +446,9 @@ function updateRoleUI() {
     if ($("demoGridContainer")) {
       $("demoGridContainer").classList.toggle("student-demo-layout", !isTeacher);
     }
+    // Issue #61: на спільному слайді зони навігації — лише в і викладача;
+    // після зміні ролі наявні зони у не-викладача прибираються
+    if (!isTeacher) document.querySelectorAll(".slide-zone").forEach(z => z.remove());
   }
 
   if (isMaterialsPage) {
@@ -647,6 +732,9 @@ function displayLocalFile(fileId) {
   if (SLIDE_EXTS.has(file.ext)) {
     if ($("pdfControls")) $("pdfControls").style.display = "flex";
 
+    // Issue #61: нове відкриття матеріалу — показуємо початкову підказку навігації
+    setSlideNavHint(true);
+
     prepareAndShowSlides(actualId, 1, pageCount => {
       localPageCount = pageCount;
       renderSlideImage(actualId, 1, pageCount);
@@ -717,6 +805,13 @@ function displaySharedFile(fileId, state = {}) {
   // Slides (PDF or PPTX) — render as PNG images
   if (state.kind === "slides" || state.kind === "pdf" || SLIDE_EXTS.has(extOf(fileId))) {
     const pageNum = Math.max(1, state.page || 1);
+
+    // Issue #61: початкова підказка показується при новому відкритті матеріалу
+    // (при зміні слайду в межах того самого файлу не скидається)
+    if (sharedNavHintFile !== fileId) {
+      sharedNavHintFile = fileId;
+      setSlideNavHint(true);
+    }
 
     // Check if slides are ready or prepare them
     fetch("/api/slides/info?file=" + encodeURIComponent(fileId))
@@ -860,19 +955,9 @@ async function prepareSlidesBg(fileId) {
 // ---------------------------------------------------------------------------
 // Event Listeners
 // ---------------------------------------------------------------------------
-if ($("prevPage")) {
-  $("prevPage").onclick = () => {
-    if (isDemoPage) changeSharedPage(-1);
-    else stepLocalPage(-1);
-  };
-}
-
-if ($("nextPage")) {
-  $("nextPage").onclick = () => {
-    if (isDemoPage) changeSharedPage(1);
-    else stepLocalPage(1);
-  };
-}
+// Issue #61: ті самі обробники використовує навігація зонами зображення
+if ($("prevPage")) $("prevPage").onclick = () => navigateSlide(-1);
+if ($("nextPage")) $("nextPage").onclick = () => navigateSlide(1);
 
 // Issue #9: перехід на потрібний слайд за номером з клавіатури
 function gotoPageInput() {

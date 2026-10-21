@@ -245,6 +245,64 @@ async function main() {
         JSON.stringify(list)
       );
 
+      // 7б. Issue #61: навігація слайдами натисканням на ліву/праву зону зображення
+      check(
+        "Issue #61: зони створюються в JS і класи збігаються з CSS",
+        jsSrc.includes("ensureSlideZones") &&
+          jsSrc.includes('"slide-zone slide-zone-" + (side === "prev" ? "left" : "right")') &&
+          jsSrc.includes('zone.dataset.side = side') &&
+          jsSrc.includes("<polyline") &&
+          css.includes(".slide-zone-left") &&
+          css.includes(".slide-zone-right")
+      );
+      check(
+        "Issue #61: без текстових підписів — лише SVG у зоні та aria-label",
+        jsSrc.includes("zone.innerHTML = ARROW_SVG[side]") &&
+          jsSrc.includes('setAttribute("aria-label"')
+      );
+      check(
+        "Issue #61: перемикання через чинні механізми (navigateSlide)",
+        jsSrc.includes("function navigateSlide(delta)") &&
+          jsSrc.includes("changeSharedPage(delta)") &&
+          jsSrc.includes("stepLocalPage(delta)")
+      );
+      check(
+        "Issue #61: на демонстрації спільний слайд змінює лише викладач",
+        jsSrc.includes('if (isDemoPage) return role === "teacher"') &&
+          jsSrc.includes("if (!slideNavAllowed()) return;")
+      );
+      check(
+        "Issue #61: градієнти 15% / 50% і дзеркалість зон",
+        css.includes("opacity: 0.15") &&
+          css.includes("opacity: 0.5") &&
+          css.includes("linear-gradient(to right, rgba(0, 0, 0, 1)") &&
+          css.includes("linear-gradient(to left, rgba(0, 0, 0, 1)")
+      );
+      check(
+        "Issue #61: плавність переходів 200–250 мс",
+        css.includes("transition: opacity 220ms ease")
+      );
+      check(
+        "Issue #61: початкова підказка до першої взаємодії",
+        jsSrc.includes("setSlideNavHint") &&
+          jsSrc.includes("nav-hint") &&
+          css.includes("#viewer.nav-hint .slide-zone svg")
+      );
+      check(
+        "Issue #61: дотик не блокує прокручування та жести",
+        css.includes("touch-action: manipulation") && jsSrc.includes("touchScrolled")
+      );
+      // Регресія: глобальні button:hover (#144985) і button:active (scale) мають
+      // вищу специфікацію за .slide-zone — зони повинні явно скидати ці стилі
+      check(
+        "Issue #61: зони скидають глобальні стилі button (синій фон/transform)",
+        /\.slide-zone\s*\{[^}]*border-radius:\s*0/.test(css) &&
+          /\.slide-zone\s*\{[^}]*background:\s*transparent/.test(css) &&
+          /\.slide-zone\s*\{[^}]*transition:\s*none/.test(css) &&
+          /\.slide-zone:hover,\s*\.slide-zone:active\s*\{[^}]*background:\s*transparent/.test(css) &&
+          /\.slide-zone:hover,\s*\.slide-zone:active\s*\{[^}]*transform:\s*none/.test(css)
+      );
+
       // 8. Керування трансляцією потребує PIN
       r = await fetch(`${base}/api/control`, {
         method: "POST",
