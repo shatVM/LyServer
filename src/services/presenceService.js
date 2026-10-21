@@ -5,14 +5,17 @@
  * Teacher polls GET /api/presence/students to get the list with online status.
  *
  * A student is considered "online" if:
- *  - their last heartbeat was within 10 seconds, AND
+ *  - their last heartbeat was within 6 seconds, AND
  *  - their browser session reported itself active (visible tab / not closed).
  *
- * Issue #7: активність сесії оновлюється не лише таймером, а й миттєво через
- * Page Visibility API (visibilitychange + sendBeacon при закритті вкладки).
+ * Issue #7 / Issue #19: активність сесії оновлюється не лише таймером, а й
+ * миттєво через Page Visibility API (visibilitychange + sendBeacon при
+ * закритті вкладки). Для швидкого оновлення статусу: heartbeat учня — кожні
+ * ~2 с (public/js/app.js, HEARTBEAT_MS), опитування викладачем — щосекунди
+ * (PRESENCE_POLL_MS), тайм-аут офлайну — 6 с.
  */
 
-const TIMEOUT_MS = 10000; // 10 seconds without heartbeat → offline
+const TIMEOUT_MS = 6000; // 6 seconds without heartbeat → offline
 
 const students = new Map();
 // Map<studentId, { id, name, active, lastSeen, joinedAt }>

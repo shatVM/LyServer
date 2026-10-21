@@ -84,6 +84,22 @@ async function sendHeartbeat(activeOverride) {
   } catch { /* silent */ }
 }
 
+let heartbeatTimer = null;
+
+/** Старт heartbeat учня (перший виклик у setRole), далі — за інтервалом */
+function startHeartbeat() {
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  heartbeatTimer = setInterval(() => sendHeartbeat(), HEARTBEAT_MS);
+}
+
+/** Зупинка heartbeat (роль не «учень» або вихід) */
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
+
 /**
  * Негайно повідомити сервер про зміну активності сеансу (Issue #7).
  * sendBeacon працює навіть під час закриття вкладки / засинання пристрою.
@@ -108,6 +124,31 @@ function reportActivityChange(active) {
 // Presence polling for teacher (Issue #7)
 // ---------------------------------------------------------------------------
 let prevPresence = {};
+
+// Миттєве оновлення статусу (Issue #19): викладач опитує список щосекунди,
+// учень шле heartbeat кожні 2 с; миттєві канали (visibilitychange + sendBeacon)
+// збережено. Разом із TIMEOUT_MS у presenceService це дає оновлення ≤ ~1 с
+// при появі/поверненні учня та ≤ ~7 с при втраті зв'язку.
+const PRESENCE_POLL_MS = 1000;
+const HEARTBEAT_MS = 2000;
+const DEMO_STATE_POLL_MS = 500;
+
+let presenceTimer = null;
+
+/** Старт опитування присутності: перший запит одразу, далі — за інтервалом */
+function startPresencePolling() {
+  if (presenceTimer) clearInterval(presenceTimer);
+  pollPresence();
+  presenceTimer = setInterval(pollPresence, PRESENCE_POLL_MS);
+}
+
+/** Зупинка опитування (роль не «викладач» або вихід викладача) */
+function stopPresencePolling() {
+  if (presenceTimer) {
+    clearInterval(presenceTimer);
+    presenceTimer = null;
+  }
+}
 
 /** Опитування списку присутності викладачем: тости про неактивних учнів */
 async function pollPresence() {
@@ -138,32 +179,38 @@ async function pollPresence() {
   } catch { /* silent */ }
 }
 
-/** Рендер списку учнів на сторінці «Учні» */
+/** Рендер списку учнів у усіх контейнерах .js-students-list
+ *  (сторінка «Учні» та блоки Issue #19 на сторінках «Демонстрація»
+ *  і «Перегляд матеріалів»). Логіка присутності не змінюється —
+ *  змінюється лише кількість місць, куди виводиться той самий список. */
 function renderStudentsList(list) {
-  const root = $("studentsList");
-  if (!root) return;
+  const containers = document.querySelectorAll(".js-students-list");
+  if (!containers.length) return;
 
   const onlineCount = list.filter(s => s.online).length;
-  if ($("studentsOnlineCount")) {
-    $("studentsOnlineCount").style.display = list.length ? "" : "none";
-    $("studentsOnlineCount").textContent = "● " + onlineCount + " з " + list.length + " онлайн";
-  }
+  const counterText = "● " + onlineCount + " з " + list.length + " онлайн";
+  document.querySelectorAll(".js-students-online-count").forEach(el => {
+    el.style.display = list.length ? "" : "none";
+    el.textContent = counterText;
+  });
 
-  root.replaceChildren();
-  if (!list.length) {
-    root.innerHTML = '<div class="empty">Ще ніхто не підключився. Нехай учні вкажуть своє прізвище та ім\'я при вході.</div>';
-    return;
-  }
+  for (const root of containers) {
+    root.replaceChildren();
+    if (!list.length) {
+      root.innerHTML = '<div class="empty">Ще ніхто не підключився. Нехай учні вкажуть своє прізвище та ім\'я при вході.</div>';
+      continue;
+    }
 
-  for (const s of list) {
-    const item = document.createElement("div");
-    item.className = "student-row" + (s.online ? "" : " student-offline");
-    const badgeClass = s.online ? "badge-online" : "badge-offline";
-    const badgeText = s.online ? "● Онлайн" : "○ Неактивний";
-    item.innerHTML =
-      '<span class="student-name">' + esc(s.name) + "</span>" +
-      '<span class="badge ' + badgeClass + '">' + badgeText + "</span>";
-    root.append(item);
+    for (const s of list) {
+      const item = document.createElement("div");
+      item.className = "student-row" + (s.online ? "" : " student-offline");
+      const badgeClass = s.online ? "badge-online" : "badge-offline";
+      const badgeText = s.online ? "● Онлайн" : "○ Неактивний";
+      item.innerHTML =
+        '<span class="student-name">' + esc(s.name) + "</span>" +
+        '<span class="badge ' + badgeClass + '">' + badgeText + "</span>";
+      root.append(item);
+    }
   }
 }
 
@@ -372,6 +419,13 @@ function setRole(newRole, newPin = "", newName = "") {
   closeRoleModal();
   updateRoleUI();
   refreshFiles();
+  // Миттєвий старт опитування, якщо увійшли як викладач у поточній сесії
+  // (раніше список оновлювався лише після перезавантаження сторінки)
+  if (newRole === "teacher") startPresencePolling();
+  else stopPresencePolling();
+  // Симетрично: учень, який увійшов у поточній сесії, шле heartbeat одразу
+  if (newRole === "student" && studentDisplayName) startHeartbeat();
+  else stopHeartbeat();
 }
 
 // Issue #6: одне поле для прізвища та імені
@@ -904,20 +958,19 @@ if (!role) {
 
 if (isDemoPage) {
   pollState(true);
-  setInterval(() => pollState(false), 1000);
+  setInterval(() => pollState(false), DEMO_STATE_POLL_MS);
 }
 
-// Issue #7: учень повідомляє сервер про активність свого сеансу
-if (role === "student" && studentDisplayName) {
-  document.addEventListener("visibilitychange", () => {
-    reportActivityChange(document.visibilityState !== "hidden");
-  });
-  window.addEventListener("pagehide", () => reportActivityChange(false));
-  setInterval(() => sendHeartbeat(), 5000);
-}
+// Issue #7: учень повідомляє сервер про активність свого сеансу.
+// Обробники реєструються завжди (усередині — перевірка ролі), щоб вхід учня
+// в поточній сесії також працював, а не лише при перезавантаженні сторінки.
+document.addEventListener("visibilitychange", () => {
+  reportActivityChange(document.visibilityState !== "hidden");
+});
+window.addEventListener("pagehide", () => reportActivityChange(false));
+if (role === "student" && studentDisplayName) startHeartbeat();
 
 // Issue #7: викладач опитує список присутності та отримує тости
 if (role === "teacher") {
-  pollPresence();
-  setInterval(pollPresence, 5000);
+  startPresencePolling();
 }

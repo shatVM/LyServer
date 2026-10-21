@@ -36,15 +36,18 @@
     </div>
   </section>
 
-  <!-- Teacher Panel (shown only for teacher) -->
-  <section class="panel demo-controls-panel teacher-only" id="teacherBroadcastPanel" style="display:none">
-    <div class="panel-header-row">
-      <h3>Запуск показу</h3>
-      <button id="refresh" class="secondary btn-sm">🔄 Оновити</button>
-    </div>
-    <p class="hint">Оберіть матеріал (включно з прихованими від учнів) для трансляції на спільний екран:</p>
-    <div id="files" class="files-list">
-      <div class="empty">Завантаження списку…</div>
-    </div>
-  </section>
+  <!-- Issue #19: блок «Учні» у правій колонці сітки — місцями з «Запуск показу» -->
+  {{> studentsBlock}}
 </div>
+
+<!-- «Запуск показу» — тепер під блоком «Учні» (повна ширина) -->
+<section class="panel demo-controls-panel teacher-only" id="teacherBroadcastPanel" style="display:none">
+  <div class="panel-header-row">
+    <h3>Запуск показу</h3>
+    <button id="refresh" class="secondary btn-sm">🔄 Оновити</button>
+  </div>
+  <p class="hint">Оберіть матеріал (включно з прихованими від учнів) для трансляції на спільний екран:</p>
+  <div id="files" class="files-list">
+    <div class="empty">Завантаження списку…</div>
+  </div>
+</section>
