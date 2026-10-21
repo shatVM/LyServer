@@ -680,7 +680,7 @@ footer {
   }
 }
 
-/* --- Issue #7: toast-��������� ��������� (��������� � layout.hbs) --- */
+/* --- Issue #7: toast-��������� ��������� (��������� � layout.hbs) --- */
 .toast-container {
   position: fixed;
   right: 16px;
@@ -714,7 +714,7 @@ footer {
 .toast-success { background: #2b8a3e; }
 .toast-info { background: #364fc7; }
 
-/* --- Issue #7: ������ ���������� ����� --- */
+/* --- Issue #7: ������ ���������� ����� --- */
 .students-list {
   display: flex;
   flex-direction: column;
@@ -745,7 +745,7 @@ footer {
 .badge-online { background: #d3f9d8; color: #2b8a3e; }
 .badge-offline { background: #ffe8cc; color: #d9480f; }
 
-/* --- Issue #9: ���� �������� �� ������ �� ������� --- */
+/* --- Issue #9: ���� �������� �� ������ �� ������� --- */
 .page-input {
   width: 74px;
   padding: 7px 8px;
@@ -760,4 +760,30 @@ footer {
 .page-input::-webkit-inner-spin-button {
   -webkit-appearance: none;
   margin: 0;
+}
+
+/* --- Issue #19: окремий блок списку учнів на сторінках «Демонстрація» та «Перегляд матеріалів» --- */
+.students-side-block {
+  margin-top: 14px;
+}
+
+/* На «Демонстрації» блок стоїть у сітці поруч зі «спільним екраном» —
+   вертикальний відступ не потрібен, інакше блок з'їжджає нижче панелі. */
+.grid-demo > .students-side-block {
+  margin-top: 0;
+}
+
+.students-side-block .students-list {
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.students-side-block .student-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.students-side-block .badge {
+  flex-shrink: 0;
+  margin-left: 10px;
 }

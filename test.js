@@ -182,6 +182,69 @@ async function main() {
         JSON.stringify(inactive)
       );
 
+      // 7а. Issue #19: окремий блок списку учнів на сторінках
+      // «Демонстрація» та «Перегляд матеріалів»
+      const demoHtml = await (await fetch(base + "/demonstration")).text();
+      check(
+        "Issue #19: блок учнів на /demonstration",
+        demoHtml.includes('id="studentsSideBlock"')
+      );
+      check(
+        "Issue #19: блок прихований для учня (teacher-only, display:none)",
+        demoHtml.includes("students-side-block teacher-only") &&
+          demoHtml.includes('id="studentsSideBlock" style="display:none"')
+      );
+      check(
+        "Issue #19: id блоку унікальний на сторінці",
+        (demoHtml.match(/id="studentsSideBlock"/g) || []).length === 1
+      );
+      // Блоки обміняно місцями: «Учні» тепер праворуч від «Спільного екрана»,
+      // панель показу («Запуск показу», id=teacherBroadcastPanel) — нижче.
+      // Порівнюємо саме id, щоб не спрацьовувати на текст коментарів.
+      check(
+        "Issue #19: порядок — «Учні» перед «Запуск показу»",
+        demoHtml.indexOf('id="studentsSideBlock"') !== -1 &&
+          demoHtml.indexOf('id="studentsSideBlock"') <
+            demoHtml.indexOf('id="teacherBroadcastPanel"')
+      );
+
+      const matHtml = await (await fetch(base + "/materials")).text();
+      check(
+        "Issue #19: блок учнів на /materials",
+        matHtml.includes('id="studentsSideBlock"')
+      );
+
+      // Регресія: сторінка «Учні» працює через ті самі класи
+      const stuHtml = await (await fetch(base + "/students")).text();
+      check(
+        "Issue #19: /students зберігає studentsList і js-класи",
+        stuHtml.includes('id="studentsList"') &&
+          stuHtml.includes("js-students-list") &&
+          stuHtml.includes("js-students-online-count")
+      );
+
+      const css = await (await fetch(base + "/css/style.css")).text();
+      check("Issue #19: CSS .students-side-block", css.includes(".students-side-block"));
+
+      const jsSrc = await (await fetch(base + "/js/app.js")).text();
+      check(
+        "Issue #19: renderStudentsList наповнює всі контейнери",
+        jsSrc.includes('document.querySelectorAll(".js-students-list")')
+      );
+
+      // Формат даних, який очікує renderStudentsList: {id, name, online}
+      check(
+        "Issue #19: формат даних для блоку (id/name/online)",
+        Array.isArray(list) &&
+          list.every(
+            (s) =>
+              typeof s.id === "string" &&
+              typeof s.name === "string" &&
+              typeof s.online === "boolean"
+          ),
+        JSON.stringify(list)
+      );
+
       // 8. Керування трансляцією потребує PIN
       r = await fetch(`${base}/api/control`, {
         method: "POST",

@@ -1,0 +1,13 @@
+<!-- Issue #19: список учнів окремим, чітко відмежованим блоком.
+     Видимий лише викладачу (клас teacher-only); для учнів приховується,
+     оскільки API присутності захищене PIN-кодом на сервері.
+     Рендеринг списку — спільна функція renderStudentsList (public/js/app.js). -->
+<aside class="panel students-side-block teacher-only" id="studentsSideBlock" style="display:none">
+  <div class="panel-header-row">
+    <h3>👥 Учні</h3>
+    <span id="studentsSideOnlineCount" class="badge-live js-students-online-count" style="display:none">● 0 онлайн</span>
+  </div>
+  <div id="studentsSideList" class="students-list js-students-list">
+    <div class="empty">Завантаження списку учнів…</div>
+  </div>
+</aside>

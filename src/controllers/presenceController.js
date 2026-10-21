@@ -10,7 +10,7 @@ class PresenceController {
   /**
    * POST /api/presence/heartbeat
    * Body: { studentId, name, active }
-   * Called every ~5s by each student. No auth required.
+   * Called every ~2s by each student (HEARTBEAT_MS in public/js/app.js). No auth required.
    * Issue #7: поле active — ознака активності сесії (вкладка видима).
    * Приймається і як JSON, і як form-data (для navigator.sendBeacon).
    */
