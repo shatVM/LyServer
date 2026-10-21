@@ -445,6 +445,7 @@ input:focus-visible {
 
 /* Viewer */
 #viewer {
+  position: relative; /* Issue #61: опорна точка для зон навігації по слайду */
   width: 100%;
   height: min(70vh, 720px);
   min-height: 350px;
@@ -786,4 +787,80 @@ footer {
 .students-side-block .badge {
   flex-shrink: 0;
   margin-left: 10px;
+}
+
+/* --- Issue #61: навігація слайдами — ліва/права зона зображення, лише стрілки --- */
+.slide-zone {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 50%;              /* зона охоплює половину області відображення слайда */
+  display: flex;
+  align-items: center;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  /* Не блокує вертикальне прокручування, масштабування та стандартні жести */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.slide-zone-left { left: 0; justify-content: flex-start; }
+.slide-zone-right { right: 0; justify-content: flex-end; }
+
+/* Градієнт: чорний із максимальною непрозорістю біля відповідного краю
+   до повністю прозорого ближче до центру зображення.
+   Лише активна зона затемнюється; ліва й права — дзеркальні. */
+.slide-zone::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(to right, rgba(0, 0, 0, 1) 0%, rgba(0, 0, 0, 0) 88%);
+  opacity: 0.15;                  /* звичайний стан: 15% */
+  transition: opacity 220ms ease; /* плавність 200–250 мс */
+  pointer-events: none;
+}
+
+.slide-zone-right::before {
+  background-image: linear-gradient(to left, rgba(0, 0, 0, 1) 0%, rgba(0, 0, 0, 0) 88%);
+}
+
+.slide-zone:hover::before,
+.slide-zone.is-active::before {
+  opacity: 0.5;                   /* активний стан: 50% */
+}
+
+/* Стрілки без текстових підписів: у звичайному стані ледь помітні,
+   але достатньо контрастні завдяки тіні поверх світлих слайдів */
+.slide-zone svg {
+  position: relative;
+  width: 46px;
+  height: 46px;
+  fill: none;
+  stroke: #fff;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.7));
+  opacity: 0.35;
+  transition: opacity 220ms ease;
+}
+
+.slide-zone:hover svg,
+.slide-zone.is-active svg {
+  opacity: 0.95;
+}
+
+/* Початкова підказка: обидві стрілки добре помітні до першої взаємодії */
+#viewer.nav-hint .slide-zone svg {
+  opacity: 0.95;
+}
+
+@media (max-width: 500px) {
+  .slide-zone svg {
+    width: 34px;
+    height: 34px;
+  }
 }
