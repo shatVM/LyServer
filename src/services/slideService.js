@@ -257,7 +257,7 @@ async function ensureSlides(name) {
   const ext = path.extname(name).toLowerCase();
   const run = () => {
     if (ext === ".pdf") return convertPdf(name);
-    if (ext === ".pptx") return convertPptx(name);
+    if (ext === ".ppt" || ext === ".pptx") return convertPptx(name);
     return Promise.reject(
       Object.assign(new Error("Конвертація не підтримується для цього типу файлу"), { status: 400 })
     );
