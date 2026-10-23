@@ -1058,3 +1058,15 @@ footer {
   .category-menu > button { flex:1 1 calc(50% - 7px); min-height:40px; }
   .category-heading > button { min-height:38px; }
 }
+
+.ui-icon {
+  width: 18px;
+  height: 18px;
+  display: inline-block;
+  vertical-align: middle;
+  flex: 0 0 auto;
+  stroke: currentColor;
+  fill: none;
+}
+.upload-category-row .ui-icon { margin-right: 4px; }
+.category-heading .ui-icon { margin-right: 2px; }
