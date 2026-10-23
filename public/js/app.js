@@ -5,6 +5,11 @@ let role = localStorage.getItem("portalRole") || "";
 let pin = sessionStorage.getItem("portalPin") || "";
 let files = [];
 
+// Issue #63 Етап 3: черга не залежить від DOM-поля file input.
+let uploadQueueState = [];
+let uploadQueueNextId = 1;
+let uploadInProgress = false;
+
 // Student identity (stored in localStorage)
 let studentId = localStorage.getItem("portalStudentId") || "";
 let studentDisplayName = localStorage.getItem("portalStudentName") || "";
@@ -632,6 +637,46 @@ function renderFiles() {
     info.innerHTML = '<div class="file-name">' + typeTag + " " + esc(file.name) + hiddenBadge +
       '</div><div class="hint">' + esc(file.ext.toUpperCase()) + " • " + formatSize(file.size) + "</div>";
 
+    // Опис безпечно вставляється як текст, а не довільний HTML.
+    if (file.description) {
+      const descWrap = document.createElement("div");
+      descWrap.className = "file-desc-wrap";
+      const desc = document.createElement("div");
+      desc.className = "file-desc";
+      desc.textContent = String(file.description);
+      desc.tabIndex = 0;
+      desc.setAttribute("aria-label", "Опис матеріалу: " + String(file.description));
+
+      const tooltip = document.createElement("div");
+      tooltip.className = "file-desc-tooltip";
+      tooltip.setAttribute("role", "tooltip");
+      tooltip.textContent = String(file.description);
+
+      const infoButton = document.createElement("button");
+      infoButton.type = "button";
+      infoButton.className = "file-desc-info";
+      infoButton.textContent = "i";
+      infoButton.setAttribute("aria-label", "Показати повний опис матеріалу");
+      infoButton.setAttribute("aria-expanded", "false");
+
+      const fullDescription = document.createElement("div");
+      fullDescription.className = "file-desc-full";
+      fullDescription.hidden = true;
+      fullDescription.textContent = String(file.description);
+
+      infoButton.addEventListener("click", () => {
+        const open = fullDescription.hidden;
+        fullDescription.hidden = !open;
+        infoButton.setAttribute("aria-expanded", String(open));
+        infoButton.setAttribute("aria-label", open
+          ? "Приховати повний опис матеріалу"
+          : "Показати повний опис матеріалу");
+      });
+
+      descWrap.append(desc, tooltip, infoButton, fullDescription);
+      info.append(descWrap);
+    }
+
     const actions = document.createElement("div");
     actions.className = "file-actions";
 
@@ -950,15 +995,17 @@ async function pollState(force = false) {
 // Teacher: convert slides on broadcast
 // ---------------------------------------------------------------------------
 async function prepareSlidesBg(fileId) {
-  try {
-    await api("/api/slides/prepare", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file: fileId })
-    });
-  } catch (e) {
-    console.error("Background slide prepare error:", e.message);
+  const response = await api("/api/slides/prepare", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file: fileId })
+  });
+  const manifest = await response.json();
+  // POST /api/slides/prepare повертає маніфест лише після завершення ensureSlides().
+  if (!manifest || !Number.isInteger(manifest.pageCount) || manifest.pageCount < 1) {
+    throw new Error("Сервер не підтвердив готовність PNG-слайдів");
   }
+  return manifest;
 }
 
 // ---------------------------------------------------------------------------
@@ -997,44 +1044,175 @@ if ($("pageInput")) {
 if ($("refresh")) $("refresh").onclick = refreshFiles;
 if ($("showShared")) $("showShared").onclick = () => pollState(true);
 
-// Upload handler
+// Issue #63 Етап 3: черга зберігає File та опис незалежно від DOM file input.
+function renderUploadQueue() {
+  const queue = $("uploadQueue");
+  if (!queue) return;
+  queue.replaceChildren();
+
+  for (const item of uploadQueueState) {
+    const row = document.createElement("div");
+    row.className = "upload-queue-item";
+
+    const details = document.createElement("div");
+    details.className = "upload-queue-details";
+    const nameEl = document.createElement("div");
+    nameEl.className = "upload-queue-name";
+    nameEl.textContent = "📄 " + item.file.name;
+    details.append(nameEl);
+
+    if (item.status === "uploading") {
+      const state = document.createElement("div");
+      state.className = "upload-queue-state";
+      state.textContent = "Завантаження…";
+      details.append(state);
+    } else if (item.error) {
+      const state = document.createElement("div");
+      state.className = "upload-queue-state upload-queue-error";
+      state.textContent = "Помилка: " + item.error;
+      details.append(state);
+    }
+
+    const desc = document.createElement("input");
+    desc.type = "text";
+    desc.className = "upload-desc";
+    desc.maxLength = 500;
+    desc.placeholder = "Опис (необов'язково)";
+    desc.value = item.description;
+    desc.disabled = uploadInProgress;
+    desc.addEventListener("input", () => { item.description = desc.value; });
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "secondary btn-sm upload-queue-remove";
+    remove.textContent = "Прибрати";
+    remove.setAttribute("aria-label", "Прибрати з черги файл " + item.file.name);
+    remove.disabled = uploadInProgress;
+    remove.addEventListener("click", () => {
+      uploadQueueState = uploadQueueState.filter((queued) => queued.key !== item.key);
+      renderUploadQueue();
+    });
+
+    row.append(details, desc, remove);
+    queue.append(row);
+  }
+}
+
+if ($("uploadFile")) {
+  $("uploadFile").addEventListener("change", () => {
+    const input = $("uploadFile");
+    const selected = Array.from(input.files || []);
+    const duplicates = [];
+    for (const file of selected) {
+      // Ім'я є видимим ключем для користувача: не додаємо дубль непомітно.
+      const existing = uploadQueueState.find((queued) => queued.file.name === file.name);
+      if (existing) {
+        duplicates.push(file.name);
+        continue;
+      }
+      uploadQueueState.push({
+        key: uploadQueueNextId++,
+        file,
+        description: "",
+        status: "queued",
+        error: ""
+      });
+    }
+    // Очищення input дозволяє повторно вибрати той самий файл; черга живе окремо.
+    input.value = "";
+    renderUploadQueue();
+    if (duplicates.length) {
+      setUploadStatus("Не додано дублікати за ім'ям: " + duplicates.join(", ") +
+        ". Уже додані файли та їхні описи залишилися в черзі.");
+    } else if (selected.length) {
+      setUploadStatus("У черзі файлів: " + uploadQueueState.length + ".");
+    }
+  });
+}
+
+// Upload handler: повторний запуск обробляє лише поточну чергу невдалих файлів.
 if ($("upload") && $("uploadFile")) {
   $("upload").onclick = async () => {
-    const file = $("uploadFile").files[0];
-    if (!file) { setUploadStatus("Оберіть файл для завантаження."); return; }
-    if (!pin || role !== "teacher") { setUploadStatus("Необхідно увійти як викладач."); openRoleModal(); return; }
+    if (uploadInProgress) return;
+    if (!uploadQueueState.length) {
+      setUploadStatus("Оберіть файли для завантаження.");
+      return;
+    }
+    if (!pin || role !== "teacher") {
+      setUploadStatus("Необхідно увійти як викладач.");
+      openRoleModal();
+      return;
+    }
 
     const button = $("upload");
+    uploadInProgress = true;
     button.disabled = true;
-    setUploadStatus("Завантаження: " + file.name + "…");
+    let uploadedCount = 0;
+    const uploadedSlideIds = [];
+    const failures = [];
+    const conversionFailures = [];
+
     try {
-      const res = await api("/api/upload?name=" + encodeURIComponent(file.name), {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream", "X-Portal-Pin": pin },
-        body: file
-      });
-      const uploadResult = await res.json();
-      $("uploadFile").value = "";
-      setUploadStatus("Файл завантажено: " + file.name);
+      const batch = uploadQueueState.slice();
+      for (let i = 0; i < batch.length; i++) {
+        const item = batch[i];
+        if (!uploadQueueState.some((queued) => queued.key === item.key)) continue;
+        item.status = "uploading";
+        item.error = "";
+        renderUploadQueue();
+        setUploadStatus("Завантаження " + (i + 1) + " з " + batch.length + ": " + item.file.name + "…");
 
-      const uploadedId = uploadResult.id || file.name;
+        let url = "/api/upload?name=" + encodeURIComponent(item.file.name);
+        const description = item.description.trim();
+        if (description) url += "&description=" + encodeURIComponent(description);
 
-      // Issue #8: сервер конвертує PDF/PPTX у PNG одразу після завантаження;
-      // клієнт лише чекає завершення (спільний lock на сервері)
-      if (SLIDE_EXTS.has(extOf(uploadedId))) {
-        setUploadStatus("Файл завантажено: " + file.name + " — конвертація слайдів у фоні…");
-        prepareSlidesBg(uploadedId).then(() => {
-          setUploadStatus("✅ Файл готовий до демонстрації: " + file.name);
-        }).catch(() => {
-          setUploadStatus("⚠️ Файл завантажено, але конвертація слайдів ще триває. Натисніть «Оновити».");
-        });
+        try {
+          const response = await api(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/octet-stream", "X-Portal-Pin": pin },
+            body: item.file
+          });
+          const result = await response.json();
+          const fileId = result.id || item.file.name;
+          uploadedCount++;
+          if (SLIDE_EXTS.has(extOf(fileId))) uploadedSlideIds.push(fileId);
+          // Видаляємо лише підтверджено завантажений елемент.
+          uploadQueueState = uploadQueueState.filter((queued) => queued.key !== item.key);
+        } catch (error) {
+          item.status = "error";
+          item.error = error && error.message ? error.message : "Невідома помилка";
+          failures.push(item.file.name + " — " + item.error);
+        }
       }
 
+      renderUploadQueue();
+      // Завантаження завершилося: помилки лишаються в черзі з описами для retry.
+      for (const fileId of uploadedSlideIds) {
+        try {
+          await prepareSlidesBg(fileId);
+        } catch (error) {
+          conversionFailures.push(fileId + " — " + (error.message || "Помилка конвертації"));
+        }
+      }
+
+      let summary = "Завантажено: " + uploadedCount + ". У черзі залишилося: " + uploadQueueState.length + ".";
+      if (failures.length) summary += " Не вдалося завантажити: " + failures.join("; ") + ".";
+      if (conversionFailures.length) {
+        summary += " Помилка підготовки PNG (файли не позначено готовими): " + conversionFailures.join("; ") + ".";
+      } else if (uploadedSlideIds.length) {
+        summary += " PNG-слайди підтверджено готовими.";
+      }
+      if (!failures.length && !conversionFailures.length) summary = "✅ " + summary;
+      else summary = "⚠️ " + summary;
+      setUploadStatus(summary);
       await refreshFiles();
     } catch (error) {
-      setUploadStatus("Помилка завантаження: " + error.message);
+      setUploadStatus("Помилка обробки черги: " + (error && error.message ? error.message : "невідома помилка") +
+        ". Невдалі файли залишено в черзі.");
     } finally {
+      uploadInProgress = false;
       button.disabled = false;
+      renderUploadQueue();
     }
   };
 }

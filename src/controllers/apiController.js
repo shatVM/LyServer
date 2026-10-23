@@ -45,8 +45,12 @@ class ApiController {
       return res.status(400).send("Не вказано ім'я файлу");
     }
 
+    // Issue #63 Етап 3: необов'язковий опис матеріалу (обмеження довжини —
+    // у fileService.saveFileStream)
+    const description = typeof req.query.description === "string" ? req.query.description : "";
+
     try {
-      const result = await fileService.saveFileStream(req, originalName);
+      const result = await fileService.saveFileStream(req, originalName, description);
 
       // Issue #8: PDF/PPTX конвертуються у PNG-слайди одразу після завантаження
       // (в фоні; спільний lock у slideService захищає від повторних конвертацій)
@@ -57,7 +61,7 @@ class ApiController {
         });
       }
 
-      res.status(201).json({ ok: true, id: result.id, name: result.name, size: result.size });
+      res.status(201).json({ ok: true, id: result.id, name: result.name, size: result.size, description: result.description });
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Помилка завантаження");
     }

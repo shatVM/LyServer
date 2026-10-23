@@ -15,7 +15,10 @@ class FileService {
       if (fs.existsSync(config.metadataFile)) {
         const raw = fs.readFileSync(config.metadataFile, "utf-8");
         const parsed = JSON.parse(raw);
+        // Issue #63 Етап 3: невідомі верхні ключі (напр. майбутні категорії)
+        // зберігаємо — не втрачаємо дані попередніх/новіших форматів
         return {
+          ...parsed,
           hidden: Array.isArray(parsed.hidden) ? parsed.hidden : [],
           files: (parsed.files && typeof parsed.files === "object") ? parsed.files : {}
         };
@@ -62,7 +65,11 @@ class FileService {
           name: displayName, // User-friendly Ukrainian/Cyrillic title
           ext: path.extname(item.name).toLowerCase(),
           size: fs.statSync(full).size,
-          hidden: hiddenSet.has(item.name)
+          hidden: hiddenSet.has(item.name),
+          // Issue #63 Етап 3: опис матеріалу; старі записи без опису → порожній рядок
+          description: (fileInfo && typeof fileInfo.description === "string")
+            ? fileInfo.description
+            : ""
         };
       })
       .filter(item => config.allowedExtensions.has(item.ext))
@@ -126,13 +133,22 @@ class FileService {
     return { ok: true, name: safe };
   }
 
-  async saveFileStream(requestStream, rawOriginalName) {
+  // Issue #63 Етап 3: необов'язковий опис матеріалу (rawDescription) зберігається
+  // в наявних метаданих files[id].description; порожній опис не записується,
+  // тому формат записів без опису не змінюється (сумісність зі старими даними)
+  async saveFileStream(requestStream, rawOriginalName, rawDescription) {
     const orig = path.basename(String(rawOriginalName || "").trim());
     if (!orig) {
       const error = new Error("Некоректне ім'я файлу");
       error.status = 400;
       throw error;
     }
+
+    // Прибираємо керуючі символи, обрізаємо зайві пробіли й довжину
+    const description = String(rawDescription || "")
+      .replace(/[\u0000-\u001F\u007F]/g, " ")
+      .trim()
+      .slice(0, config.maxDescriptionLength);
 
     const ext = path.extname(orig).toLowerCase();
     if (!config.allowedExtensions.has(ext)) {
@@ -171,14 +187,17 @@ class FileService {
       metadata.files[fileId] = {
         originalName: orig,
         uploadedAt: Date.now(),
-        size: bytes
+        size: bytes,
+        // Опис додаємо лише за наявності — без опису запис ідентичний старому формату
+        ...(description ? { description } : {})
       };
       this.saveMetadata(metadata);
 
       return {
         id: fileId,
         name: orig,
-        size: bytes
+        size: bytes,
+        description
       };
     } catch (error) {
       try { fs.unlinkSync(filePath); } catch {}
