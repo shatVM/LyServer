@@ -586,7 +586,7 @@ async function main() {
       const apiControllerSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "controllers", "apiController.js"), "utf-8");
       check("Issue #63 Е4: upload запускає фонову конвертацію та фіксує помилку", apiControllerSource.includes("slideService.ensureSlides(result.id)") && apiControllerSource.includes('.then(manifest =>') && apiControllerSource.includes('setConversionStatus(result.id, "failed", conversionError)'));
       const fileServiceSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "services", "fileService.js"), "utf-8");
-      check("Issue #63 Е4: учням не видаються категорії та неготові слайди", fileServiceSource.includes('item.conversionStatus === "ready"') && fileServiceSource.includes('categoryId: categoryIds.has(info.categoryId) ? info.categoryId : ""'));
+      check("Issue #63 Е4: учням не видаються категорії та неготові слайди", fileServiceSource.includes('item.conversionStatus === "ready"') && fileServiceSource.includes('conversionStatus === "ready" && !manifestReady') && fileServiceSource.includes('categoryId: categoryIds.has(info.categoryId) ? info.categoryId : ""'));
       const slideServiceSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "services", "slideService.js"), "utf-8");
       check("Issue #63 Е4: готовність вимагає наявні PNG для кожної сторінки", slideServiceSource.includes("function validateManifest(name, manifest)") && slideServiceSource.includes("Некоректний PNG-слайд"));
       const configSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "config", "index.js"), "utf-8");
