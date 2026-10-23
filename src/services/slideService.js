@@ -67,6 +67,19 @@ function clearSlides(name) {
   }
 }
 
+function validateManifest(name, manifest) {
+  if (!manifest || !Number.isInteger(manifest.pageCount) || manifest.pageCount < 1) {
+    throw new Error("Маніфест не підтверджує наявність PNG-слайдів");
+  }
+  for (let page = 1; page <= manifest.pageCount; page++) {
+    const pngPath = pagePngPath(name, page);
+    if (!fs.existsSync(pngPath) || fs.statSync(pngPath).size <= 8) {
+      throw new Error("Не знайдено готовий PNG-слайд №" + page);
+    }
+  }
+  return manifest;
+}
+
 /** Return the absolute path to page PNG (1-indexed). Does NOT check existence. */
 function pagePngPath(name, pageNum) {
   return path.join(slideFolder(name), "page-" + pageNum + ".png");
@@ -216,17 +229,22 @@ async function ensureSlides(name) {
     throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
   }
 
+  // Спершу поважаємо lock: не перевіряємо/видаляємо кеш паралельно з конвертацією.
+  const pending = inFlight.get(name);
+  if (pending) return pending;
+
   const existing = readManifest(name);
   if (existing) {
     const srcMtime = fs.statSync(srcPath).mtimeMs;
     if (existing.generatedAt >= srcMtime) {
-      return existing; // up-to-date
+      try {
+        return validateManifest(name, existing);
+      } catch {
+        // Старий або неповний кеш не є доказом готовності — перебудуємо його.
+        clearSlides(name);
+      }
     }
   }
-
-  // Конвертація цього файлу вже виконується — чекаємо на неї
-  const pending = inFlight.get(name);
-  if (pending) return pending;
 
   const ext = path.extname(name).toLowerCase();
   const run = () => {
@@ -237,7 +255,9 @@ async function ensureSlides(name) {
     );
   };
 
-  const task = run().finally(() => inFlight.delete(name));
+  const task = run()
+    .then(manifest => validateManifest(name, manifest))
+    .finally(() => inFlight.delete(name));
   inFlight.set(name, task);
   return task;
 }
@@ -249,7 +269,10 @@ async function ensureSlides(name) {
  */
 function getManifest(name) {
   const manifest = readManifest(name);
-  if (manifest) return manifest;
+  if (manifest) {
+    try { return validateManifest(name, manifest); }
+    catch { return inFlight.has(name) ? { converting: true } : null; }
+  }
   return inFlight.has(name) ? { converting: true } : null;
 }
 
