@@ -381,13 +381,31 @@ input:focus-visible {
   padding: 8px 10px;
 }
 
-.upload-queue-name {
+.upload-queue-details {
   flex: 1 1 200px;
   min-width: 160px;
+}
+
+.upload-queue-name {
   overflow-wrap: anywhere;
   font-size: 13.5px;
   font-weight: 600;
   color: #142e4e;
+}
+
+.upload-queue-state {
+  margin-top: 3px;
+  font-size: 12px;
+  color: #64748b;
+  overflow-wrap: anywhere;
+}
+
+.upload-queue-error {
+  color: #b42318;
+}
+
+.upload-queue-remove {
+  flex: 0 0 auto;
 }
 
 .upload-desc {
@@ -469,11 +487,88 @@ input:focus-visible {
   min-width: 180px;
 }
 
-/* Issue #63 Етап 3: опис матеріалу (лише читання) */
+/* Issue #63 Етап 3: компактний опис із доступною повною підказкою */
+.file-desc-wrap {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
 .file-desc {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow-wrap: anywhere;
   font-size: 13px;
+  line-height: 1.4;
   color: #3e5066;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  cursor: help;
+}
+
+.file-desc:focus-visible {
+  outline: 2px solid #3978b9;
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.file-desc-tooltip {
+  display: none;
+  position: absolute;
+  z-index: 50;
+  top: calc(100% + 5px);
+  left: 0;
+  width: max-content;
+  max-width: min(420px, 80vw);
+  padding: 9px 11px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  color: #1e293b;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.16);
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.file-desc:hover + .file-desc-tooltip,
+.file-desc:focus + .file-desc-tooltip {
+  display: block;
+}
+
+.file-desc-info {
+  display: none;
+  flex: 0 0 25px;
+  width: 25px;
+  height: 25px;
+  min-width: 25px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.file-desc-full {
+  flex: 1 0 100%;
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: #f1f5f9;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.file-desc-full[hidden] {
+  display: none;
 }
 
 .file-name {
@@ -706,6 +801,17 @@ footer {
   }
   main.main-container {
     padding: 16px;
+  }
+}
+
+@media (max-width: 600px) {
+  .file-desc-tooltip {
+    display: none !important;
+  }
+  .file-desc-info {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
 }
 
