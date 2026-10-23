@@ -1118,8 +1118,20 @@ async function pollState(force = false) {
 }
 
 // ---------------------------------------------------------------------------
-// Teacher: convert slides on broadcast
+// Teacher: wait for automatically generated slides / retry conversion
 // ---------------------------------------------------------------------------
+async function waitForSlideConversion(fileId, maxAttempts = 180) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const response = await api("/api/slides/info?file=" + encodeURIComponent(fileId));
+    const info = await response.json();
+    if (info.ready && Number.isInteger(info.pageCount) && info.pageCount > 0) return info;
+    if (info.failed) throw new Error(info.error || "Помилка конвертації PNG-слайдів");
+    setUploadStatus("Конвертація PNG-слайдів: " + fileId + "…");
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  throw new Error("Перевищено час очікування конвертації PNG-слайдів");
+}
+
 async function prepareSlidesBg(fileId) {
   const response = await api("/api/slides/prepare", {
     method: "POST",
@@ -1306,8 +1318,8 @@ if ($("upload") && $("uploadFile")) {
           const fileId = result.id || item.file.name;
           uploadedCount++;
           if (SLIDE_EXTS.has(extOf(fileId))) {
-            if (result.conversionStatus === "ready") uploadedSlideIds.push(fileId);
-            else conversionFailures.push(fileId + " — " + (result.conversionError || "PNG-слайди не готові"));
+            if (result.conversionStatus === "failed") conversionFailures.push(fileId + " — " + (result.conversionError || "PNG-слайди не готові"));
+            else uploadedSlideIds.push(fileId);
           }
           // Оригінал збережено навіть у разі помилки конвертації; не дублюємо upload.
           uploadQueueState = uploadQueueState.filter((queued) => queued.key !== item.key);
@@ -1319,7 +1331,17 @@ if ($("upload") && $("uploadFile")) {
       }
 
       renderUploadQueue();
-      // POST /api/upload повертається після завершення конвертації або фіксації помилки.
+      // Конвертація виконується сервером у фоні; очікуємо підтвердження API,
+      // не запускаючи повторну конвертацію для кожного щойно завантаженого файлу.
+      for (const fileId of uploadedSlideIds) {
+        try {
+          setUploadStatus("Очікування PNG-слайдів: " + fileId + "…");
+          await waitForSlideConversion(fileId);
+        } catch (error) {
+          conversionFailures.push(fileId + " — " + (error.message || "Помилка конвертації"));
+        }
+      }
+
       let summary = "Завантажено: " + uploadedCount + ". У черзі залишилося: " + uploadQueueState.length + ".";
       if (failures.length) summary += " Не вдалося завантажити: " + failures.join("; ") + ".";
       if (conversionFailures.length) {
