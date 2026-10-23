@@ -246,6 +246,7 @@ class FileService {
     if (metadata.files && metadata.files[safe]) {
       delete metadata.files[safe];
     }
+    if (Array.isArray(metadata.order)) metadata.order = metadata.order.filter(id => id !== safe);
     this.saveMetadata(metadata);
 
     return { ok: true, name: safe };
