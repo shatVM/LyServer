@@ -251,6 +251,16 @@ function esc(value) {
   })[ch]);
 }
 
+function iconSvg(name) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.classList.add("ui-icon");
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  use.setAttribute("href", "/icons.svg#" + name);
+  svg.append(use);
+  return svg;
+}
+
 function formatSize(bytes) {
   if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + " КБ";
   return (bytes / (1024 * 1024)).toFixed(1) + " МБ";
@@ -776,17 +786,17 @@ function createFileCard(file, isTeacher, showCategoryActions) {
     broadcast.onclick = () => broadcastFile(fileId, false); actions.append(broadcast);
     if (showCategoryActions) {
       const up = document.createElement("button");
-      up.type = "button"; up.className = "secondary btn-sm order-button"; up.textContent = "↑";
+      up.type = "button"; up.className = "secondary btn-sm order-button"; up.append(iconSvg("arrow-up"));
       up.title = "Перемістити матеріал вище"; up.setAttribute("aria-label", "Перемістити вище: " + file.name);
       up.onclick = () => reorderMaterial(fileId, "up");
       const down = document.createElement("button");
-      down.type = "button"; down.className = "secondary btn-sm order-button"; down.textContent = "↓";
+      down.type = "button"; down.className = "secondary btn-sm order-button"; down.append(iconSvg("arrow-down"));
       down.title = "Перемістити матеріал нижче"; down.setAttribute("aria-label", "Перемістити нижче: " + file.name);
       down.onclick = () => reorderMaterial(fileId, "down");
       actions.append(up, down);
       const move = document.createElement("button");
       move.type = "button"; move.className = "secondary btn-sm category-move-button";
-      move.textContent = "📂↳"; move.title = "Перемістити до категорії";
+      move.append(iconSvg("folder-input")); move.title = "Перемістити до категорії";
       move.setAttribute("aria-label", "Перемістити до категорії: " + file.name);
       const menu = document.createElement("div"); menu.className = "category-menu"; menu.hidden = true;
       const options = [{ id: "", name: "Без категорії" }, ...categories];
@@ -797,7 +807,7 @@ function createFileCard(file, isTeacher, showCategoryActions) {
       }
       const create = document.createElement("button");
       create.type = "button"; create.className = "btn-sm category-create-option";
-      create.textContent = "+ Створити категорію"; create.onclick = createCategory; menu.append(create);
+      create.append(iconSvg("plus"), document.createTextNode(" Створити категорію")); create.onclick = createCategory; menu.append(create);
       move.onclick = () => { menu.hidden = !menu.hidden; move.setAttribute("aria-expanded", String(!menu.hidden)); };
       actions.append(move);
       item.append(info, actions, menu);
@@ -843,7 +853,7 @@ function renderFiles() {
       const groupFiles = files.filter(file => (file.categoryId || "") === group.id);
       const section = document.createElement("section"); section.className = "category-section";
       const header = document.createElement("div"); header.className = "category-heading";
-      const title = document.createElement("h4"); title.textContent = "📁 " + group.name; header.append(title);
+      const title = document.createElement("h4"); title.append(iconSvg("folder"), document.createTextNode(" " + group.name)); header.append(title);
       if (group.category) {
         const remove = document.createElement("button");
         remove.type = "button"; remove.className = "secondary btn-sm"; remove.textContent = "Видалити категорію";
