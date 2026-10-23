@@ -190,6 +190,8 @@ class FileService {
 
   setConversionStatus(idOrName, status, errorMessage = "") {
     const safe = safeFilename(idOrName);
+    const filePath = getFilePath(safe);
+    if (!filePath || !fs.existsSync(filePath)) return;
     const metadata = this.getMetadata();
     if (!metadata.files || typeof metadata.files !== "object") metadata.files = {};
     const current = metadata.files[safe];
