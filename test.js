@@ -76,7 +76,7 @@ async function main() {
     });
     const upload = await r.json();
     const fileId = upload.id;
-    check("Викладач: завантаження PDF і підтверджена конвертація", r.status === 201 && Boolean(fileId) && upload.conversionStatus === "ready", "status=" + r.status + ", conversion=" + upload.conversionStatus);
+    check("Викладач: завантаження PDF запускає фонову конвертацію", r.status === 201 && Boolean(fileId) && upload.conversionStatus === "converting", "status=" + r.status + ", conversion=" + upload.conversionStatus);
     if (!fileId) throw new Error("Не вдалося завантажити тестовий файл");
 
     // Issue #63 Етап 3: id завантажених тестових файлів для прибирання в finally
@@ -584,7 +584,7 @@ async function main() {
       }
 
       const apiControllerSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "controllers", "apiController.js"), "utf-8");
-      check("Issue #63 Е4: upload очікує завершення конвертації та фіксує помилку", apiControllerSource.includes("await slideService.ensureSlides(result.id)") && apiControllerSource.includes('setConversionStatus(result.id, "failed", conversionError)'));
+      check("Issue #63 Е4: upload запускає фонову конвертацію та фіксує помилку", apiControllerSource.includes("slideService.ensureSlides(result.id)") && apiControllerSource.includes('.then(manifest =>') && apiControllerSource.includes('setConversionStatus(result.id, "failed", conversionError)'));
       const fileServiceSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "services", "fileService.js"), "utf-8");
       check("Issue #63 Е4: учням не видаються категорії та неготові слайди", fileServiceSource.includes('item.conversionStatus === "ready"') && fileServiceSource.includes('categoryId: categoryIds.has(info.categoryId) ? info.categoryId : ""'));
       const slideServiceSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "services", "slideService.js"), "utf-8");
