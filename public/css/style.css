@@ -491,6 +491,7 @@ input:focus-visible {
 .file-desc-wrap {
   position: relative;
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   gap: 6px;
   min-width: 0;
