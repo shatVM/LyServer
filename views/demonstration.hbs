@@ -50,6 +50,11 @@
   </div>
   <div class="upload-box">
     <label for="uploadFile"><strong>Виберіть файли на пристрої:</strong></label>
+    <div class="upload-category-row">
+      <label for="uploadCategory">Категорія для завантажених матеріалів:</label>
+      <select id="uploadCategory"><option value="">Без категорії</option></select>
+      <button id="createCategoryFromUpload" type="button" class="secondary btn-sm">＋ Створити категорію</button>
+    </div>
     <div style="margin-top:8px">
       <input id="uploadFile" type="file" multiple accept=".pdf,.pptx,.mp4,.webm,.m4v,.mov,.ogg,.mp3,.wav">
     </div>
