@@ -1036,3 +1036,25 @@ footer {
     height: 34px;
   }
 }
+
+
+/* Issue #63 Етап 4: категорії та доступне керування порядком */
+.upload-category-row { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:10px; }
+.upload-category-row label { flex:1 1 100%; }
+.upload-category-row select { flex:1 1 220px; min-width:0; padding:8px 10px; border:1px solid #ccd8e6; border-radius:8px; background:#fff; }
+.category-section { display:grid; gap:9px; margin-bottom:18px; }
+.category-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; padding:8px 2px; border-bottom:1px solid #dce5ef; }
+.category-heading h4 { margin:0; color:#1c3d66; font-size:15px; }
+.category-empty { margin:0; padding:8px 4px; }
+.category-menu { flex:1 0 100%; display:flex; flex-wrap:wrap; gap:7px; padding:8px; border:1px solid #dce5ef; border-radius:9px; background:#f8fafc; }
+.category-menu[hidden] { display:none; }
+.category-move-button { min-width:42px; }
+.order-button { min-width:38px; font-size:17px; }
+.category-create-option { border-style:dashed; }
+.conversion-state { margin-top:5px; font-size:12.5px; color:#8a5a00; overflow-wrap:anywhere; }
+.conversion-state.conversion-error { color:#b42318; }
+@media (max-width:600px) {
+  .upload-category-row > button { flex:1 1 100%; }
+  .category-menu > button { flex:1 1 calc(50% - 7px); min-height:40px; }
+  .category-heading > button { min-height:38px; }
+}
