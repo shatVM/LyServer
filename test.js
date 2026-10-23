@@ -81,6 +81,7 @@ async function main() {
 
     // Issue #63 Етап 3: id завантажених тестових файлів для прибирання в finally
     const e3Ids = [];
+    let e4CategoryId = "";
 
     try {
       // 3. Issue #8: конвертація відбувається одразу після завантаження
@@ -517,6 +518,7 @@ async function main() {
       });
       const createdCategoryData = r.status === 201 ? await r.json() : {};
       const e4Category = createdCategoryData.category;
+      if (e4Category && e4Category.id) e4CategoryId = e4Category.id;
       check("Issue #63 Е4: створення категорії з PIN", r.status === 201 && Boolean(e4Category && e4Category.id), "status=" + r.status);
       const persistedCategoryMeta = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "materials", ".metadata.json"), "utf-8"));
       check("Issue #63 Е4: категорія збережена у файлі метаданих", Boolean(e4Category && Array.isArray(persistedCategoryMeta.categories) && persistedCategoryMeta.categories.some(category => category.id === e4Category.id)));
@@ -565,6 +567,7 @@ async function main() {
         const deletedCategory = r.status === 200 ? await r.json() : {};
         const postDeleteMeta = JSON.parse(require("node:fs").readFileSync(metaPath, "utf-8"));
         check("Issue #63 Е4: видалення категорії не видаляє файли", r.status === 200 && require("node:fs").existsSync(originalPath) && deletedCategory.affectedFiles >= 1 && !postDeleteMeta.files[e3WithDesc.id].categoryId, "status=" + r.status + ", affected=" + deletedCategory.affectedFiles);
+        if (r.status === 200) e4CategoryId = "";
       }
 
       const apiControllerSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "controllers", "apiController.js"), "utf-8");
@@ -600,6 +603,13 @@ async function main() {
       });
       check("Завантаження: заборонений тип → 400", r.status === 400, `status=${r.status}`);
     } finally {
+      if (e4CategoryId) {
+        await fetch(base + "/api/categories/delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, categoryId: e4CategoryId })
+        }).catch(() => {});
+      }
       // Прибирання тестового файлу
       await fetch(`${base}/api/files/delete`, {
         method: "POST",
