@@ -41,8 +41,10 @@ jobs:
 
           body = os.environ.get("COMMENT_BODY", "")
           lines = body.strip().splitlines()
-          first_line = lines[0] if lines else ""
-          role_match = re.match(r"^\s*(Tech-lead|Dev-agent)(\s|$)", first_line, re.IGNORECASE)
+          first_line = lines[0].strip() if lines else ""
+          # Accept plain role prefixes and Markdown-emphasized forms such as **Dev-agent**.
+          first_line = re.sub(r"^[*_`~]+|[*_`~]+$", "", first_line).strip()
+          role_match = re.match(r"^(Tech-lead|Dev-agent)(\s|$)", first_line, re.IGNORECASE)
           if not role_match:
               print("Comment has no recognized role prefix; skipped.")
               raise SystemExit(0)
