@@ -518,6 +518,8 @@ async function main() {
       const createdCategoryData = r.status === 201 ? await r.json() : {};
       const e4Category = createdCategoryData.category;
       check("Issue #63 Е4: створення категорії з PIN", r.status === 201 && Boolean(e4Category && e4Category.id), "status=" + r.status);
+      const persistedCategoryMeta = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "materials", ".metadata.json"), "utf-8"));
+      check("Issue #63 Е4: категорія збережена у файлі метаданих", Boolean(e4Category && Array.isArray(persistedCategoryMeta.categories) && persistedCategoryMeta.categories.some(category => category.id === e4Category.id)));
 
       if (e4Category && e3WithDesc.id && e3NoDesc.id) {
         r = await fetch(base + "/api/files/category", {
@@ -571,6 +573,8 @@ async function main() {
       check("Issue #63 Е4: учням не видаються категорії та неготові слайди", fileServiceSource.includes('item.conversionStatus === "ready"') && fileServiceSource.includes('categoryId: categoryIds.has(info.categoryId) ? info.categoryId : ""'));
       const slideServiceSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "services", "slideService.js"), "utf-8");
       check("Issue #63 Е4: готовність вимагає наявні PNG для кожної сторінки", slideServiceSource.includes("function validateManifest(name, manifest)") && slideServiceSource.includes("Некоректний PNG-слайд"));
+      const configSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "config", "index.js"), "utf-8");
+      check("Issue #63 Е4: підтримуються .pdf, .ppt і .pptx", configSource.includes('"\.pdf", ".ppt", ".pptx"') && configSource.includes('slideExtensions: new Set([".pdf", ".ppt", ".pptx"])'));
 
       // Захист не ослаб: перевірка PIN під час завантаження
       r = await fetch(`${base}/api/upload?name=${encodeURIComponent("E3 без PIN.mp3")}`, {
