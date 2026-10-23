@@ -79,6 +79,9 @@ async function main() {
     check("Викладач: завантаження PDF", r.status === 201 && Boolean(fileId), `status=${r.status}`);
     if (!fileId) throw new Error("Не вдалося завантажити тестовий файл");
 
+    // Issue #63 Етап 3: id завантажених тестових файлів для прибирання в finally
+    const e3Ids = [];
+
     try {
       // 3. Issue #8: конвертація відбувається одразу після завантаження
       let manifest = null;
@@ -356,6 +359,128 @@ async function main() {
         `status=${r.status}, location=${r.headers.get("location")}`
       );
 
+      // 7г. Issue #63 (Етап 3): мультизавантаження та необов'язкові описи.
+      // Для API-перевірок використовуємо .mp3 (дозволений тип без конвертації
+      // у слайди), вміст — той самий тестовий PDF-байтовий буфер
+      check(
+        "Issue #63 Е3: мультивибір файлів і черга описів на /demonstration",
+        demoHtml.includes('id="uploadFile" type="file" multiple') &&
+          demoHtml.includes('id="uploadQueue"')
+      );
+      check(
+        "Issue #63 Е3: JS завантажує кілька файлів послідовно",
+        jsSrc.includes("for (let i = 0; i < selected.length; i++)") &&
+          jsSrc.includes('let url = "/api/upload?name=" + encodeURIComponent(file.name)')
+      );
+      check(
+        "Issue #63 Е3: опис передається на сервер",
+        jsSrc.includes('url += "&description=" + encodeURIComponent(description)')
+      );
+      check(
+        "Issue #63 Е3: підсумок не маскує помилки окремих файлів",
+        jsSrc.includes("failures.push") && jsSrc.includes("Помилки: ")
+      );
+      check(
+        "Issue #63 Е3: опис у картці файлу лише для читання",
+        jsSrc.includes("file-desc") && jsSrc.includes("esc(file.description)") &&
+          css.includes(".file-desc")
+      );
+
+      // Завантаження з описом
+      const e3Desc = "Тестовий опис: конспект уроку";
+      r = await fetch(
+        `${base}/api/upload?name=${encodeURIComponent("E3 з описом.mp3")}&description=${encodeURIComponent(e3Desc)}`,
+        {
+          method: "POST",
+          headers: { "X-Portal-Pin": PIN, "Content-Type": "application/octet-stream" },
+          body: TINY_PDF
+        }
+      );
+      const e3WithDesc = await r.json();
+      if (e3WithDesc.id) e3Ids.push(e3WithDesc.id);
+      check(
+        "Issue #63 Е3: завантаження з описом → 201 і опис у відповіді",
+        r.status === 201 && e3WithDesc.description === e3Desc,
+        `status=${r.status}, description=${JSON.stringify(e3WithDesc.description)}`
+      );
+
+      // Другий файл без опису — запис метаданих у старому форматі (без description)
+      r = await fetch(`${base}/api/upload?name=${encodeURIComponent("E3 без опису.mp3")}`, {
+        method: "POST",
+        headers: { "X-Portal-Pin": PIN, "Content-Type": "application/octet-stream" },
+        body: TINY_PDF
+      });
+      const e3NoDesc = await r.json();
+      if (e3NoDesc.id) e3Ids.push(e3NoDesc.id);
+      check(
+        "Issue #63 Е3: завантаження без опису → 201, опис порожній",
+        r.status === 201 && e3NoDesc.description === "",
+        `status=${r.status}, description=${JSON.stringify(e3NoDesc.description)}`
+      );
+
+      // Старий формат: у метаданих запис без ключа description
+      try {
+        const metaRaw = require("node:fs").readFileSync(
+          require("node:path").join(__dirname, "materials", ".metadata.json"),
+          "utf-8"
+        );
+        const legacyEntry = JSON.parse(metaRaw).files[e3NoDesc.id];
+        check(
+          "Issue #63 Е3: без опису ключа description у метаданих немає (старий формат)",
+          Boolean(legacyEntry) && !("description" in legacyEntry),
+          JSON.stringify(legacyEntry)
+        );
+      } catch (err) {
+        check(
+          "Issue #63 Е3: без опису ключа description у метаданих немає (старий формат)",
+          false,
+          err.message
+        );
+      }
+
+      // Описи читаються з метаданих: викладач бачить опис і порожній опис
+      let e3List = await (await fetch(base + "/api/files", { headers: { "X-Portal-Pin": PIN } })).json();
+      const e3F1 = e3List.find((f) => f.id === e3WithDesc.id);
+      const e3F2 = e3List.find((f) => f.id === e3NoDesc.id);
+      check(
+        "Issue #63 Е3: опис і запис без опису коректно читаються у /api/files",
+        Boolean(e3F1 && e3F2) && e3F1.description === e3Desc && e3F2.description === "",
+        JSON.stringify({ withDesc: e3F1 && e3F1.description, noDesc: e3F2 && e3F2.description })
+      );
+      // Учень бачить опис видимого файлу (лише читання), приховані — закриті (Е2/Е4)
+      e3List = await (await fetch(base + "/api/files")).json();
+      const e3Student = e3List.find((f) => f.id === e3WithDesc.id);
+      check(
+        "Issue #63 Е3: учень бачить опис видимого файлу",
+        Boolean(e3Student) && e3Student.description === e3Desc,
+        JSON.stringify(e3Student && e3Student.description)
+      );
+
+      // Наддовгий опис обрізається до config.maxDescriptionLength (500)
+      r = await fetch(
+        `${base}/api/upload?name=${encodeURIComponent("E3 довгий опис.mp3")}&description=${encodeURIComponent("Х".repeat(600))}`,
+        {
+          method: "POST",
+          headers: { "X-Portal-Pin": PIN, "Content-Type": "application/octet-stream" },
+          body: TINY_PDF
+        }
+      );
+      const e3Long = await r.json();
+      if (e3Long.id) e3Ids.push(e3Long.id);
+      check(
+        "Issue #63 Е3: довгий опис обрізано до 500 символів",
+        r.status === 201 && typeof e3Long.description === "string" && e3Long.description.length === 500,
+        `length=${e3Long.description && e3Long.description.length}`
+      );
+
+      // Захист не ослаб: перевірка PIN під час завантаження
+      r = await fetch(`${base}/api/upload?name=${encodeURIComponent("E3 без PIN.mp3")}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: TINY_PDF
+      });
+      check("Issue #63 Е3: завантаження без PIN → 403", r.status === 403, `status=${r.status}`);
+
       // 8. Керування трансляцією потребує PIN
       r = await fetch(`${base}/api/control`, {
         method: "POST",
@@ -378,6 +503,14 @@ async function main() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pin: PIN, file: fileId })
       }).catch(() => {});
+      // Прибирання тестових файлів Етапу 3
+      for (const id of e3Ids) {
+        await fetch(`${base}/api/files/delete`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, file: id })
+        }).catch(() => {});
+      }
     }
 
     // 10. Issue #1: ліміт спроб PIN — окремий екземпляр з малим лімітом

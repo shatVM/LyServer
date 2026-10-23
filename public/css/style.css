@@ -363,6 +363,49 @@ input:focus-visible {
   margin-bottom: 12px;
 }
 
+/* Issue #63 Етап 3: черга вибраних файлів із полями опису */
+.upload-queue {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.upload-queue-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.upload-queue-name {
+  flex: 1 1 200px;
+  min-width: 160px;
+  overflow-wrap: anywhere;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #142e4e;
+}
+
+.upload-desc {
+  flex: 1 1 220px;
+  min-width: 180px;
+  padding: 6px 10px;
+  border: 1px solid #ccd8e6;
+  border-radius: 8px;
+  font-size: 13.5px;
+  background: #fdfefe;
+}
+
+.upload-desc:focus {
+  outline: none;
+  border-color: #6aa1d8;
+  box-shadow: 0 0 0 3px rgba(106, 161, 216, 0.18);
+}
+
 .info-card {
   background: #fdfefe;
   border: 1px solid #e1e9f2;
@@ -424,6 +467,13 @@ input:focus-visible {
   flex-direction: column;
   gap: 3px;
   min-width: 180px;
+}
+
+/* Issue #63 Етап 3: опис матеріалу (лише читання) */
+.file-desc {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  color: #3e5066;
 }
 
 .file-name {

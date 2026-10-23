@@ -49,17 +49,21 @@
     <h3>Додати матеріали</h3>
   </div>
   <div class="upload-box">
-    <label for="uploadFile"><strong>Виберіть файл на пристрої:</strong></label>
+    <label for="uploadFile"><strong>Виберіть файли на пристрої:</strong></label>
     <div style="margin-top:8px">
-      <input id="uploadFile" type="file" accept=".pdf,.pptx,.mp4,.webm,.m4v,.mov,.ogg,.mp3,.wav">
+      <input id="uploadFile" type="file" multiple accept=".pdf,.pptx,.mp4,.webm,.m4v,.mov,.ogg,.mp3,.wav">
     </div>
+    <!-- Issue #63, Етап 3: черга вибраних файлів — для кожного можна задати
+         власний необов'язковий опис (порожній опис = файл без опису) -->
+    <div id="uploadQueue" class="upload-queue"></div>
     <button id="upload" style="margin-top:14px; width:100%">
       🚀 Завантажити на сервер
     </button>
   </div>
-  <div id="uploadStatus" class="status">Оберіть файл для завантаження на сервер.</div>
+  <div id="uploadStatus" class="status">Оберіть один або кілька файлів для завантаження.</div>
   <p class="hint">
     PDF та PPTX після завантаження автоматично конвертуються у PNG-слайди; підтримуються файли розміром до 1 ГБ.
+    Опис є необов'язковим — його можна залишити порожнім.
   </p>
 </section>
 

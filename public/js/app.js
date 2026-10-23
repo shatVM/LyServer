@@ -629,8 +629,12 @@ function renderFiles() {
     info.className = "file-info";
     const hiddenBadge = (isTeacher && file.hidden) ? '<span class="badge-hidden">🚫 Приховано</span>' : "";
     const typeTag = SLIDE_EXTS.has(file.ext) ? "🖼️" : "🎬";
+    // Issue #63 Етап 3: опис матеріалу — лише для читання (видно й учням)
+    const descLine = file.description
+      ? '<div class="file-desc">' + esc(file.description) + "</div>"
+      : "";
     info.innerHTML = '<div class="file-name">' + typeTag + " " + esc(file.name) + hiddenBadge +
-      '</div><div class="hint">' + esc(file.ext.toUpperCase()) + " • " + formatSize(file.size) + "</div>";
+      '</div><div class="hint">' + esc(file.ext.toUpperCase()) + " • " + formatSize(file.size) + "</div>" + descLine;
 
     const actions = document.createElement("div");
     actions.className = "file-actions";
@@ -997,42 +1001,108 @@ if ($("pageInput")) {
 if ($("refresh")) $("refresh").onclick = refreshFiles;
 if ($("showShared")) $("showShared").onclick = () => pollState(true);
 
-// Upload handler
+// Issue #63 Етап 3: черга вибраних файлів — для кожного файлу своє поле опису.
+// На сторінках без #uploadQueue (напр. /upload) черга не рендериться —
+// файли завантажуються без описів, як і раніше
+function renderUploadQueue() {
+  const queue = $("uploadQueue");
+  if (!queue) return;
+  queue.replaceChildren();
+  const selected = $("uploadFile") ? Array.from($("uploadFile").files) : [];
+  for (let i = 0; i < selected.length; i++) {
+    const row = document.createElement("div");
+    row.className = "upload-queue-item";
+
+    const nameEl = document.createElement("div");
+    nameEl.className = "upload-queue-name";
+    nameEl.textContent = "📄 " + selected[i].name;
+
+    const desc = document.createElement("input");
+    desc.type = "text";
+    desc.className = "upload-desc";
+    desc.maxLength = 500; // Максимум на сервері: config.maxDescriptionLength
+    desc.placeholder = "Опис (необов'язково)";
+    desc.dataset.idx = String(i);
+
+    row.append(nameEl, desc);
+    queue.append(row);
+  }
+}
+
+if ($("uploadFile")) $("uploadFile").addEventListener("change", renderUploadQueue);
+
+// Upload handler (Issue #63 Етап 3: мультизавантаження з описами)
 if ($("upload") && $("uploadFile")) {
   $("upload").onclick = async () => {
-    const file = $("uploadFile").files[0];
-    if (!file) { setUploadStatus("Оберіть файл для завантаження."); return; }
+    const selected = Array.from($("uploadFile").files);
+    if (!selected.length) { setUploadStatus("Оберіть файли для завантаження."); return; }
     if (!pin || role !== "teacher") { setUploadStatus("Необхідно увійти як викладач."); openRoleModal(); return; }
+
+    // Описи з черги за індексом вибраного файлу; на сторінках без черги — без опису
+    const descriptions = new Map();
+    document.querySelectorAll(".upload-desc").forEach((el) => {
+      const idx = Number(el.dataset.idx);
+      if (Number.isInteger(idx) && selected[idx]) descriptions.set(selected[idx], el.value.trim());
+    });
 
     const button = $("upload");
     button.disabled = true;
-    setUploadStatus("Завантаження: " + file.name + "…");
-    try {
-      const res = await api("/api/upload?name=" + encodeURIComponent(file.name), {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream", "X-Portal-Pin": pin },
-        body: file
-      });
-      const uploadResult = await res.json();
-      $("uploadFile").value = "";
-      setUploadStatus("Файл завантажено: " + file.name);
 
-      const uploadedId = uploadResult.id || file.name;
+    const uploaded = [];
+    const failures = [];
+    try {
+      // Послідовне завантаження: чіткий прогрес «N з M» та ізоляція помилок
+      for (let i = 0; i < selected.length; i++) {
+        const file = selected[i];
+        const description = descriptions.get(file) || "";
+        setUploadStatus("Завантаження " + (i + 1) + " з " + selected.length + ": " + file.name + "…");
+        let url = "/api/upload?name=" + encodeURIComponent(file.name);
+        if (description) url += "&description=" + encodeURIComponent(description);
+        try {
+          const res = await api(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/octet-stream", "X-Portal-Pin": pin },
+            body: file
+          });
+          const uploadResult = await res.json();
+          uploaded.push({ name: file.name, id: uploadResult.id || file.name });
+        } catch (error) {
+          // Помилка одного файлу не зупиняє завантаження решти,
+          // але й не маскується під успіх у підсумку
+          failures.push(file.name + " — " + error.message);
+        }
+      }
+
+      $("uploadFile").value = "";
+      renderUploadQueue();
+
+      // Підсумок: помилки показано явно, успіх не «ховає» часткові збої
+      let summary;
+      if (!failures.length) {
+        summary = "✅ Завантажено файлів: " + uploaded.length + ".";
+      } else if (!uploaded.length) {
+        summary = "❌ Жоден файл не завантажено (обраних: " + selected.length + "). Помилки: " + failures.join("; ");
+      } else {
+        summary = "⚠️ Завантажено " + uploaded.length + " з " + selected.length + ". Помилки: " + failures.join("; ");
+      }
+      setUploadStatus(summary);
 
       // Issue #8: сервер конвертує PDF/PPTX у PNG одразу після завантаження;
       // клієнт лише чекає завершення (спільний lock на сервері)
-      if (SLIDE_EXTS.has(extOf(uploadedId))) {
-        setUploadStatus("Файл завантажено: " + file.name + " — конвертація слайдів у фоні…");
-        prepareSlidesBg(uploadedId).then(() => {
-          setUploadStatus("✅ Файл готовий до демонстрації: " + file.name);
-        }).catch(() => {
-          setUploadStatus("⚠️ Файл завантажено, але конвертація слайдів ще триває. Натисніть «Оновити».");
+      const slideFiles = uploaded.filter((f) => SLIDE_EXTS.has(extOf(f.id)));
+      if (slideFiles.length) {
+        setUploadStatus(summary + " Конвертація слайдів: " + slideFiles.length + " файл(ів) у фоні…");
+        Promise.allSettled(slideFiles.map((f) => prepareSlidesBg(f.id))).then((results) => {
+          const pending = results.filter((x) => x.status === "rejected").length;
+          if (pending) {
+            setUploadStatus(summary + " ⏳ Конвертація ще триває для " + pending + " файл(ів). Натисніть «Оновити».");
+          } else {
+            setUploadStatus(summary + " ✅ Файли готові до демонстрації.");
+          }
         });
       }
 
       await refreshFiles();
-    } catch (error) {
-      setUploadStatus("Помилка завантаження: " + error.message);
     } finally {
       button.disabled = false;
     }

@@ -8,6 +8,8 @@ const config = {
   slidesDir: path.join(__dirname, "..", "..", "materials", ".slides"),
   metadataFile: path.join(__dirname, "..", "..", "materials", ".metadata.json"),
   maxUpload: 1024 * 1024 * 1024, // 1 GB
+  // Issue #63 Етап 3: максимальна довжина необов'язкового опису матеріалу
+  maxDescriptionLength: 500,
   // Захист PIN від перебору (див. utils/pinLimiter.js)
   pinMaxAttempts: Number(process.env.PIN_MAX_ATTEMPTS) || 5,
   pinWindowMs: Number(process.env.PIN_WINDOW_MS) || 15 * 60 * 1000,
