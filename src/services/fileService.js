@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const { Transform } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 const config = require("../config");
+const slideService = require("./slideService");
 const { getFilePath, safeFilename } = require("../utils/fileHelpers");
 
 // Ensure data directory exists
@@ -110,10 +111,10 @@ class FileService {
         const ext = path.extname(item.name).toLowerCase();
         let conversionStatus = info.conversionStatus || "";
         if (config.slideExtensions.has(ext) && !conversionStatus) {
-          try {
-            const manifest = JSON.parse(fs.readFileSync(path.join(config.slidesDir, item.name, "manifest.json"), "utf-8"));
-            if (Number.isInteger(manifest.pageCount) && manifest.pageCount > 0) conversionStatus = "ready";
-          } catch { conversionStatus = "pending"; }
+          const manifest = slideService.getManifest(item.name);
+          if (manifest && Number.isInteger(manifest.pageCount) && manifest.pageCount > 0) conversionStatus = "ready";
+          else if (manifest && manifest.converting) conversionStatus = "converting";
+          else conversionStatus = "pending";
         }
         return {
           id: item.name,
