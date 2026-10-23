@@ -40,7 +40,7 @@ const isStudentsPage = Boolean(window.location.pathname.includes("students"));
 const isMaterialsPage = Boolean(!isDemoPage && !isUploadPage && !isStudentsPage);
 
 // Extensions treated as slides (PNG images, not iframes or video)
-const SLIDE_EXTS = new Set([".pdf", ".pptx"]);
+const SLIDE_EXTS = new Set([".pdf", ".ppt", ".pptx"]);
 
 function setStatus(text) {
   if ($("status")) $("status").textContent = text;
