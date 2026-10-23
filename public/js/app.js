@@ -40,6 +40,15 @@ function setStatus(text) {
   if ($("status")) $("status").textContent = text;
 }
 
+// Issue #63, Етап 2: статус блоку завантаження «Додати матеріали».
+// На сторінці «Демонстрація» спільний #status оновлює опитування демонстрації,
+// тому повідомлення завантаження йдуть у власний контейнер #uploadStatus;
+// на інших сторінках (де його немає) — у чинний #status, як раніше.
+function setUploadStatus(text) {
+  if ($("uploadStatus")) $("uploadStatus").textContent = text;
+  else setStatus(text);
+}
+
 // ---------------------------------------------------------------------------
 // Toast notifications (for teacher disconnect alerts)
 // ---------------------------------------------------------------------------
@@ -992,12 +1001,12 @@ if ($("showShared")) $("showShared").onclick = () => pollState(true);
 if ($("upload") && $("uploadFile")) {
   $("upload").onclick = async () => {
     const file = $("uploadFile").files[0];
-    if (!file) { setStatus("Оберіть файл для завантаження."); return; }
-    if (!pin || role !== "teacher") { setStatus("Необхідно увійти як викладач."); openRoleModal(); return; }
+    if (!file) { setUploadStatus("Оберіть файл для завантаження."); return; }
+    if (!pin || role !== "teacher") { setUploadStatus("Необхідно увійти як викладач."); openRoleModal(); return; }
 
     const button = $("upload");
     button.disabled = true;
-    setStatus("Завантаження: " + file.name + "…");
+    setUploadStatus("Завантаження: " + file.name + "…");
     try {
       const res = await api("/api/upload?name=" + encodeURIComponent(file.name), {
         method: "POST",
@@ -1006,24 +1015,24 @@ if ($("upload") && $("uploadFile")) {
       });
       const uploadResult = await res.json();
       $("uploadFile").value = "";
-      setStatus("Файл завантажено: " + file.name);
+      setUploadStatus("Файл завантажено: " + file.name);
 
       const uploadedId = uploadResult.id || file.name;
 
       // Issue #8: сервер конвертує PDF/PPTX у PNG одразу після завантаження;
       // клієнт лише чекає завершення (спільний lock на сервері)
       if (SLIDE_EXTS.has(extOf(uploadedId))) {
-        setStatus("Файл завантажено: " + file.name + " — конвертація слайдів у фоні…");
+        setUploadStatus("Файл завантажено: " + file.name + " — конвертація слайдів у фоні…");
         prepareSlidesBg(uploadedId).then(() => {
-          setStatus("✅ Файл готовий до демонстрації: " + file.name);
+          setUploadStatus("✅ Файл готовий до демонстрації: " + file.name);
         }).catch(() => {
-          setStatus("⚠️ Файл завантажено, але конвертація слайдів ще триває. Натисніть «Оновити».");
+          setUploadStatus("⚠️ Файл завантажено, але конвертація слайдів ще триває. Натисніть «Оновити».");
         });
       }
 
       await refreshFiles();
     } catch (error) {
-      setStatus("Помилка завантаження: " + error.message);
+      setUploadStatus("Помилка завантаження: " + error.message);
     } finally {
       button.disabled = false;
     }
@@ -1033,16 +1042,21 @@ if ($("upload") && $("uploadFile")) {
 // ---------------------------------------------------------------------------
 // Bootstrap
 // ---------------------------------------------------------------------------
+// Issue #63: список файлів завантажуємо першим — pollState і displaySharedFile
+// шукають ім'я файлу у масиві files і без нього показують сирий id (гонка двох
+// паралельних fetch на завантаженні сторінки)
+let filesReady = Promise.resolve();
 if (!role) {
   openRoleModal();
   updateRoleUI();
 } else {
   updateRoleUI();
-  refreshFiles();
+  filesReady = refreshFiles();
 }
 
 if (isDemoPage) {
-  pollState(true);
+  // Перший pollState після завантаження списку файлів; подальші — за інтервалом
+  filesReady.finally(() => pollState(true));
   setInterval(() => pollState(false), DEMO_STATE_POLL_MS);
 }
 
