@@ -76,6 +76,14 @@ function validateManifest(name, manifest) {
     if (!fs.existsSync(pngPath) || fs.statSync(pngPath).size <= 8) {
       throw new Error("Не знайдено готовий PNG-слайд №" + page);
     }
+    const fd = fs.openSync(pngPath, "r");
+    const header = Buffer.alloc(8);
+    let bytesRead;
+    try { bytesRead = fs.readSync(fd, header, 0, 8, 0); }
+    finally { fs.closeSync(fd); }
+    if (bytesRead !== 8 || !header.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+      throw new Error("Некоректний PNG-слайд №" + page);
+    }
   }
   return manifest;
 }
@@ -268,6 +276,7 @@ async function ensureSlides(name) {
  * Якщо конвертація зараз виконується — { converting: true }.
  */
 function getManifest(name) {
+  if (inFlight.has(name)) return { converting: true };
   const manifest = readManifest(name);
   if (manifest) {
     try { return validateManifest(name, manifest); }
