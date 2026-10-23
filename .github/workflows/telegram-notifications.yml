@@ -1,0 +1,58 @@
+
+name: Telegram notifications
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send relevant comment to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          EVENT_NAME: ${{ github.event_name }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_URL: ${{ github.event.comment.html_url }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FIRST_LINE="$(printf '%s\n' "$COMMENT_BODY" | head -n 1)"
+
+          if ! printf '%s' "$FIRST_LINE" |
+            grep -Eiq '^[[:space:]]*(Tech-lead|Dev-agent)([[:space:]]|$)'; then
+            echo "Comment has no recognized role prefix; skipped."
+            exit 0
+          fi
+
+          TITLE="${ISSUE_TITLE:-${PR_TITLE:-GitHub}}"
+          NUMBER="${ISSUE_NUMBER:-${PR_NUMBER:-unknown}}"
+          BODY="$(printf '%s' "$COMMENT_BODY" | head -c 2500)"
+
+          MESSAGE="$(printf \
+            '🔔 LyServer — новий коментар\n\nРоль і автор: %s (@%s)\nОбговорення: #%s — %s\nID коментаря: %s\n\n%s\n\nПосилання: %s' \
+            "$FIRST_LINE" "$COMMENT_AUTHOR" "$NUMBER" "$TITLE" \
+            "$COMMENT_ID" "$BODY" "$COMMENT_URL")"
+
+          curl --fail --silent --show-error \
+            --request POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${MESSAGE}" \
+            --data-urlencode "disable_web_page_preview=true"
