@@ -1,4 +1,3 @@
-
 name: Telegram notifications
 
 on:
@@ -20,7 +19,6 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          EVENT_NAME: ${{ github.event_name }}
           COMMENT_BODY: ${{ github.event.comment.body }}
           COMMENT_URL: ${{ github.event.comment.html_url }}
           COMMENT_ID: ${{ github.event.comment.id }}
@@ -33,26 +31,50 @@ jobs:
         run: |
           set -euo pipefail
 
-          FIRST_LINE="$(printf '%s\n' "$COMMENT_BODY" | head -n 1)"
+          python3 <<'PY'
+          import html
+          import json
+          import os
+          import re
+          import urllib.parse
+          import urllib.request
 
-          if ! printf '%s' "$FIRST_LINE" |
-            grep -Eiq '^[[:space:]]*(Tech-lead|Dev-agent)([[:space:]]|$)'; then
-            echo "Comment has no recognized role prefix; skipped."
-            exit 0
-          fi
+          body = os.environ.get("COMMENT_BODY", "")
+          first_line = body.splitlines()[0] if body.splitlines() else ""
+          if not re.match(r"^\s*(Tech-lead|Dev-agent)(\s|$)", first_line, re.IGNORECASE):
+              print("Comment has no recognized role prefix; skipped.")
+              raise SystemExit(0)
 
-          TITLE="${ISSUE_TITLE:-${PR_TITLE:-GitHub}}"
-          NUMBER="${ISSUE_NUMBER:-${PR_NUMBER:-unknown}}"
-          BODY="$(printf '%s' "$COMMENT_BODY" | head -c 2500)"
+          author = os.environ.get("COMMENT_AUTHOR", "unknown")
+          title = os.environ.get("ISSUE_TITLE") or os.environ.get("PR_TITLE") or "GitHub"
+          number = os.environ.get("ISSUE_NUMBER") or os.environ.get("PR_NUMBER") or "unknown"
+          comment_id = os.environ.get("COMMENT_ID", "")
+          url = os.environ.get("COMMENT_URL", "")
 
-          MESSAGE="$(printf \
-            '🔔 LyServer — новий коментар\n\nРоль і автор: %s (@%s)\nОбговорення: #%s — %s\nID коментаря: %s\n\n%s\n\nПосилання: %s' \
-            "$FIRST_LINE" "$COMMENT_AUTHOR" "$NUMBER" "$TITLE" \
-            "$COMMENT_ID" "$BODY" "$COMMENT_URL")"
+          message = (
+              "<b>🔔 LyServer — новий коментар</b>\n\n"
+              f"<b>Роль:</b> {html.escape(first_line)}\n"
+              f"<b>Автор:</b> {html.escape(author)}\n"
+              f"<b>Обговорення:</b> #{html.escape(number)}\n"
+              f"<b>Тема:</b> {html.escape(title)}\n"
+              f"<b>ID коментаря:</b> {html.escape(comment_id)}\n\n"
+              f'<a href="{html.escape(url, quote=True)}">↗ Відкрити коментар на GitHub</a>'
+          )
 
-          curl --fail --silent --show-error \
-            --request POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=${MESSAGE}" \
-            --data-urlencode "disable_web_page_preview=true"
+          payload = urllib.parse.urlencode({
+              "chat_id": os.environ["TELEGRAM_CHAT_ID"],
+              "text": message,
+              "parse_mode": "HTML",
+              "disable_web_page_preview": "true",
+          }).encode("utf-8")
+          request = urllib.request.Request(
+              f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
+              data=payload,
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=20) as response:
+              result = json.loads(response.read().decode("utf-8"))
+          if not result.get("ok"):
+              raise RuntimeError("Telegram API did not confirm message delivery.")
+          print("Telegram notification sent successfully.")
+          PY
