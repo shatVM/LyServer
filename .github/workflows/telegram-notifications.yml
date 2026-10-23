@@ -42,7 +42,7 @@ jobs:
           body = os.environ.get("COMMENT_BODY", "")
           lines = body.strip().splitlines()
           first_line = lines[0] if lines else ""
-          role_match = re.match(r"^\s*(Tech-lead|Dev-agent)(\s|$)", first_line, re.IGNORECASE)
+          role_match = re.match(r"^\\s*(Tech-lead|Dev-agent)(\\s|$)", first_line, re.IGNORECASE)
           if not role_match:
               print("Comment has no recognized role prefix; skipped.")
               raise SystemExit(0)
@@ -52,14 +52,32 @@ jobs:
           number = os.environ.get("ISSUE_NUMBER") or os.environ.get("PR_NUMBER") or "unknown"
           url = os.environ.get("COMMENT_URL", "")
 
-          # Remove the role marker, then prepare a short, readable preview.
-          lines[0] = re.sub(
-              r"^\s*(?:Tech-lead|Dev-agent)\s*[:—-]?\s*",
+          # Find the first Markdown heading before the horizontal separator.
+          # This is the intended short description in Tech-lead/Dev-agent comments.
+          content_lines = lines[1:]
+          heading_lines = []
+          for line in content_lines:
+              if re.match(r"^\\s*(?:-{3,}|_{3,}|\\*{3,})\\s*$", line):
+                  break
+              heading_lines.append(line)
+
+          heading = next(
+              (m.group(1).strip() for line in heading_lines
+               if (m := re.match(r"^\\s{0,3}#{1,6}\\s+(.+?)\\s*#*\\s*$", line))),
               "",
-              lines[0],
-              flags=re.IGNORECASE,
           )
-          summary = re.sub(r"\s+", " ", " ".join(lines)).strip()
+          if heading:
+              # Render common Markdown inline syntax as readable Telegram text.
+              summary = re.sub(r"\\[([^\\]]+)\\]\\([^)]*\\)", r"\\1", heading)
+              summary = re.sub(r"[*_~`]", "", summary)
+              summary = html.unescape(summary)
+          else:
+              # Backward-compatible fallback: use comment text before the separator.
+              summary = re.sub(r"\\s+", " ", " ".join(heading_lines)).strip()
+              summary = re.sub(r"\\[([^\\]]+)\\]\\([^)]*\\)", r"\\1", summary)
+              summary = re.sub(r"[*_~`]", "", summary)
+              summary = html.unescape(summary)
+
           if not summary:
               summary = "Коментар без текстового опису."
           limit = 280
@@ -67,11 +85,11 @@ jobs:
               summary = summary[:limit - 1].rstrip() + "…"
 
           message = (
-              "<b>🔔 LyServer — новий коментар</b>\n\n"
-              f"<b>Роль:</b> {html.escape(role)}\n"
-              f"<b>Обговорення:</b> #{html.escape(number)}\n"
-              f"<b>Тема:</b> {html.escape(title)}\n"
-              f"<b>Коротко:</b> {html.escape(summary)}\n\n"
+              "<b>🔔 LyServer — новий коментар</b>\\n\\n"
+              f"<b>Роль:</b> {html.escape(role)}\\n"
+              f"<b>Обговорення:</b> #{html.escape(number)}\\n"
+              f"<b>Тема:</b> {html.escape(title)}\\n"
+              f"<b>Коротко:</b> {html.escape(summary)}\\n\\n"
               f'<a href="{html.escape(url, quote=True)}">↗ Відкрити коментар на GitHub</a>'
           )
 
