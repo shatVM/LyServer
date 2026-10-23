@@ -48,35 +48,34 @@ class ApiController {
       const result = await fileService.saveFileStream(req, originalName, description, categoryId);
       const ext = path.extname(result.id).toLowerCase();
       let conversionStatus = "not-required";
-      let conversionError = "";
       if (config.slideExtensions.has(ext)) {
-        fileService.setConversionStatus(result.id, "converting");
-        try {
-          const manifest = await slideService.ensureSlides(result.id);
-          if (!manifest || !Number.isInteger(manifest.pageCount) || manifest.pageCount < 1) {
-            throw new Error("Сервер не підтвердив готовність PNG-слайдів");
-          }
-          fileService.setConversionStatus(result.id, "ready");
-          conversionStatus = "ready";
-        } catch (error) {
-          conversionStatus = "failed";
-          conversionError = error.message || "Помилка конвертації";
-          fileService.setConversionStatus(result.id, "failed", conversionError);
-          console.error("Конвертація слайдів (" + result.id + "):", conversionError);
-        }
+        conversionStatus = "converting";
+        fileService.setConversionStatus(result.id, conversionStatus);
+        // Запускаємо у фоні, як у попередньому етапі; стан ready виставляємо
+        // лише після перевірки всіх PNG. Помилка зберігається в метаданих.
+        void slideService.ensureSlides(result.id)
+          .then(manifest => {
+            if (!manifest || !Number.isInteger(manifest.pageCount) || manifest.pageCount < 1) {
+              throw new Error("Сервер не підтвердив готовність PNG-слайдів");
+            }
+            fileService.setConversionStatus(result.id, "ready");
+          })
+          .catch(error => {
+            const conversionError = error.message || "Помилка конвертації";
+            fileService.setConversionStatus(result.id, "failed", conversionError);
+            console.error("Конвертація слайдів (" + result.id + "):", conversionError);
+          });
       }
 
-      // Оригінал зберігається. У разі помилки файл залишається в бібліотеці
-      // викладача зі станом failed, але не вважається готовим для учнів.
+      // Оригінал зберігається. Учні побачать документ лише після ready.
       res.status(201).json({
         ok: true, id: result.id, name: result.name, size: result.size,
-        description: result.description, conversionStatus, conversionError
+        description: result.description, conversionStatus, conversionError: ""
       });
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Помилка завантаження");
     }
   }
-
   getCategories(req, res) {
     if (!auth.requirePin(req, res)) return;
     res.json(fileService.getCategories());
