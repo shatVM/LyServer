@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg">
+  <symbol id="folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9L9.4 3.9A2 2 0 0 0 7.7 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>
+  </symbol>
+  <symbol id="folder-input" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M22 13V8a2 2 0 0 0-2-2h-7.5a2 2 0 0 1-1.6-.8L9.5 3.8A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h8"/>
+    <path d="M12 15h8"/>
+    <path d="m17 12 3 3-3 3"/>
+  </symbol>
+  <symbol id="arrow-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m5 12 7-7 7 7"/>
+    <path d="M12 19V5"/>
+  </symbol>
+  <symbol id="arrow-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m19 12-7 7-7-7"/>
+    <path d="M12 5v14"/>
+  </symbol>
+  <symbol id="plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 5v14"/>
+    <path d="M5 12h14"/>
+  </symbol>
+</svg>
