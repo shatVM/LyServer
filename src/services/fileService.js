@@ -110,11 +110,19 @@ class FileService {
           : { originalName: typeof rawInfo === "string" ? rawInfo : item.name };
         const ext = path.extname(item.name).toLowerCase();
         let conversionStatus = info.conversionStatus || "";
-        if (config.slideExtensions.has(ext) && !conversionStatus) {
+        let conversionError = typeof info.conversionError === "string" ? info.conversionError : "";
+        if (config.slideExtensions.has(ext)) {
           const manifest = slideService.getManifest(item.name);
-          if (manifest && Number.isInteger(manifest.pageCount) && manifest.pageCount > 0) conversionStatus = "ready";
-          else if (manifest && manifest.converting) conversionStatus = "converting";
-          else conversionStatus = "pending";
+          const manifestReady = manifest && Number.isInteger(manifest.pageCount) && manifest.pageCount > 0;
+          if (conversionStatus === "ready" && !manifestReady) {
+            // Не покладаємося лише на старий прапорець ready, якщо PNG зникли або пошкоджені.
+            conversionStatus = "failed";
+            conversionError = conversionError || "PNG-слайди відсутні або пошкоджені";
+          } else if (!conversionStatus) {
+            if (manifestReady) conversionStatus = "ready";
+            else if (manifest && manifest.converting) conversionStatus = "converting";
+            else conversionStatus = "pending";
+          }
         }
         return {
           id: item.name,
@@ -126,7 +134,7 @@ class FileService {
           categoryId: categoryIds.has(info.categoryId) ? info.categoryId : "",
           order: orderIndex.has(item.name) ? orderIndex.get(item.name) : Number.MAX_SAFE_INTEGER,
           conversionStatus,
-          conversionError: typeof info.conversionError === "string" ? info.conversionError : ""
+          conversionError
         };
       })
       .filter(item => config.allowedExtensions.has(item.ext))
