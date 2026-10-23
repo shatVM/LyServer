@@ -368,9 +368,10 @@ async function main() {
           demoHtml.includes('id="uploadQueue"')
       );
       check(
-        "Issue #63 Е3: JS завантажує кілька файлів послідовно",
-        jsSrc.includes("for (let i = 0; i < selected.length; i++)") &&
-          jsSrc.includes('let url = "/api/upload?name=" + encodeURIComponent(file.name)')
+        "Issue #63 Е3: JS завантажує лише файли з керованої черги",
+        jsSrc.includes("const batch = uploadQueueState.slice()") &&
+          jsSrc.includes("for (let i = 0; i < batch.length; i++)") &&
+          jsSrc.includes('let url = "/api/upload?name=" + encodeURIComponent(item.file.name)')
       );
       check(
         "Issue #63 Е3: опис передається на сервер",
@@ -381,9 +382,39 @@ async function main() {
         jsSrc.includes("failures.push") && jsSrc.includes("Помилки: ")
       );
       check(
-        "Issue #63 Е3: опис у картці файлу лише для читання",
-        jsSrc.includes("file-desc") && jsSrc.includes("esc(file.description)") &&
-          css.includes(".file-desc")
+        "Issue #63 Е3: опис у картці безпечно вставляється як текст",
+        jsSrc.includes('desc.textContent = String(file.description)') &&
+          css.includes(".file-desc") && css.includes("-webkit-line-clamp: 2")
+      );
+      check(
+        "Issue #63 Е3: черга зберігає File та описи незалежно від input",
+        jsSrc.includes("let uploadQueueState = []") &&
+          jsSrc.includes("input.value = \"\"") &&
+          jsSrc.includes("item.description = desc.value")
+      );
+      check(
+        "Issue #63 Е3: після помилки файл лишається в черзі для повтору",
+        jsSrc.includes('item.status = "error"') &&
+          jsSrc.includes("item.error = error") &&
+          jsSrc.includes("uploadQueueState = uploadQueueState.filter((queued) => queued.key !== item.key)")
+      );
+      check(
+        "Issue #63 Е3: паралельний запуск завантаження заблоковано",
+        jsSrc.includes("if (uploadInProgress) return") &&
+          jsSrc.includes("uploadInProgress = true") &&
+          jsSrc.includes("uploadInProgress = false")
+      );
+      check(
+        "Issue #63 Е3: конвертація помилку передає виклику та перевіряє маніфест",
+        jsSrc.includes("async function prepareSlidesBg(fileId)") &&
+          !jsSrc.slice(jsSrc.indexOf("async function prepareSlidesBg(fileId)"), jsSrc.indexOf("// ---------------------------------------------------------------------------", jsSrc.indexOf("async function prepareSlidesBg(fileId)"))).includes("catch") &&
+          jsSrc.includes("Сервер не підтвердив готовність PNG-слайдів")
+      );
+      check(
+        "Issue #63 Е3: повний опис доступний через клавіатуру й mobile info",
+        jsSrc.includes('desc.tabIndex = 0') &&
+          jsSrc.includes('infoButton.setAttribute("aria-expanded"') &&
+          css.includes(".file-desc-info") && css.includes("@media (max-width: 600px)")
       );
 
       // Завантаження з описом
