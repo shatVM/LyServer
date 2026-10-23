@@ -1042,16 +1042,21 @@ if ($("upload") && $("uploadFile")) {
 // ---------------------------------------------------------------------------
 // Bootstrap
 // ---------------------------------------------------------------------------
+// Issue #63: список файлів завантажуємо першим — pollState і displaySharedFile
+// шукають ім'я файлу у масиві files і без нього показують сирий id (гонка двох
+// паралельних fetch на завантаженні сторінки)
+let filesReady = Promise.resolve();
 if (!role) {
   openRoleModal();
   updateRoleUI();
 } else {
   updateRoleUI();
-  refreshFiles();
+  filesReady = refreshFiles();
 }
 
 if (isDemoPage) {
-  pollState(true);
+  // Перший pollState після завантаження списку файлів; подальші — за інтервалом
+  filesReady.finally(() => pollState(true));
   setInterval(() => pollState(false), DEMO_STATE_POLL_MS);
 }
 

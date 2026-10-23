@@ -339,6 +339,13 @@ async function main() {
           jsSrc.includes("function setUploadStatus") &&
           jsSrc.includes('if ($("uploadStatus")) $("uploadStatus").textContent = text;')
       );
+      // Виправлення гонки: перший pollState чекає завантаження списку файлів,
+      // інакше заголовок/статус демонстрації показують сирий id файлу
+      check(
+        "Issue #63 Е2: перший pollState чекає завантаження файлів (без гонки)",
+        jsSrc.includes("filesReady.finally(() => pollState(true));") &&
+          jsSrc.includes("filesReady = refreshFiles();")
+      );
       // Регресія: маршрут /upload не видалено, корінь / перенаправляє на /materials
       r = await fetch(base + "/upload");
       check("Issue #63 Е2: /upload залишається доступною", r.status === 200, `status=${r.status}`);
