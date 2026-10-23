@@ -40,24 +40,38 @@ jobs:
           import urllib.request
 
           body = os.environ.get("COMMENT_BODY", "")
-          first_line = body.splitlines()[0] if body.splitlines() else ""
-          if not re.match(r"^\s*(Tech-lead|Dev-agent)(\s|$)", first_line, re.IGNORECASE):
+          lines = body.strip().splitlines()
+          first_line = lines[0] if lines else ""
+          role_match = re.match(r"^\s*(Tech-lead|Dev-agent)(\s|$)", first_line, re.IGNORECASE)
+          if not role_match:
               print("Comment has no recognized role prefix; skipped.")
               raise SystemExit(0)
 
-          author = os.environ.get("COMMENT_AUTHOR", "unknown")
+          role = role_match.group(1)
           title = os.environ.get("ISSUE_TITLE") or os.environ.get("PR_TITLE") or "GitHub"
           number = os.environ.get("ISSUE_NUMBER") or os.environ.get("PR_NUMBER") or "unknown"
-          comment_id = os.environ.get("COMMENT_ID", "")
           url = os.environ.get("COMMENT_URL", "")
+
+          # Remove the role marker, then prepare a short, readable preview.
+          lines[0] = re.sub(
+              r"^\s*(?:Tech-lead|Dev-agent)\s*[:—-]?\s*",
+              "",
+              lines[0],
+              flags=re.IGNORECASE,
+          )
+          summary = re.sub(r"\s+", " ", " ".join(lines)).strip()
+          if not summary:
+              summary = "Коментар без текстового опису."
+          limit = 280
+          if len(summary) > limit:
+              summary = summary[:limit - 1].rstrip() + "…"
 
           message = (
               "<b>🔔 LyServer — новий коментар</b>\n\n"
-              f"<b>Роль:</b> {html.escape(first_line)}\n"
-              f"<b>Автор:</b> {html.escape(author)}\n"
+              f"<b>Роль:</b> {html.escape(role)}\n"
               f"<b>Обговорення:</b> #{html.escape(number)}\n"
               f"<b>Тема:</b> {html.escape(title)}\n"
-              f"<b>ID коментаря:</b> {html.escape(comment_id)}\n\n"
+              f"<b>Коротко:</b> {html.escape(summary)}\n\n"
               f'<a href="{html.escape(url, quote=True)}">↗ Відкрити коментар на GitHub</a>'
           )
 
