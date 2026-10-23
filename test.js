@@ -303,6 +303,52 @@ async function main() {
           /\.slide-zone:hover,\s*\.slide-zone:active\s*\{[^}]*transform:\s*none/.test(css)
       );
 
+      // 7в. Issue #63 (Етап 2): каркас блоків на сторінці «Демонстрація» —
+      // блок «Додати матеріали» під'єднано до наявного механізму завантаження,
+      // панель показу перейменовано на «Матеріали»
+      check(
+        "Issue #63 Е2: блок «Додати матеріали» на /demonstration",
+        demoHtml.includes('id="teacherUploadPanel"') &&
+          demoHtml.includes("Додати матеріали")
+      );
+      check(
+        "Issue #63 Е2: блок прихований для учня (teacher-only, display:none)",
+        demoHtml.includes("demo-upload-panel teacher-only") &&
+          demoHtml.includes('id="teacherUploadPanel" style="display:none"')
+      );
+      check(
+        "Issue #63 Е2: порядок — «Учні» < «Додати матеріали» < «Матеріали»",
+        demoHtml.indexOf('id="studentsSideBlock"') !== -1 &&
+          demoHtml.indexOf('id="studentsSideBlock"') <
+            demoHtml.indexOf('id="teacherUploadPanel"') &&
+          demoHtml.indexOf('id="teacherUploadPanel"') !== -1 &&
+          demoHtml.indexOf('id="teacherUploadPanel"') <
+            demoHtml.indexOf('id="teacherBroadcastPanel"')
+      );
+      check(
+        "Issue #63 Е2: механізм завантаження під'єднано (поле і кнопка)",
+        demoHtml.includes('id="uploadFile"') && demoHtml.includes('id="upload"')
+      );
+      check(
+        "Issue #63 Е2: панель показу перейменовано на «Матеріали», без «Запуск показу»",
+        demoHtml.includes("<h3>Матеріали</h3>") && !demoHtml.includes("<h3>Запуск показу</h3>")
+      );
+      check(
+        "Issue #63 Е2: статус завантаження окремий від спільного екрана",
+        demoHtml.includes('id="uploadStatus"') &&
+          jsSrc.includes("function setUploadStatus") &&
+          jsSrc.includes('if ($("uploadStatus")) $("uploadStatus").textContent = text;')
+      );
+      // Регресія: маршрут /upload не видалено, корінь / перенаправляє на /materials
+      r = await fetch(base + "/upload");
+      check("Issue #63 Е2: /upload залишається доступною", r.status === 200, `status=${r.status}`);
+      r = await fetch(base + "/", { redirect: "manual" });
+      check(
+        "Issue #63 Е2: корінь / перенаправляє на /materials",
+        (r.status === 301 || r.status === 302) && r.headers.get("location") === "/materials",
+        `status=${r.status}, location=${r.headers.get("location")}`
+      );
+
       // 8. Керування трансляцією потребує PIN
       r = await fetch(`${base}/api/control`, {
         method: "POST",

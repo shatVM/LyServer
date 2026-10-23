@@ -36,14 +36,37 @@
     </div>
   </section>
 
-  <!-- Issue #19: блок «Учні» у правій колонці сітки — місцями з «Запуск показу» -->
+  <!-- Issue #19: блок «Учні» у правій колонці сітки -->
   {{> studentsBlock}}
 </div>
 
-<!-- «Запуск показу» — тепер під блоком «Учні» (повна ширина) -->
+<!-- Issue #63, Етап 2: блок «Додати матеріали» — наявний механізм завантаження,
+     під'єднаний до сторінки «Демонстрація». Розташований після блоку «Учні» і
+     перед панеллю показу. Статус завантаження (#uploadStatus) окремий від
+     статусу спільного екрана (#status), який оновлює опитування демонстрації. -->
+<section class="panel demo-upload-panel teacher-only" id="teacherUploadPanel" style="display:none">
+  <div class="panel-header-row">
+    <h3>Додати матеріали</h3>
+  </div>
+  <div class="upload-box">
+    <label for="uploadFile"><strong>Виберіть файл на пристрої:</strong></label>
+    <div style="margin-top:8px">
+      <input id="uploadFile" type="file" accept=".pdf,.pptx,.mp4,.webm,.m4v,.mov,.ogg,.mp3,.wav">
+    </div>
+    <button id="upload" style="margin-top:14px; width:100%">
+      🚀 Завантажити на сервер
+    </button>
+  </div>
+  <div id="uploadStatus" class="status">Оберіть файл для завантаження на сервер.</div>
+  <p class="hint">
+    PDF та PPTX після завантаження автоматично конвертуються у PNG-слайди; підтримуються файли розміром до 1 ГБ.
+  </p>
+</section>
+
+<!-- Issue #63, Етап 2: панель показу матеріалів (заголовок оновлено цим етапом) -->
 <section class="panel demo-controls-panel teacher-only" id="teacherBroadcastPanel" style="display:none">
   <div class="panel-header-row">
-    <h3>Запуск показу</h3>
+    <h3>Матеріали</h3>
     <button id="refresh" class="secondary btn-sm">🔄 Оновити</button>
   </div>
   <p class="hint">Оберіть матеріал (включно з прихованими від учнів) для трансляції на спільний екран:</p>
