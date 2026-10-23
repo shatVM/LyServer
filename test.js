@@ -504,6 +504,72 @@ async function main() {
         `length=${e3Long.description && e3Long.description.length}`
       );
 
+      // Issue #63 Етап 4: категорії, сумісність метаданих, порядок і права доступу.
+      r = await fetch(base + "/api/categories", { headers: { "X-Portal-Pin": PIN } });
+      check("Issue #63 Е4: категорії доступні лише викладачу з PIN", r.status === 200, "status=" + r.status);
+      r = await fetch(base + "/api/categories");
+      check("Issue #63 Е4: учень не отримує список категорій", r.status === 403, "status=" + r.status);
+
+      r = await fetch(base + "/api/categories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, name: "Е4 тестова категорія" })
+      });
+      const createdCategoryData = r.status === 201 ? await r.json() : {};
+      const e4Category = createdCategoryData.category;
+      check("Issue #63 Е4: створення категорії з PIN", r.status === 201 && Boolean(e4Category && e4Category.id), "status=" + r.status);
+
+      if (e4Category && e3WithDesc.id && e3NoDesc.id) {
+        r = await fetch(base + "/api/files/category", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, file: e3WithDesc.id, categoryId: e4Category.id })
+        });
+        check("Issue #63 Е4: матеріал можна перемістити в категорію", r.status === 200, "status=" + r.status);
+
+        r = await fetch(base + "/api/files", { headers: { "X-Portal-Pin": PIN } });
+        const teacherCategoryList = await r.json();
+        const teacherCategorized = teacherCategoryList.find(item => item.id === e3WithDesc.id);
+        check("Issue #63 Е4: категорія присутня у списку викладача", Boolean(teacherCategorized && teacherCategorized.categoryId === e4Category.id));
+
+        r = await fetch(base + "/api/files");
+        const studentCategoryList = await r.json();
+        const studentCategorized = studentCategoryList.find(item => item.id === e3WithDesc.id);
+        check("Issue #63 Е4: categoryId не розкривається учню", Boolean(studentCategorized) && !("categoryId" in studentCategorized) && !("order" in studentCategorized));
+
+        r = await fetch(base + "/api/files/category", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, file: e3NoDesc.id, categoryId: e4Category.id })
+        });
+        check("Issue #63 Е4: другий матеріал переміщено для тесту порядку", r.status === 200, "status=" + r.status);
+
+        r = await fetch(base + "/api/files/reorder", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, file: e3NoDesc.id, direction: "up" })
+        });
+        const reordered = r.status === 200 ? await r.json() : {};
+        const metaPath = require("node:path").join(__dirname, "materials", ".metadata.json");
+        const parsedOrderMeta = JSON.parse(require("node:fs").readFileSync(metaPath, "utf-8"));
+        check("Issue #63 Е4: порядок матеріалів записується на диск", r.status === 200 && Array.isArray(parsedOrderMeta.order) && parsedOrderMeta.order.indexOf(e3NoDesc.id) < parsedOrderMeta.order.indexOf(e3WithDesc.id), JSON.stringify(reordered.order || []));
+
+        const originalPath = require("node:path").join(__dirname, "materials", e3WithDesc.id);
+        r = await fetch(base + "/api/categories/delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, categoryId: e4Category.id })
+        });
+        const deletedCategory = r.status === 200 ? await r.json() : {};
+        const postDeleteMeta = JSON.parse(require("node:fs").readFileSync(metaPath, "utf-8"));
+        check("Issue #63 Е4: видалення категорії не видаляє файли", r.status === 200 && require("node:fs").existsSync(originalPath) && deletedCategory.affectedFiles >= 1 && !postDeleteMeta.files[e3WithDesc.id].categoryId, "status=" + r.status + ", affected=" + deletedCategory.affectedFiles);
+      }
+
+      const apiControllerSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "controllers", "apiController.js"), "utf-8");
+      check("Issue #63 Е4: upload очікує завершення конвертації та фіксує помилку", apiControllerSource.includes("await slideService.ensureSlides(result.id)") && apiControllerSource.includes('setConversionStatus(result.id, "failed", conversionError)'));
+      const fileServiceSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "services", "fileService.js"), "utf-8");
+      check("Issue #63 Е4: учням не видаються категорії та неготові слайди", fileServiceSource.includes('item.conversionStatus === "ready"') && fileServiceSource.includes('categoryId: categoryIds.has(info.categoryId) ? info.categoryId : ""'));
+
       // Захист не ослаб: перевірка PIN під час завантаження
       r = await fetch(`${base}/api/upload?name=${encodeURIComponent("E3 без PIN.mp3")}`, {
         method: "POST",
