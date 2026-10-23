@@ -523,6 +523,19 @@ async function main() {
       const persistedCategoryMeta = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "materials", ".metadata.json"), "utf-8"));
       check("Issue #63 Е4: категорія збережена у файлі метаданих", Boolean(e4Category && Array.isArray(persistedCategoryMeta.categories) && persistedCategoryMeta.categories.some(category => category.id === e4Category.id)));
 
+      if (e4Category) {
+        r = await fetch(base + "/api/upload?name=" + encodeURIComponent("E4 категорія під час завантаження.mp3") + "&categoryId=" + encodeURIComponent(e4Category.id), {
+          method: "POST",
+          headers: { "X-Portal-Pin": PIN, "Content-Type": "application/octet-stream" },
+          body: TINY_PDF
+        });
+        const e4Uploaded = await r.json();
+        if (e4Uploaded.id) e3Ids.push(e4Uploaded.id);
+        const uploadedList = await (await fetch(base + "/api/files", { headers: { "X-Portal-Pin": PIN } })).json();
+        const uploadedCategorized = uploadedList.find(item => item.id === e4Uploaded.id);
+        check("Issue #63 Е4: категорію можна вибрати під час завантаження", r.status === 201 && Boolean(uploadedCategorized && uploadedCategorized.categoryId === e4Category.id), "status=" + r.status);
+      }
+
       if (e4Category && e3WithDesc.id && e3NoDesc.id) {
         r = await fetch(base + "/api/files/category", {
           method: "POST",
