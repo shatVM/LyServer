@@ -145,6 +145,66 @@ function reportActivityChange(active) {
 }
 
 // ---------------------------------------------------------------------------
+// Teacher heartbeat (Issue #63: вихід учителя зупиняє демонстрацію)
+// ---------------------------------------------------------------------------
+
+/**
+ * Heartbeat викладача: сервер бачить, що вчитель у сесії. Якщо вчитель
+ * виходить (закрив вкладку, «Вийти», втрата зв'язку) — heartbeat зникає і
+ * сервер сам зупиняє активну демонстрацію, щоб учні не застрягали в режимі
+ * показу без керування (див. stateService.getState).
+ */
+async function sendTeacherHeartbeat() {
+  if (role !== "teacher" || !pin) return;
+  try {
+    await fetch("/api/presence/teacher", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Portal-Pin": pin },
+      body: JSON.stringify({})
+    });
+  } catch { /* silent */ }
+}
+
+let teacherHeartbeatTimer = null;
+
+/** Старт heartbeat викладача (вхід або перезавантаження сторінки) */
+function startTeacherHeartbeat() {
+  if (teacherHeartbeatTimer) clearInterval(teacherHeartbeatTimer);
+  sendTeacherHeartbeat();
+  teacherHeartbeatTimer = setInterval(sendTeacherHeartbeat, HEARTBEAT_MS);
+}
+
+/** Зупинка heartbeat викладача (вихід із ролі) */
+function stopTeacherHeartbeat() {
+  if (teacherHeartbeatTimer) {
+    clearInterval(teacherHeartbeatTimer);
+    teacherHeartbeatTimer = null;
+  }
+}
+
+/**
+ * Закриття вкладки викладачем (pagehide): sendBeacon несе PIN у тілі, бо не
+ * дозволяє заголовки; якщо показ активний — сервер зупиняє його одразу.
+ * Якщо beacon не дійде, сервер доб'є тайм-аутом присутності викладача.
+ */
+function reportTeacherLeave() {
+  if (role !== "teacher" || !pin) return;
+  const body = JSON.stringify({ pin, stop: true });
+  try {
+    if (navigator.sendBeacon &&
+        navigator.sendBeacon("/api/control", new Blob([body], { type: "application/json" }))) {
+      return;
+    }
+  } catch { /* fallback нижче */ }
+  fetch("/api/control", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive: true
+  }).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
 // Presence polling for teacher (Issue #7)
 // ---------------------------------------------------------------------------
 let prevPresence = {};
@@ -513,6 +573,7 @@ function closeRoleModal() {
 }
 
 function setRole(newRole, newPin = "", newName = "") {
+  const prevRole = role;
   role = newRole;
   localStorage.setItem("portalRole", newRole);
   if (newRole === "teacher") {
@@ -530,7 +591,16 @@ function setRole(newRole, newPin = "", newName = "") {
       sendHeartbeat();
     }
   } else {
-    // logout
+    // logout. Вихід учителя (Issue #63): одразу зупинити спільну демонстрацію,
+    // поки є PIN, — інакше учні застрягають у режимі показу без керування.
+    // Якщо запит не дійде, сервер доб'є тайм-аутом присутності викладача.
+    if (prevRole === "teacher") {
+      fetch("/api/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin, stop: true })
+      }).catch(() => {});
+    }
     pin = "";
     sessionStorage.removeItem("portalPin");
     studentDisplayName = "";
@@ -543,8 +613,13 @@ function setRole(newRole, newPin = "", newName = "") {
   filesReady = refreshFiles();
   // Миттєвий старт опитування, якщо увійшли як викладач у поточній сесії
   // (раніше список оновлювався лише після перезавантаження сторінки)
-  if (newRole === "teacher") startPresencePolling();
-  else stopPresencePolling();
+  if (newRole === "teacher") {
+    startPresencePolling();
+    startTeacherHeartbeat();
+  } else {
+    stopPresencePolling();
+    stopTeacherHeartbeat();
+  }
   // Симетрично: учень, який увійшов у поточній сесії, шле heartbeat одразу
   if (newRole === "student" && studentDisplayName) startHeartbeat();
   else stopHeartbeat();
@@ -1576,10 +1651,16 @@ if (isMaterialsPage) {
 document.addEventListener("visibilitychange", () => {
   reportActivityChange(document.visibilityState !== "hidden");
 });
-window.addEventListener("pagehide", () => reportActivityChange(false));
+window.addEventListener("pagehide", () => {
+  reportActivityChange(false);
+  reportTeacherLeave(); // Issue #63: закриття вкладки вчителем зупиняє показ
+});
 if (role === "student" && studentDisplayName) startHeartbeat();
 
 // Issue #7: викладач опитує список присутності та отримує тости
 if (role === "teacher") {
   startPresencePolling();
+  // Issue #63: heartbeat викладача — без нього активний показ зупиняється
+  // автоматично, коли вчитель іде (вкладка, «Вийти», зв'язок)
+  startTeacherHeartbeat();
 }

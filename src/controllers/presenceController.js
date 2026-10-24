@@ -5,6 +5,7 @@
 
 const presenceService = require("../services/presenceService");
 const config = require("../config");
+const auth = require("../utils/auth");
 
 class PresenceController {
   /**
@@ -25,6 +26,20 @@ class PresenceController {
       : !(rawActive === false || rawActive === "false" || rawActive === "0");
     const safeName = (name || "Учень").slice(0, 80);
     presenceService.heartbeat(studentId.slice(0, 64), safeName, active);
+    res.json({ ok: true });
+  }
+
+  /**
+   * POST /api/presence/teacher
+   * Heartbeat викладача (Issue #63): PIN у заголовку X-Portal-Pin або тілі
+   * (підтримує й form-data від navigator.sendBeacon). Оновлює присутність
+   * викладача — без неї активна демонстрація зупиняється автоматично,
+   * тому учні не застрягають у режимі показу після виходу вчителя.
+   * Без PIN відхиляється, щоб учні не могли «утримувати» чужий показ.
+   */
+  teacherHeartbeat(req, res) {
+    if (!auth.requirePin(req, res)) return;
+    presenceService.markTeacherSeen();
     res.json({ ok: true });
   }
 

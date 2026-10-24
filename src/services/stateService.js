@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { getFilePath } = require("../utils/fileHelpers");
+const presenceService = require("./presenceService");
 
 class StateService {
   constructor() {
@@ -16,10 +17,33 @@ class StateService {
   }
 
   getState() {
+    // Issue #63: вихід учителя. Якщо показ активний, а вчитель більше не на
+    // зв'язку (закриття вкладки, «Вийти», втрата зв'язку) — зупиняємо
+    // демонстрацію, інакше учні застрягають у режимі показу без керування.
+    // Перевірка виконується в самому читанні стану: учні опитують його кожні
+    // ~0.5 с, тож автозупинка спрацьовує невдовзі після зникнення heartbeat.
+    if (this.shared.file && !presenceService.isTeacherOnline()) {
+      console.log("[state] Викладач відсутній на зв'язку — автозупинка демонстрації:", this.shared.file);
+      this.stopShared();
+    }
     return {
       ...this.shared,
       revision: this.revision
     };
+  }
+
+  /** Скидання спільного стану показу (файл "" = показ неактивний) */
+  stopShared() {
+    this.shared = {
+      file: "",
+      kind: "",
+      page: 1,
+      time: 0,
+      playing: false,
+      updated: Date.now()
+    };
+    this.revision++;
+    return { ok: true, revision: this.revision, stopped: true };
   }
 
   updateState(data) {
@@ -28,16 +52,7 @@ class StateService {
     // неактивний) — сторінки учнів самі повертаються до самостійного перегляду
     // без перезавантаження; ревізія зростає, тому всі клієнти бачать зупинку.
     if (data && data.stop === true) {
-      this.shared = {
-        file: "",
-        kind: "",
-        page: 1,
-        time: 0,
-        playing: false,
-        updated: Date.now()
-      };
-      this.revision++;
-      return { ok: true, revision: this.revision, stopped: true };
+      return this.stopShared();
     }
 
     if (data.file !== undefined) {

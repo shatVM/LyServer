@@ -21,6 +21,7 @@ router.get("/slides/info", (req, res) => apiController.getSlideInfo(req, res));
 
 // Presence (student tracking)
 router.post("/presence/heartbeat", (req, res) => presenceController.heartbeat(req, res));
+router.post("/presence/teacher", (req, res) => presenceController.teacherHeartbeat(req, res));
 router.get("/presence/students", (req, res) => presenceController.getStudents(req, res));
 
 module.exports = router;

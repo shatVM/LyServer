@@ -818,6 +818,17 @@ async function main() {
           jsSrc.includes("if (isMaterialsPage || (isDemoPage && isTeacher))") &&
           css.includes(".category-toggle") && css.includes(".category-body[hidden]")
       );
+      // Вихід учителя: heartbeat, зупинка показу при «Вийти» та при закритті
+      // вкладки. Доповнює поведінковий тест автозупинки вище (окремий екземпляр).
+      check(
+        "Issue #63: клієнт шле heartbeat викладача та зупиняє показ при виході",
+        jsSrc.includes("\"/api/presence/teacher\"") &&
+          jsSrc.includes("function reportTeacherLeave()") &&
+          jsSrc.includes("startTeacherHeartbeat();") &&
+          jsSrc.includes("stopTeacherHeartbeat();") &&
+          jsSrc.includes("if (prevRole === \"teacher\")") &&
+          jsSrc.includes("reportTeacherLeave();")
+      );
       check(
         "Issue #63 Р: зупинка демонстрації — кнопка викладача та серверний стан",
         demoHtml.includes('id="stopDemo"') &&
@@ -872,6 +883,97 @@ async function main() {
         r.status === 200 && stoppedState.file === "" && stoppedState.page === 1,
         `status=${r.status}, file=${JSON.stringify(stoppedState.file)}, page=${stoppedState.page}`
       );
+
+      // Issue #63: вихід учителя — присутність викладача (heartbeat)
+      r = await fetch(base + "/api/presence/teacher", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}"
+      });
+      check("Issue #63: heartbeat викладача без PIN → 403", r.status === 403, `status=${r.status}`);
+      r = await fetch(base + "/api/presence/teacher", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Portal-Pin": PIN },
+        body: "{}"
+      });
+      check("Issue #63: heartbeat викладача з PIN → 200", r.status === 200, `status=${r.status}`);
+
+      // Issue #63: автозупинка демонстрації, коли вчитель пішов. Окремий
+      // екземпляр із коротким тайм-аутом присутності — щоб не впливати на
+      // інші тести; той самий каталог матеріалів на диску (fileId існує на
+      // цьому етапі).
+      const WDOG_PORT = PORT + 2;
+      const wdogBase = "http://127.0.0.1:" + WDOG_PORT;
+      const wdog = spawn(process.execPath, ["server.js"], {
+        env: {
+          ...process.env,
+          PORT: String(WDOG_PORT),
+          PORTAL_PIN: PIN,
+          TEACHER_PRESENCE_TIMEOUT_MS: "3000"
+        },
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      let wdogLog = "";
+      wdog.stdout.on("data", (chunk) => { wdogLog += chunk; });
+      wdog.stderr.on("data", (chunk) => { wdogLog += chunk; });
+      try {
+        const wdogUp = await waitForHealth(wdogBase);
+        check("Issue #63: екземпляр сервера для тесту автозупинки запущено", wdogUp, "port=" + WDOG_PORT);
+        if (wdogUp) {
+          // Старт показу позначає присутність викладача
+          r = await fetch(wdogBase + "/api/control", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pin: PIN, file: fileId, kind: "slides", page: 1 })
+          });
+          let wState = await (await fetch(wdogBase + "/api/state")).json();
+          check(
+            "Issue #63: показ стартує на тестовому екземплярі",
+            r.status === 200 && wState.file === fileId,
+            `status=${r.status}, file=${wState.file}`
+          );
+
+          // Жодного control/heartbeat довше за тайм-аут (3 с) → автозупинка.
+          // Перевірка виконується в GET /api/state, який учні опитують саме
+          // так, тож тест відтворює реальний шлях відновлення каталогу.
+          await delay(3600);
+          wState = await (await fetch(wdogBase + "/api/state")).json();
+          check(
+            "Issue #63: без вчителя демонстрація зупиняється автоматично",
+            wState.file === "" && wState.revision > 0,
+            `file=${JSON.stringify(wState.file)}, rev=${wState.revision}`
+          );
+
+          // Heartbeat викладача утримує показ активним (2 × 1.8 с < 3 с)
+          r = await fetch(wdogBase + "/api/control", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pin: PIN, file: fileId, kind: "slides", page: 1 })
+          });
+          await delay(1800);
+          await fetch(wdogBase + "/api/presence/teacher", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Portal-Pin": PIN },
+            body: "{}"
+          });
+          await delay(1800);
+          wState = await (await fetch(wdogBase + "/api/state")).json();
+          check(
+            "Issue #63: heartbeat викладача утримує активний показ",
+            r.status === 200 && wState.file === fileId,
+            `file=${wState.file}`
+          );
+
+          // Прибрати за собою на тестовому екземплярі
+          await fetch(wdogBase + "/api/control", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pin: PIN, stop: true })
+          });
+        }
+      } finally {
+        wdog.kill();
+      }
 
       // Захист не ослаб: перевірка PIN під час завантаження
       r = await fetch(`${base}/api/upload?name=${encodeURIComponent("E3 без PIN.mp3")}`, {

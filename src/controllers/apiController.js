@@ -3,11 +3,14 @@ const path = require("node:path");
 const auth = require("../utils/auth");
 const fileService = require("../services/fileService");
 const stateService = require("../services/stateService");
+const presenceService = require("../services/presenceService");
 const slideService = require("../services/slideService");
 
 class ApiController {
   verifyAuth(req, res) {
     if (!auth.requirePinJson(req, res)) return;
+    // Вхід учителя = присутність на зв'язку (автозупинка показу при виході)
+    presenceService.markTeacherSeen();
     res.json({ ok: true, role: "teacher" });
   }
 
@@ -28,6 +31,8 @@ class ApiController {
   updateControl(req, res) {
     const { pin, ...data } = req.body || {};
     if (!auth.requirePin(req, res)) return;
+    // Будь-яке успішне керування показом — вчитель на зв'язку (Issue #63)
+    presenceService.markTeacherSeen();
 
     try {
       const result = stateService.updateState(data);
