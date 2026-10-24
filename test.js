@@ -5,6 +5,9 @@ const PIN = "2468";
 const PORT = 3997;
 const base = `http://127.0.0.1:${PORT}`;
 
+// Діагностика CI: лог запущеного екземпляра сервера (stdout/stderr/exit)
+let SERVER_LOG = "";
+
 const results = [];
 function check(name, ok, info = "") {
   results.push({ Test: name, Result: ok ? "PASS" : "FAIL", Info: info });
@@ -48,12 +51,18 @@ async function main() {
   // --- Основний екземпляр сервера ---
   const child = spawn(process.execPath, ["server.js"], {
     env: { ...process.env, PORT: String(PORT), PORTAL_PIN: PIN },
-    stdio: "ignore"
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  child.stdout.on("data", (chunk) => { SERVER_LOG += chunk; });
+  child.stderr.on("data", (chunk) => { SERVER_LOG += chunk; });
+  child.on("exit", (code, signal) => {
+    SERVER_LOG += `[server exit] code=${code} signal=${signal}\n`;
   });
 
   try {
     if (!(await waitForHealth(base))) {
       console.error("Сервер не запустився");
+      console.error("SERVER LOG:\n" + SERVER_LOG);
       process.exit(1);
     }
 
@@ -693,5 +702,9 @@ async function main() {
 
 main().catch((err) => {
   console.error("ERROR:", err.stack || err.message);
+  if (err.cause) {
+    console.error("CAUSE:", (err.cause && (err.cause.stack || err.cause.message)) || String(err.cause));
+  }
+  console.error("SERVER LOG:\n" + SERVER_LOG);
   process.exit(1);
 });
