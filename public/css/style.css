@@ -1079,3 +1079,40 @@ footer {
 }
 .upload-category-row .ui-icon { margin-right: 4px; }
 .category-heading .ui-icon { margin-right: 2px; }
+
+/* Issue #63 (§3.1): компактні дії над категорією праворуч у заголовку */
+.category-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.category-actions .btn-sm { white-space: nowrap; }
+
+/* Issue #63 (§3.3): модальне вікно приватного перегляду викладача */
+.preview-backdrop { z-index: 1100; }
+.preview-modal-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 880px;
+  max-height: calc(100vh - 32px);
+  padding: 20px 22px;
+  overflow: hidden;
+}
+.preview-modal-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.preview-modal-header h3 { margin: 0; font-size: 19px; color: #122c4d; overflow-wrap: anywhere; }
+.preview-close { flex: 0 0 auto; min-width: 40px; font-size: 17px; }
+.preview-controls { flex-wrap: wrap; align-items: center; gap: 8px; }
+.preview-viewer {
+  position: relative;
+  min-height: 200px;
+  max-height: calc(100vh - 240px);
+  overflow: auto;
+  border: 1px solid #dce5ef;
+  border-radius: 12px;
+  background: #f6f9fd;
+}
+.preview-viewer .slide-img { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+.preview-viewer video { display: block; width: 100%; max-height: calc(100vh - 260px); background: #000; }
+.preview-viewer .empty { padding: 32px 16px; }
+.preview-hint { margin: 0; }
+@media (max-width: 600px) {
+  .preview-modal-card { padding: 14px 12px; }
+  .preview-controls > button { flex: 1 1 auto; min-height: 40px; }
+}

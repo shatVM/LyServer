@@ -77,14 +77,45 @@
   </p>
 </section>
 
-<!-- Issue #63, Етап 2: панель показу матеріалів (заголовок оновлено цим етапом) -->
+<!-- Issue #63, Етап 2: панель показу матеріалів (заголовок оновлено цим етапом).
+     Етап 4 (§3): єдина панель керування вчителя — приватний перегляд, спільна
+     демонстрація, видимість, перейменування, категорії та порядок -->
 <section class="panel demo-controls-panel teacher-only" id="teacherBroadcastPanel" style="display:none">
   <div class="panel-header-row">
     <h3>Матеріали</h3>
-    <button id="refresh" class="secondary btn-sm">🔄 Оновити</button>
+    <div class="row">
+      <button id="createCategoryBtn" type="button" class="secondary btn-sm" title="Створити нову категорію">
+        <svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#plus"></use></svg> Створити категорію
+      </button>
+      <button id="refresh" class="secondary btn-sm">🔄 Оновити</button>
+    </div>
   </div>
-  <p class="hint">Оберіть матеріал (включно з прихованими від учнів) для трансляції на спільний екран:</p>
+  <p class="hint">Оберіть матеріал (включно з прихованими від учнів): 👁️ приватний перегляд або 📺 спільна демонстрація. Тут само — видимість, категорії та порядок:</p>
   <div id="files" class="files-list">
     <div class="empty">Завантаження списку…</div>
   </div>
 </section>
+
+<!-- Issue #63 (§3.3): приватний перегляд викладача в модальному вікні.
+     Відкривається дією «👁️ Перегляд», закривається кнопкою ✕ або Escape;
+     не змінює стан спільної демонстрації -->
+<div id="previewModal" class="modal-backdrop preview-backdrop" style="display:none">
+  <div class="modal-card preview-modal-card" role="dialog" aria-modal="true" aria-labelledby="previewModalTitle">
+    <div class="preview-modal-header">
+      <h3 id="previewModalTitle">Приватний перегляд</h3>
+      <button type="button" id="previewClose" class="secondary btn-sm preview-close"
+              aria-label="Закрити приватний перегляд" title="Закрити (Esc)">✕</button>
+    </div>
+    <div class="row preview-controls" id="previewControls" style="display:none">
+      <button type="button" id="previewPrev" class="secondary btn-sm">← Попередня</button>
+      <span class="hint" id="previewPageLabel">Сторінка 1</span>
+      <button type="button" id="previewNext" class="secondary btn-sm">Наступна →</button>
+      <input id="previewPageInput" class="page-input" type="number" min="1" step="1" inputmode="numeric" placeholder="№" aria-label="Номер сторінки">
+      <button type="button" id="previewGoto" class="secondary btn-sm">Перейти</button>
+    </div>
+    <div id="previewViewer" class="preview-viewer">
+      <div class="empty">Завантаження…</div>
+    </div>
+    <p class="hint preview-hint">Приватний перегляд: це вікно бачите лише ви — спільну демонстрацію воно не змінює.</p>
+  </div>
+</div>

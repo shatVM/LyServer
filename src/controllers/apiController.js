@@ -112,6 +112,36 @@ class ApiController {
     }
   }
 
+  renameCategory(req, res) {
+    if (!auth.requirePin(req, res)) return;
+    try {
+      const body = req.body || {};
+      res.json(fileService.renameCategory(body.categoryId, body.name));
+    } catch (error) {
+      res.status(error.status || 400).send(error.message || "Не вдалося перейменувати категорію");
+    }
+  }
+
+  reorderCategory(req, res) {
+    if (!auth.requirePin(req, res)) return;
+    try {
+      const body = req.body || {};
+      res.json(fileService.reorderCategory(body.categoryId, body.direction));
+    } catch (error) {
+      res.status(error.status || 400).send(error.message || "Не вдалося змінити порядок категорій");
+    }
+  }
+
+  renameFile(req, res) {
+    if (!auth.requirePin(req, res)) return;
+    try {
+      const body = req.body || {};
+      res.json(fileService.renameFile(body.file, body.name));
+    } catch (error) {
+      res.status(error.status || 400).send(error.message || "Не вдалося перейменувати матеріал");
+    }
+  }
+
   setFileCategory(req, res) {
     if (!auth.requirePin(req, res)) return;
     try {

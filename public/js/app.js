@@ -354,17 +354,21 @@ function isSlideType(name) {
 // ---------------------------------------------------------------------------
 
 /** Show a single slide image in #viewer */
-function renderSlideImage(name, page, totalPages) {
-  const viewer = $("viewer");
+function renderSlideImage(name, page, totalPages, ctx) {
+  // Issue #63 (§3.3): ctx — цільовий контейнер для модального приватного
+  // прев'ю; без контейнера працює як раніше (спільний/локальний #viewer)
+  const viewer = (ctx && ctx.viewer) || $("viewer");
   if (!viewer) return;
 
   // Update page label
-  if ($("pageLabel")) {
+  const labelEl = ctx && ctx.label !== undefined ? ctx.label : $("pageLabel");
+  if (labelEl) {
     const ext = extOf(name).toUpperCase();
-    $("pageLabel").textContent = ext.slice(1) + ": слайд " + page + " / " + totalPages;
+    labelEl.textContent = ext.slice(1) + ": слайд " + page + " / " + totalPages;
   }
   // Issue #9: поле номера слайду синхронізується з поточним сторінкою
-  if ($("pageInput")) $("pageInput").value = page;
+  const inputEl = ctx && ctx.input !== undefined ? ctx.input : $("pageInput");
+  if (inputEl) inputEl.value = page;
 
   // Build or reuse <img>
   let img = viewer.querySelector("img.slide-img");
@@ -385,16 +389,21 @@ function renderSlideImage(name, page, totalPages) {
     viewer.innerHTML = '<div class="empty">⚠️ Помилка завантаження зображення слайду ' + page + '</div>';
   };
 
-  // Issue #61: активні зони лівої/правої половини зображення (ліва — назад, права — уперед)
-  if (slideNavAllowed()) ensureSlideZones(viewer);
+  // Issue #61: активні зони лівої/правої половини зображення (ліва — назад, права — уперед).
+  // Модальне прев'ю передає власний обробник (onZoneStep), щоб приватна
+  // навігація НЕ змінювала спільний стан демонстрації (§3.3)
+  const zoneAllowed = ctx && ctx.zoneAllowed !== undefined ? ctx.zoneAllowed : slideNavAllowed();
+  if (zoneAllowed) ensureSlideZones(viewer, ctx && ctx.onZoneStep);
 }
 
 /**
  * Prepare slides on the server (conversion) and then display the first slide.
  * Shows a progress indicator while converting.
  */
-async function prepareAndShowSlides(name, page, onReady) {
-  const viewer = $("viewer");
+async function prepareAndShowSlides(name, page, onReady, target) {
+  // Issue #63 (§3.3): target — контейнер модального приватного прев'ю;
+  // за замовчуванням, як і раніше, — спільний/локальний #viewer
+  const viewer = target || $("viewer");
   if (viewer) {
     viewer.innerHTML = '<div class="empty slide-loading">🔄 Конвертація слайдів… Зачекайте, будь ласка.</div>';
   }
@@ -403,9 +412,11 @@ async function prepareAndShowSlides(name, page, onReady) {
     let pageCount = null;
     if (role === "teacher") {
       // Викладач може явно запустити конвертацію (Issue #2: prepare — тільки для викладача)
+      // Issue #63 (§3.3): /api/slides/prepare вимагає PIN (Issue #8) — без заголовка
+      // сервер відповідав 403 і приватний перегляд слайдів показував помилку
       const res = await api("/api/slides/prepare", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Portal-Pin": pin },
         body: JSON.stringify({ file: name })
       });
       pageCount = (await res.json()).pageCount;
@@ -463,7 +474,7 @@ function setSlideNavHint(on) {
  * Issue #61: активні зони лівої/правої половини зображення (без текстових підписів).
  * Створюються один раз на контент глядача — обробники подій не дублюються.
  */
-function ensureSlideZones(viewer) {
+function ensureSlideZones(viewer, onStep) {
   if (!viewer || viewer.querySelector(".slide-zone")) return;
 
   ["prev", "next"].forEach(side => {
@@ -498,9 +509,12 @@ function ensureSlideZones(viewer) {
 
     zone.addEventListener("click", () => {
       if (touchScrolled) return;                 // було прокручування, а не натискання
-      if (!slideNavAllowed()) return;            // учень на демонстрації не змінює спільний слайд
-      if (viewer.classList.contains("nav-hint")) setSlideNavHint(false);
-      navigateSlide(side === "prev" ? -1 : 1);   // на межах перемикання не відбувається (кламп)
+      // Модальне прев'ю (onStep) завжди навігує лише свій контейнер; без
+      // обробника — чинне правило: учень на демонстрації не змінює спільний слайд
+      if (!onStep && !slideNavAllowed()) return;
+      viewer.classList.remove("nav-hint");
+      const delta = side === "prev" ? -1 : 1;
+      if (onStep) onStep(delta); else navigateSlide(delta); // на межах перемикання не відбувається (кламп)
     });
 
     viewer.appendChild(zone);
@@ -528,6 +542,18 @@ function updateRoleUI() {
   document.querySelectorAll(".teacher-only").forEach(el => {
     el.style.display = isTeacher ? "" : "none";
   });
+
+  // Issue #63 (§3): єдиний робочий простір вчителя — «Демонстрація» (перегляд,
+  // додавання та учні об'єднані там). Пункти цих розділів у навігації ховаються
+  // ЛИШЕ для вчителя; самі сторінки за прямим URL працюють без змін, тому
+  // функціональність не втрачається (див. DECISIONS.md).
+  if (isTeacher) {
+    if ($("navMaterialsLink")) $("navMaterialsLink").style.display = "none";
+    if ($("navUploadLink")) $("navUploadLink").style.display = "none";
+    if ($("navStudentsLink")) $("navStudentsLink").style.display = "none";
+  } else if ($("navMaterialsLink")) {
+    $("navMaterialsLink").style.display = ""; // повернути після виходу з ролі вчителя
+  }
 
   if (isUploadPage) {
     if ($("studentUploadBlock")) $("studentUploadBlock").style.display = isTeacher ? "none" : "block";
@@ -779,6 +805,53 @@ async function setFileCategory(fileId, categoryId) {
   } catch (error) { alert("Не вдалося перемістити матеріал: " + error.message); }
 }
 
+// Issue #63 (§3.1): перейменування категорії — зберігає id, порядок і склад
+async function renameCategory(category) {
+  if (!pin || role !== "teacher") { alert("Потрібен PIN викладача."); return; }
+  const name = window.prompt("Нова назва категорії:", category.name);
+  if (name === null) return;
+  if (!name.trim()) { alert("Назва категорії не може бути порожньою."); return; }
+  try {
+    await api("/api/categories/rename", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin, categoryId: category.id, name: name.trim() })
+    });
+    await refreshFiles();
+    setStatus("Категорію перейменовано: «" + name.trim() + "».");
+  } catch (error) { alert("Не вдалося перейменувати категорію: " + error.message); }
+}
+
+// Issue #63 (§3.1): переміщення категорії вгору/вниз — порядок на сервері
+async function reorderCategory(category, direction) {
+  if (!pin || role !== "teacher") { alert("Потрібен PIN викладача."); return; }
+  try {
+    await api("/api/categories/reorder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin, categoryId: category.id, direction })
+    });
+    await refreshFiles();
+  } catch (error) { alert("Не вдалося змінити порядок категорій: " + error.message); }
+}
+
+// Issue #63 (§3.2): перейменування матеріалу — лише показна назва на сервері
+async function renameMaterial(fileId, currentName) {
+  if (!pin || role !== "teacher") { alert("Потрібен PIN викладача."); return; }
+  const name = window.prompt("Нова назва матеріалу:", currentName);
+  if (name === null) return;
+  if (!name.trim()) { alert("Назва матеріалу не може бути порожньою."); return; }
+  try {
+    await api("/api/files/rename", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin, file: fileId, name: name.trim() })
+    });
+    await refreshFiles();
+    setStatus("Матеріал перейменовано: «" + name.trim() + "».");
+  } catch (error) { alert("Не вдалося перейменувати матеріал: " + error.message); }
+}
+
 async function reorderMaterial(fileId, direction) {
   try {
     await api("/api/files/reorder", {
@@ -872,11 +945,40 @@ function createFileCard(file, isTeacher, showCategoryActions) {
       delBtn.onclick = () => deleteFile(fileId, file.name); actions.append(delBtn);
     }
   } else if (isDemoPage && isTeacher) {
+    // Issue #63 (§3.2/§3.3): приватний перегляд відрізняється від спільної
+    // демонстрації не лише кольором, а й піктограмою та підписом (§4)
+    const previewBtn = document.createElement("button");
+    previewBtn.type = "button"; previewBtn.className = "secondary btn-sm";
+    previewBtn.textContent = "👁️ Перегляд";
+    previewBtn.title = "Приватний перегляд (лише для вас)";
+    previewBtn.setAttribute("aria-label", "Приватний перегляд: " + file.name);
+    previewBtn.onclick = () => openPreviewModal(fileId, previewBtn);
     const broadcast = document.createElement("button");
     broadcast.className = "btn-sm"; broadcast.textContent = "📺 Показувати всім";
+    broadcast.title = "Спільна демонстрація для всіх учнів";
     broadcast.setAttribute("aria-label", "Показувати всім: " + file.name);
-    broadcast.onclick = () => broadcastFile(fileId, false); actions.append(broadcast);
+    broadcast.onclick = () => broadcastFile(fileId, false);
+    actions.append(previewBtn, broadcast);
     if (showCategoryActions) {
+      // Видимість для учнів, перейменування, видалення — дії вчителя (§3.2)
+      const hideBtn = document.createElement("button");
+      hideBtn.type = "button";
+      hideBtn.className = "btn-sm " + (file.hidden ? "btn-success" : "btn-warning");
+      hideBtn.textContent = file.hidden ? "👁️ Показати" : "🚫 Приховати";
+      hideBtn.setAttribute("aria-label", (file.hidden ? "Показати" : "Приховати") + " для учнів: " + file.name);
+      hideBtn.onclick = () => toggleHideFile(fileId, file.hidden);
+      const renameBtn = document.createElement("button");
+      renameBtn.type = "button"; renameBtn.className = "secondary btn-sm order-button";
+      renameBtn.append(iconSvg("edit"));
+      renameBtn.title = "Перейменувати матеріал";
+      renameBtn.setAttribute("aria-label", "Перейменувати матеріал: " + file.name);
+      renameBtn.onclick = () => renameMaterial(fileId, file.name);
+      const delBtn = document.createElement("button");
+      delBtn.type = "button"; delBtn.className = "btn-sm btn-danger";
+      delBtn.textContent = "🗑️ Видалити";
+      delBtn.setAttribute("aria-label", "Видалити матеріал: " + file.name);
+      delBtn.onclick = () => deleteFile(fileId, file.name);
+      actions.append(hideBtn, renameBtn, delBtn);
       const up = document.createElement("button");
       up.type = "button"; up.className = "secondary btn-sm order-button"; up.append(iconSvg("arrow-up"));
       up.title = "Перемістити матеріал вище"; up.setAttribute("aria-label", "Перемістити вище: " + file.name);
@@ -925,10 +1027,12 @@ function createFileCard(file, isTeacher, showCategoryActions) {
 }
 
 // Issue #63 Р: стан акордеона категорій зберігається в пам'яті сторінки за
-// id категорії ("" — «Без категорії») і переживає перерисовку каталогу;
-// типово всі категорії розгорнуті. Незалежне згортання: одночасно можуть бути
-// відкриті кілька категорій (див. DECISIONS.md).
-const collapsedCategoryIds = new Set();
+// id категорії ("" — «Без категорії») і переживає перерисовку каталогу.
+// Початковий стан (вимога Tech-lead §2.3): УСІ категорії згорнуті при
+// відкритті каталогу — розгортаються лише ті, що відкрив користувач у цій
+// сесії. Незалежне згортання: одночасно можуть бути відкриті кілька
+// категорій (див. DECISIONS.md — запис про акордеон замінено).
+const expandedCategoryIds = new Set();
 
 function renderCategoryGroups(root) {
   const isTeacher = role === "teacher";
@@ -939,7 +1043,7 @@ function renderCategoryGroups(root) {
     { id: "", name: "Без категорії", category: null }];
   for (const group of groups) {
     const groupFiles = files.filter(file => (file.categoryId || "") === group.id);
-    const expanded = !collapsedCategoryIds.has(group.id);
+    const expanded = expandedCategoryIds.has(group.id);
     const bodyId = "category-body-" + (group.id || "uncategorized");
 
     const section = document.createElement("section");
@@ -963,10 +1067,39 @@ function renderCategoryGroups(root) {
     title.append(toggle);
     header.append(title);
     if (group.category && showCategoryActions) {
+      // Issue #63 (§3.1): компактні дії над категорією — перейменування,
+      // порядок (вгору/вниз), видалення з підтвердженням. Кнопки поза
+      // кнопкою-заголовком, тому клік по них не згортає акордеон
+      const bar = document.createElement("div");
+      bar.className = "category-actions";
+
+      const rename = document.createElement("button");
+      rename.type = "button"; rename.className = "secondary btn-sm order-button";
+      rename.append(iconSvg("edit"));
+      rename.title = "Перейменувати категорію";
+      rename.setAttribute("aria-label", "Перейменувати категорію «" + group.name + "»");
+      rename.onclick = () => renameCategory(group.category);
+
+      const up = document.createElement("button");
+      up.type = "button"; up.className = "secondary btn-sm order-button"; up.append(iconSvg("arrow-up"));
+      up.title = "Перемістити категорію вище";
+      up.setAttribute("aria-label", "Перемістити категорію вище: «" + group.name + "»");
+      up.onclick = () => reorderCategory(group.category, "up");
+
+      const down = document.createElement("button");
+      down.type = "button"; down.className = "secondary btn-sm order-button"; down.append(iconSvg("arrow-down"));
+      down.title = "Перемістити категорію нижче";
+      down.setAttribute("aria-label", "Перемістити категорію нижче: «" + group.name + "»");
+      down.onclick = () => reorderCategory(group.category, "down");
+
       const remove = document.createElement("button");
-      remove.type = "button"; remove.className = "secondary btn-sm"; remove.textContent = "Видалити категорію";
+      remove.type = "button"; remove.className = "secondary btn-sm";
+      remove.textContent = "Видалити категорію";
       remove.setAttribute("aria-label", "Видалити категорію " + group.name);
-      remove.onclick = () => deleteCategory(group.category); header.append(remove);
+      remove.onclick = () => deleteCategory(group.category);
+
+      bar.append(rename, up, down, remove);
+      header.append(bar);
     }
     section.append(header);
 
@@ -983,12 +1116,11 @@ function renderCategoryGroups(root) {
     section.append(body);
 
     toggle.onclick = () => {
-      const nowCollapsed = !collapsedCategoryIds.has(group.id);
-      if (nowCollapsed) collapsedCategoryIds.add(group.id);
-      else collapsedCategoryIds.delete(group.id);
-      const nowExpanded = !nowCollapsed;
+      const nowExpanded = !expandedCategoryIds.has(group.id);
+      if (nowExpanded) expandedCategoryIds.add(group.id);
+      else expandedCategoryIds.delete(group.id);
       body.hidden = !nowExpanded;
-      section.classList.toggle("is-collapsed", nowCollapsed);
+      section.classList.toggle("is-collapsed", !nowExpanded);
       toggle.setAttribute("aria-expanded", String(nowExpanded));
       toggle.setAttribute("aria-label", (nowExpanded ? "Згорнути" : "Розгорнути") + " категорію «" + group.name + "»");
       chevron.textContent = nowExpanded ? "▾" : "▸";
@@ -1053,6 +1185,37 @@ async function deleteFile(fileId, displayName) {
 // ---------------------------------------------------------------------------
 // LOCAL VIEWER (Materials page)
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Issue #63: плавне прокручування до потрібного вікна (§2.7 учень, §3.4 вчитель)
+// ---------------------------------------------------------------------------
+
+/**
+ * Плавно прокручує сторінку до потрібного вікна (§2.7 учень, §3.4 вчитель).
+ * Якщо елемент уже повністю видимий — рух не виконується (§3.4: не прокручувати
+ * зайвого). Враховує мобільний екран (вікно може бути під каталогом).
+ * block: "nearest" — мінімальний рух до видимості; "start" — верх елемента у
+ * вікні (щоб бачити його від початку одразу після запуску показу).
+ */
+function scrollToPanel(panel, block = "nearest") {
+  if (!panel || typeof panel.scrollIntoView !== "function") return false;
+  const rect = panel.getBoundingClientRect();
+  const vh = window.innerHeight || document.documentElement.clientHeight;
+  const vw = window.innerWidth || document.documentElement.clientWidth;
+  const fullyVisible = rect.top >= 0 && rect.bottom <= vh && rect.left >= 0 && rect.right <= vw;
+  if (fullyVisible) return false;
+  panel.scrollIntoView({ behavior: "smooth", block: block, inline: "nearest" });
+  return true;
+}
+
+/** Фокус на контейнері вікна без стрибка прокрутки — доступність/клавіатура */
+function focusViewer(viewerEl) {
+  if (!viewerEl) return;
+  try {
+    viewerEl.tabIndex = -1;
+    viewerEl.focus({ preventScroll: true });
+  } catch { /* старі браузери без options */ }
+}
+
 function displayLocalFile(fileId) {
   const file = files.find(f => (f.id === fileId || f.name === fileId));
   if (!file || !$("viewer")) return;
@@ -1064,6 +1227,11 @@ function displayLocalFile(fileId) {
 
   if ($("viewerTitle")) $("viewerTitle").textContent = "Особистий перегляд: " + (file.name || actualId);
   $("viewer").replaceChildren();
+
+  // §2.7: учень бачить відкритий матеріал — фокус на вікні та плавна
+  // прокрутка до нього (на мобільному вікно зазвичай під каталогом)
+  focusViewer($("viewer"));
+  scrollToPanel($("viewer"));
 
   if (SLIDE_EXTS.has(file.ext)) {
     if ($("pdfControls")) $("pdfControls").style.display = "flex";
@@ -1162,6 +1330,150 @@ function restoreLocalViewer() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #63 (§3.3): приватний перегляд викладача в модальному вікні
+// ---------------------------------------------------------------------------
+// Відкривається дією «👁️ Перегляд» на сторінці «Демонстрація». Показує матеріал
+// ЛИШЕ викладачу і НЕ змінює стан демонстрації (/api/control не викликається).
+// Вимоги §3.3: закриття кнопкою ✕ або Escape, фокус повертається на кнопку
+// виклику, Tab утримується в межах діалогу, фон недоступний для фокуса.
+
+let previewOpen = false;
+let previewFileId = "";
+let previewPage = 1;
+let previewPageCount = 1;
+let previewInvoker = null;
+let previewVideo = null;
+
+/** Контекст рендерингу слайдів для контейнера модального прев'ю */
+function previewSlideCtx() {
+  return {
+    viewer: $("previewViewer"),
+    label: $("previewPageLabel"),
+    input: $("previewPageInput"),
+    zoneAllowed: true, // приватна навігація дозволена завжди
+    onZoneStep: delta => previewSetPage(previewPage + delta)
+  };
+}
+
+function previewSetPage(page) {
+  if (!previewFileId || !SLIDE_EXTS.has(extOf(previewFileId))) return;
+  previewPage = Math.max(1, Math.min(previewPageCount || 1, page));
+  renderSlideImage(previewFileId, previewPage, previewPageCount || 1, previewSlideCtx());
+}
+
+function previewRender(fileId) {
+  const file = files.find(f => (f.id === fileId || f.name === fileId));
+  if (!file || !$("previewViewer")) return;
+  previewFileId = file.id || fileId;
+  previewPage = 1;
+  previewPageCount = 1;
+  previewVideo = null;
+  if ($("previewModalTitle")) $("previewModalTitle").textContent = "Приватний перегляд: " + file.name;
+  $("previewViewer").replaceChildren();
+  if (SLIDE_EXTS.has(file.ext)) {
+    if ($("previewControls")) $("previewControls").style.display = "flex";
+    prepareAndShowSlides(previewFileId, 1, count => {
+      previewPageCount = count;
+      renderSlideImage(previewFileId, 1, count, previewSlideCtx());
+    }, $("previewViewer"));
+    return;
+  }
+  if ($("previewControls")) $("previewControls").style.display = "none";
+  const video = document.createElement("video");
+  video.src = fileUrl(previewFileId);
+  video.controls = true;
+  video.playsInline = true;
+  video.preload = "metadata";
+  $("previewViewer").append(video);
+  previewVideo = video;
+}
+
+function openPreviewModal(fileId, invoker) {
+  const modal = $("previewModal");
+  if (!modal) return;
+  previewInvoker = invoker || document.activeElement;
+  previewOpen = true;
+  modal.style.display = "flex";
+  previewRender(fileId);
+  if ($("previewClose")) $("previewClose").focus();
+}
+
+function closePreviewModal() {
+  const modal = $("previewModal");
+  if (!modal || !previewOpen) return;
+  previewOpen = false;
+  // Доступність: спочатку знімаємо фокус із елемента всередині діалогу ДО
+  // приховування. Інакше браузер, обробляючи display:none відкладено, скидає
+  // фокус на <body> вже після нашого focus() нижче — і повернення фокусу
+  // на кнопку «Перегляд» не відбувається (перевірено браузерним тестом)
+  if (modal.contains(document.activeElement)) {
+    document.activeElement.blur();
+  }
+  modal.style.display = "none";
+  if (previewVideo) {
+    try { previewVideo.pause(); } catch { /* відео вже знято з DOM */ }
+    previewVideo = null;
+  }
+  previewFileId = "";
+  if ($("previewViewer")) $("previewViewer").replaceChildren();
+  // Доступність: фокус повертається на кнопку, що відкрила діалог
+  if (previewInvoker && document.contains(previewInvoker)) previewInvoker.focus();
+  previewInvoker = null;
+}
+
+if ($("previewClose")) $("previewClose").onclick = closePreviewModal;
+if ($("previewPrev")) $("previewPrev").onclick = () => previewSetPage(previewPage - 1);
+if ($("previewNext")) $("previewNext").onclick = () => previewSetPage(previewPage + 1);
+if ($("previewGoto")) {
+  $("previewGoto").onclick = () => {
+    const target = parseInt($("previewPageInput").value, 10);
+    if (Number.isFinite(target)) previewSetPage(target);
+  };
+}
+if ($("previewPageInput")) {
+  $("previewPageInput").addEventListener("keydown", e => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const target = parseInt(e.currentTarget.value, 10);
+      if (Number.isFinite(target)) previewSetPage(target);
+    }
+  });
+}
+if ($("previewModal")) {
+  // Клік по фону закриває; клік у картці — ні
+  $("previewModal").addEventListener("click", e => {
+    if (e.target === $("previewModal")) closePreviewModal();
+  });
+}
+
+document.addEventListener("keydown", e => {
+  if (!previewOpen) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closePreviewModal();
+    return;
+  }
+  if (e.key !== "Tab") return;
+  const card = $("previewModal") ? $("previewModal").querySelector(".modal-card") : null;
+  if (!card) return;
+  const focusables = card.querySelectorAll(
+    'button:not([disabled]), input, video[controls], a[href], [tabindex]:not([tabindex="-1"])');
+  if (!focusables.length) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (!card.contains(document.activeElement)) {
+    e.preventDefault();
+    first.focus();
+  } else if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // BROADCAST & DEMO (Demonstration page)
 // ---------------------------------------------------------------------------
 async function postControl(data) {
@@ -1185,6 +1497,12 @@ async function broadcastFile(fileId, navigateToDemo = false) {
       window.location.href = "/demonstration";
     } else {
       await pollState(true);
+      // §3.4: після УСПІШНОГО запуску — плавно до спільного вікна (верх панелі,
+      // щоб бачити його одразу); рух лише якщо стан реально має файл і вікно
+      // не видиме повністю (scrollToPanel)
+      if (sharedState && sharedState.file) {
+        scrollToPanel(document.querySelector(".demo-screen-panel"), "start");
+      }
     }
   } catch (error) {
     alert("Не вдалося розпочати показ: " + error.message);
@@ -1484,6 +1802,8 @@ function renderUploadQueue() {
 }
 
 if ($("createCategoryFromUpload")) $("createCategoryFromUpload").onclick = createCategory;
+// Issue #63 (§3.1): «Створити категорію» безпосередньо в панелі «Матеріали»
+if ($("createCategoryBtn")) $("createCategoryBtn").onclick = createCategory;
 
 if ($("uploadFile")) {
   $("uploadFile").addEventListener("change", () => {

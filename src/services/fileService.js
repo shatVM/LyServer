@@ -91,6 +91,47 @@ class FileService {
     return { ok: true, categoryId, affectedFiles };
   }
 
+  // Issue #63: перейменування категорії вчителем — змінюється лише назва;
+  // id, порядок (order) і createdAt зберігаються, тому посилання матеріалів
+  // на категорію не ламаються.
+  renameCategory(categoryId, rawName) {
+    const name = String(rawName || "").replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 60);
+    if (!name) throw Object.assign(new Error("Некоректна назва категорії"), { status: 400 });
+    const metadata = this.getMetadata();
+    if (!Array.isArray(metadata.categories)) metadata.categories = [];
+    const category = metadata.categories.find(item => item.id === categoryId);
+    if (!category) throw Object.assign(new Error("Категорію не знайдено"), { status: 404 });
+    const duplicate = metadata.categories.some(item => item.id !== categoryId &&
+      String(item.name).toLocaleLowerCase("uk") === name.toLocaleLowerCase("uk"));
+    if (duplicate) throw Object.assign(new Error("Категорія з такою назвою вже існує"), { status: 409 });
+    category.name = name;
+    this.saveMetadata(metadata);
+    return { ok: true, category };
+  }
+
+  // Issue #63: переміщення категорії вгору/вниз. Порядок (order 0..n-1)
+  // зберігається в метаданих, тому переживає перезавантаження сторінки,
+  // інший пристрій і перезапуск сервера. На межі списку — без змін (ідемпотентно).
+  reorderCategory(categoryId, direction) {
+    if (direction !== "up" && direction !== "down") {
+      throw Object.assign(new Error("Напрямок має бути up або down"), { status: 400 });
+    }
+    const metadata = this.getMetadata();
+    const categories = (Array.isArray(metadata.categories) ? metadata.categories : [])
+      .slice()
+      .sort((a, b) => (a.order || 0) - (b.order || 0) || String(a.name).localeCompare(String(b.name), "uk"));
+    const index = categories.findIndex(item => item.id === categoryId);
+    if (index === -1) throw Object.assign(new Error("Категорію не знайдено"), { status: 404 });
+    const target = index + (direction === "up" ? -1 : 1);
+    const moved = target >= 0 && target < categories.length;
+    if (moved) {
+      [categories[index], categories[target]] = [categories[target], categories[index]];
+    }
+    metadata.categories = categories.map((item, position) => ({ ...item, order: position }));
+    this.saveMetadata(metadata);
+    return { ok: true, moved, categories: this.getCategories() };
+  }
+
   getFilesList(isTeacher = false) {
     const metadata = this.getMetadata();
     const hiddenSet = new Set(metadata.hidden);
@@ -216,6 +257,28 @@ class FileService {
     else delete metadata.files[safe].conversionError;
     this.saveMetadata(metadata);
   }
+  // Issue #63: перейменування матеріалу вчителем — змінюється лише показна
+  // назва (originalName у метаданих); ідентифікатор файлу, шлях до вмісту,
+  // опис і категорія не змінюються, тому наявні посилання не ламаються.
+  renameFile(idOrName, rawName) {
+    const safe = safeFilename(idOrName);
+    const filePath = getFilePath(safe);
+    if (!filePath || !fs.existsSync(filePath)) {
+      throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
+    }
+    const name = String(rawName || "").replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 120);
+    if (!name) throw Object.assign(new Error("Некоректна назва матеріалу"), { status: 400 });
+    const metadata = this.getMetadata();
+    if (!metadata.files || typeof metadata.files !== "object") metadata.files = {};
+    const current = metadata.files[safe];
+    const base = current && typeof current === "object"
+      ? current
+      : { originalName: typeof current === "string" ? current : safe, uploadedAt: Date.now() };
+    metadata.files[safe] = { ...base, originalName: name };
+    this.saveMetadata(metadata);
+    return { ok: true, file: safe, name };
+  }
+
   toggleHide(idOrName, shouldHide) {
     const safe = safeFilename(idOrName);
     const filePath = getFilePath(safe);

@@ -292,7 +292,7 @@ async function main() {
       check(
         "Issue #61: на демонстрації спільний слайд змінює лише викладач",
         jsSrc.includes('if (isDemoPage) return role === "teacher"') &&
-          jsSrc.includes("if (!slideNavAllowed()) return;")
+          jsSrc.includes("if (!onStep && !slideNavAllowed()) return;")
       );
       check(
         "Issue #61: градієнти 15% / 50% і дзеркалість зон",
@@ -642,6 +642,174 @@ async function main() {
         if (r.status === 200) e4CategoryId = "";
       }
 
+      // ---------------------------------------------------------------------
+      // Issue #63 (§3.1/§3.2): керування категоріями і матеріалами на сервері —
+      // перейменування, порядок, права доступу, валідація, збереження на диску
+      // ---------------------------------------------------------------------
+      r = await fetch(base + "/api/categories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, name: "Етап4 категорія А" })
+      });
+      const s4CatA = r.status === 201 ? (await r.json()).category : null;
+      r = await fetch(base + "/api/categories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, name: "Етап4 категорія Б" })
+      });
+      const s4CatB = r.status === 201 ? (await r.json()).category : null;
+      check(
+        "Issue #63 §3.1: дві категорії створено для тестів керування",
+        Boolean(s4CatA && s4CatB && s4CatA.id && s4CatB.id)
+      );
+
+      if (s4CatA && s4CatB) {
+        // Захист: зміни категорій лише викладачем (PIN)
+        r = await fetch(base + "/api/categories/rename", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ categoryId: s4CatA.id, name: "зламана назва" })
+        });
+        check("Issue #63 §3.1: перейменування категорії без PIN заборонено", r.status === 403, "status=" + r.status);
+        r = await fetch(base + "/api/categories/reorder", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ categoryId: s4CatA.id, direction: "up" })
+        });
+        check("Issue #63 §3.1: переміщення категорії без PIN заборонено", r.status === 403, "status=" + r.status);
+
+        // Перейменування: назва змінюється, id і порядок — ні
+        r = await fetch(base + "/api/categories/rename", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, categoryId: s4CatA.id, name: "Етап4 А перейменована" })
+        });
+        const s4Renamed = r.status === 200 ? await r.json() : {};
+        check(
+          "Issue #63 §3.1: перейменування категорії з PIN зберігає id і порядок",
+          r.status === 200 && Boolean(s4Renamed.category) &&
+            s4Renamed.category.name === "Етап4 А перейменована" &&
+            s4Renamed.category.id === s4CatA.id && typeof s4Renamed.category.order === "number",
+          "status=" + r.status
+        );
+
+        // Валідація назв: порожня → 400, дублікат → 409, невідомий id → 404
+        r = await fetch(base + "/api/categories/rename", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, categoryId: s4CatA.id, name: "   " })
+        });
+        check("Issue #63 §3.1: порожня назва категорії — 400", r.status === 400, "status=" + r.status);
+        r = await fetch(base + "/api/categories/rename", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, categoryId: s4CatA.id, name: "Етап4 категорія Б" })
+        });
+        check("Issue #63 §3.1: дублікат назви категорії — 409", r.status === 409, "status=" + r.status);
+        r = await fetch(base + "/api/categories/rename", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, categoryId: "missing-category-id", name: "x" })
+        });
+        check("Issue #63 §3.1: перейменування невідомої категорії — 404", r.status === 404, "status=" + r.status);
+
+        // Порядок: переміщення вгору реально міняє позицію і зберігається на диску
+        // (метадані переживають перезапуск сервера — файл читається всіма екземплярами)
+        r = await fetch(base + "/api/categories");
+        let s4Cats = r.status === 200 ? await r.json() : [];
+        const s4PosB = s4Cats.findIndex(category => category.id === s4CatB.id);
+        r = await fetch(base + "/api/categories/reorder", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, categoryId: s4CatB.id, direction: "up" })
+        });
+        const s4Reorder = r.status === 200 ? await r.json() : {};
+        s4Cats = await (await fetch(base + "/api/categories")).json();
+        const s4NewPosB = s4Cats.findIndex(category => category.id === s4CatB.id);
+        const s4MetaPath = require("node:path").join(__dirname, "materials", ".metadata.json");
+        const s4DiskMeta = JSON.parse(require("node:fs").readFileSync(s4MetaPath, "utf-8"));
+        const s4DiskCat = (s4DiskMeta.categories || []).find(category => category.id === s4CatB.id);
+        check(
+          "Issue #63 §3.1: порядок категорій змінюється і зберігається на диску",
+          r.status === 200 && s4Reorder.moved === true && s4NewPosB === s4PosB - 1 &&
+            Boolean(s4DiskCat) && s4DiskCat.order === s4NewPosB,
+          JSON.stringify({ s4PosB, s4NewPosB, diskOrder: s4DiskCat && s4DiskCat.order })
+        );
+
+        // Межа списку: перший елемент угору — без помилки і без змін (ідемпотентно)
+        r = await fetch(base + "/api/categories/reorder", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, categoryId: s4Cats[0].id, direction: "up" })
+        });
+        const s4Edge = r.status === 200 ? await r.json() : {};
+        check(
+          "Issue #63 §3.1: переміщення категорії на межі — 200 без змін",
+          r.status === 200 && s4Edge.moved === false,
+          "status=" + r.status + ", moved=" + s4Edge.moved
+        );
+
+        // Напрямок відхиляється
+        r = await fetch(base + "/api/categories/reorder", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, categoryId: s4CatB.id, direction: "sideways" })
+        });
+        check("Issue #63 §3.1: некоректний напрямок — 400", r.status === 400, "status=" + r.status);
+      }
+
+      // Перейменування матеріалу: лише показна назва, id і вміст не змінюються
+      if (e3NoDesc.id) {
+        r = await fetch(base + "/api/files/rename", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ file: e3NoDesc.id, name: "Назва без PIN" })
+        });
+        check("Issue #63 §3.2: перейменування матеріалу без PIN заборонено", r.status === 403, "status=" + r.status);
+
+        r = await fetch(base + "/api/files/rename", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, file: e3NoDesc.id, name: "Етап4 перейменований" })
+        });
+        const s4RenFile = r.status === 200 ? await r.json() : {};
+        const s4TeacherList = await (await fetch(base + "/api/files", { headers: { "X-Portal-Pin": PIN } })).json();
+        const s4StudentList = await (await fetch(base + "/api/files")).json();
+        const s4TeacherOne = s4TeacherList.find(item => item.id === e3NoDesc.id);
+        const s4StudentOne = s4StudentList.find(item => item.id === e3NoDesc.id);
+        check(
+          "Issue #63 §3.2: нову назву бачать і вчитель, і учень; id та вміст не змінені",
+          r.status === 200 && s4RenFile.file === e3NoDesc.id && s4RenFile.name === "Етап4 перейменований" &&
+            Boolean(s4TeacherOne) && s4TeacherOne.name === "Етап4 перейменований" &&
+            Boolean(s4StudentOne) && s4StudentOne.name === "Етап4 перейменований" &&
+            require("node:fs").existsSync(require("node:path").join(__dirname, "materials", e3NoDesc.id)),
+          JSON.stringify({ teacher: s4TeacherOne && s4TeacherOne.name, student: s4StudentOne && s4StudentOne.name })
+        );
+
+        r = await fetch(base + "/api/files/rename", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, file: "missing-file-id", name: "x" })
+        });
+        check("Issue #63 §3.2: перейменування невідомого файлу — 404", r.status === 404, "status=" + r.status);
+        r = await fetch(base + "/api/files/rename", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, file: e3NoDesc.id, name: "  " })
+        });
+        check("Issue #63 §3.2: порожня назва матеріалу — 400", r.status === 400, "status=" + r.status);
+      }
+
+      // Прибирання тестових категорій (матеріали не чіпаємо)
+      for (const s4Cat of [s4CatA, s4CatB]) {
+        if (!s4Cat) continue;
+        await fetch(base + "/api/categories/delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, categoryId: s4Cat.id })
+        });
+      }
+
       const apiControllerSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "controllers", "apiController.js"), "utf-8");
       check("Issue #63 Е4: upload запускає фонову конвертацію та фіксує помилку", apiControllerSource.includes("slideService.ensureSlides(result.id)") && apiControllerSource.includes('.then(manifest =>') && apiControllerSource.includes('setConversionStatus(result.id, "failed", conversionError)'));
       const fileServiceSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "services", "fileService.js"), "utf-8");
@@ -809,14 +977,63 @@ async function main() {
       );
       // Акордеон: спільний групувальник каталогу, кнопка-заголовок з
       // aria-expanded/aria-controls, незалежне згортання за id категорії.
-      // Доповнює поведінкові HTTP-тести; роботу DOM перевіряє окрема браузерна перевірка.
+      // Початковий стан — усі категорії згорнуті (§2.3): порожня множина
+      // expandedCategoryIds. Доповнює поведінкові HTTP-тести; роботу DOM
+      // перевіряє окрема браузерна перевірка.
       check(
         "Issue #63 Р: акордеон категорій у джерелі клієнта та стилях",
-        jsSrc.includes("const collapsedCategoryIds = new Set();") &&
+        jsSrc.includes("const expandedCategoryIds = new Set();") &&
           jsSrc.includes("function renderCategoryGroups(root)") &&
           jsSrc.includes("toggle.setAttribute(\"aria-controls\", bodyId)") &&
           jsSrc.includes("if (isMaterialsPage || (isDemoPage && isTeacher))") &&
           css.includes(".category-toggle") && css.includes(".category-body[hidden]")
+      );
+      // Issue #63 (§3): керування на сторінці «Демонстрація» — категорії
+      // (перейменування/порядок/видалення/створення) і матеріали (приватне
+      // прев'ю, видимість, перейменування, видалення) + об'єднання навігації
+      check(
+        "Issue #63 §3: керування категоріями та матеріалами в джерелі клієнта",
+        jsSrc.includes("function renameCategory(category)") &&
+          jsSrc.includes("function reorderCategory(category, direction)") &&
+          jsSrc.includes("function renameMaterial(fileId, currentName)") &&
+          jsSrc.includes("bar.className = \"category-actions\"") &&
+          jsSrc.includes("onclick = () => deleteCategory(group.category)") &&
+          demoHtml.includes('id="createCategoryBtn"')
+      );
+      check(
+        "Issue #63 §3.3: модальне приватне прев'ю в джерелі клієнта та розмітці",
+        demoHtml.includes('id="previewModal"') &&
+          demoHtml.includes('role="dialog"') &&
+          demoHtml.includes('aria-modal="true"') &&
+          jsSrc.includes("function openPreviewModal(fileId, invoker)") &&
+          jsSrc.includes("function closePreviewModal()") &&
+          jsSrc.includes("if (e.key === \"Escape\")") &&
+          jsSrc.includes("previewInvoker.focus()") &&
+          css.includes(".preview-backdrop") &&
+          css.includes(".preview-viewer")
+      );
+      // Приватний перегляд не пише спільний стан: жодного виклику /api/control
+      // у коді прев'ю (перевіряється також поведінково в браузері)
+      check(
+        "Issue #63 §3.3: код приватного прев'ю не містить /api/control",
+        !jsSrc.slice(jsSrc.indexOf("function previewRender"), jsSrc.indexOf("function openPreviewModal")).includes("/api/control")
+      );
+      // Плавне прокручування: учень — до вікна перегляду, вчитель — до
+      // спільного екрана після успішного запуску; без руху, якщо вже видимо
+      check(
+        "Issue #63 §2.7/§3.4: плавне прокручування до вікон у джерелі клієнта",
+        jsSrc.includes("function scrollToPanel(panel, block = \"nearest\")") &&
+          jsSrc.includes("behavior: \"smooth\"") &&
+          jsSrc.includes("focusViewer($(\"viewer\"))") &&
+          jsSrc.includes("scrollToPanel(document.querySelector(\".demo-screen-panel\"), \"start\")")
+      );
+      // §3: єдиний робочий простір вчителя — пункти розділів у навігації
+      // ховаються лише для вчителя; матеріали повертаються після виходу
+      check(
+        "Issue #63 §3: навігація вчителя об'єднана в «Демонстрацію»",
+        matHtml.includes('id="navMaterialsLink"') &&
+          jsSrc.includes("if ($(\"navUploadLink\")) $(\"navUploadLink\").style.display = \"none\";") &&
+          jsSrc.includes("$(\"navMaterialsLink\").style.display = \"\";")
       );
       // Вихід учителя: heartbeat, зупинка показу при «Вийти» та при закритті
       // вкладки. Доповнює поведінковий тест автозупинки вище (окремий екземпляр).
@@ -920,6 +1137,19 @@ async function main() {
         const wdogUp = await waitForHealth(wdogBase);
         check("Issue #63: екземпляр сервера для тесту автозупинки запущено", wdogUp, "port=" + WDOG_PORT);
         if (wdogUp) {
+          // Issue #63 (§3.1): порядок категорій переживає перезапуск сервера —
+          // «свіжий» екземпляр читає той самий файл метаданих і повертає той
+          // самий перелік у тому самому порядку
+          const mainCats = await (await fetch(base + "/api/categories")).json();
+          const freshCats = await (await fetch(wdogBase + "/api/categories")).json();
+          const mainIds = (mainCats || []).map(category => category.id).join(",");
+          const freshIds = (freshCats || []).map(category => category.id).join(",");
+          check(
+            "Issue #63 §3.1: порядок категорій однаковий на «перезапущеному» екземплярі",
+            Array.isArray(mainCats) && Array.isArray(freshCats) && mainIds === freshIds,
+            JSON.stringify({ mainIds, freshIds })
+          );
+
           // Старт показу позначає присутність викладача
           r = await fetch(wdogBase + "/api/control", {
             method: "POST",
