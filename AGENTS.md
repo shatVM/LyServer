@@ -36,7 +36,7 @@
 
 ## Цільове середовище
 - Цільовий сервер LyServer працює на Microsoft Windows з Node.js.
-- Перетворення презентацій `.ppt`/`.pptx` у PNG використовує Windows PowerShell і COM-автоматизацію Microsoft PowerPoint; на сервері має бути встановлений настільний Microsoft PowerPoint.
+- Перетворення презентацій `.pptx` у PNG використовує Windows PowerShell і COM-автоматизацію Microsoft PowerPoint; на сервері має бути встановлений настільний Microsoft PowerPoint.
 - Linux CI може перевіряти unit/regression тести та PDF fallback, але сам по собі не підтверджує реальну конвертацію PowerPoint у цільовому Windows-середовищі. Не позначай цю інтеграцію перевіреною без тесту на Windows із PowerPoint.
 
 ## Інтерактивний вибір у розмові з власником
