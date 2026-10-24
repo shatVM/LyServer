@@ -688,6 +688,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("ERROR:", err.message);
+  console.error("ERROR:", err.stack || err.message);
   process.exit(1);
 });
