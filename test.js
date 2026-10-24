@@ -25,6 +25,10 @@ const TINY_PDF = Buffer.from(
   "ascii"
 );
 
+// Binary body for fetch: send explicit ArrayBuffer (undici versions >= 6 may not accept Buffer bodies)
+const TINY_PDF_BODY = new ArrayBuffer(TINY_PDF.length);
+new Uint8Array(TINY_PDF_BODY).set(TINY_PDF);
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -72,7 +76,7 @@ async function main() {
     r = await fetch(`${base}/api/upload?name=${encodeURIComponent("Тестовий файл.pdf")}`, {
       method: "POST",
       headers: { "X-Portal-Pin": PIN, "Content-Type": "application/octet-stream" },
-      body: TINY_PDF
+      body: TINY_PDF_BODY
     });
     const upload = await r.json();
     const fileId = upload.id;
@@ -425,7 +429,7 @@ async function main() {
         {
           method: "POST",
           headers: { "X-Portal-Pin": PIN, "Content-Type": "application/octet-stream" },
-          body: TINY_PDF
+          body: TINY_PDF_BODY
         }
       );
       const e3WithDesc = await r.json();
@@ -440,7 +444,7 @@ async function main() {
       r = await fetch(`${base}/api/upload?name=${encodeURIComponent("E3 без опису.mp3")}`, {
         method: "POST",
         headers: { "X-Portal-Pin": PIN, "Content-Type": "application/octet-stream" },
-        body: TINY_PDF
+        body: TINY_PDF_BODY
       });
       const e3NoDesc = await r.json();
       if (e3NoDesc.id) e3Ids.push(e3NoDesc.id);
@@ -494,7 +498,7 @@ async function main() {
         {
           method: "POST",
           headers: { "X-Portal-Pin": PIN, "Content-Type": "application/octet-stream" },
-          body: TINY_PDF
+          body: TINY_PDF_BODY
         }
       );
       const e3Long = await r.json();
@@ -527,7 +531,7 @@ async function main() {
         r = await fetch(base + "/api/upload?name=" + encodeURIComponent("E4 категорія під час завантаження.mp3") + "&categoryId=" + encodeURIComponent(e4Category.id), {
           method: "POST",
           headers: { "X-Portal-Pin": PIN, "Content-Type": "application/octet-stream" },
-          body: TINY_PDF
+          body: TINY_PDF_BODY
         });
         const e4Uploaded = await r.json();
         if (e4Uploaded.id) e3Ids.push(e4Uploaded.id);
@@ -599,7 +603,7 @@ async function main() {
       r = await fetch(`${base}/api/upload?name=${encodeURIComponent("E3 без PIN.mp3")}`, {
         method: "POST",
         headers: { "Content-Type": "application/octet-stream" },
-        body: TINY_PDF
+        body: TINY_PDF_BODY
       });
       check("Issue #63 Е3: завантаження без PIN → 403", r.status === 403, `status=${r.status}`);
 
