@@ -65,7 +65,7 @@
 ## Цільове серверне середовище
 
 - Цільова платформа сервера — Microsoft Windows із Node.js.
-- Конвертація `.ppt`/`.pptx` у PNG залежить від Windows PowerShell, COM-автоматизації та встановленого Microsoft PowerPoint.
+- Конвертація `.pptx` у PNG залежить від Windows PowerShell, COM-автоматизації та встановленого Microsoft PowerPoint.
 - Linux CI не підтверджує роботу PowerPoint COM-інтеграції. Для неї потрібен окремий тест на цільовому Windows-сервері; не заявляй про успішну інтеграцію лише на підставі Linux-тестів.
 
 ## 7. Українська мова та стиль
