@@ -32,7 +32,7 @@ LyServer («Навчальний простір») — локальний веб
 ## Цільове середовище сервера
 
 - Цільова платформа — Microsoft Windows із Node.js.
-- Конвертація презентацій `.ppt`/`.pptx` у PNG спирається на Windows PowerShell, COM-автоматизацію та встановлений Microsoft PowerPoint.
+- Конвертація презентацій `.pptx` у PNG спирається на Windows PowerShell, COM-автоматизацію та встановлений Microsoft PowerPoint.
 - Linux CI не є підтвердженням цієї Windows-інтеграції; її слід перевіряти на цільовому Windows-комп’ютері з PowerPoint. PDF fallback і автоматизовані тести не замінюють такої перевірки.
 
 ## 4. Поточні напрямки розвитку
