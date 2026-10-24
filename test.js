@@ -380,7 +380,7 @@ async function main() {
       );
       check(
         "Issue #63 Е3: підсумок не маскує помилки окремих файлів",
-        jsSrc.includes("failures.push") && jsSrc.includes("Помилки: ")
+        jsSrc.includes("failures.push") && jsSrc.includes("Не вдалося завантажити")
       );
       check(
         "Issue #63 Е3: опис у картці безпечно вставляється як текст",
