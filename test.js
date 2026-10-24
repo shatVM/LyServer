@@ -3,7 +3,7 @@ const { spawn } = require("node:child_process");
 
 const PIN = "2468";
 const PORT = 3997;
-const base = `http://localhost:${PORT}`;
+const base = `http://127.0.0.1:${PORT}`;
 
 const results = [];
 function check(name, ok, info = "") {
@@ -648,8 +648,8 @@ async function main() {
       stdio: "ignore"
     });
     try {
-      if (await waitForHealth("http://localhost:3996")) {
-        const base2 = "http://localhost:3996";
+      if (await waitForHealth("http://127.0.0.1:3996")) {
+        const base2 = "http://127.0.0.1:3996";
         const statuses = [];
         for (let i = 0; i < 3; i++) {
           const res = await fetch(base2 + "/api/auth/verify", {
