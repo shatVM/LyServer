@@ -12,11 +12,18 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const config = require("../config");
 
 const execFileAsync = promisify(execFile);
+
+// pdf-poppler містить лише бінарники для win32/darwin; на інших платформах
+// його require() друкує «<platform> is NOT supported.» і завершує процес
+// через process.exit(1) — сервер падав під час фонової конвертації першого PDF.
+// На Linux використовуємо існуючий fallback на pdfjs-dist + canvas.
+const POPPLER_SUPPORTED = ["darwin", "win32"].includes(os.platform());
 
 // Ensure base slides directory exists
 fs.mkdirSync(config.slidesDir, { recursive: true });
@@ -104,6 +111,9 @@ async function convertPdf(name) {
   const srcPath = path.join(config.dataDir, name);
 
   try {
+    if (!POPPLER_SUPPORTED) {
+      throw new Error("pdf-poppler не підтримує платформу " + os.platform());
+    }
     const poppler = require("pdf-poppler");
     const info = await poppler.info(srcPath);
     const totalPages = parseInt(info.pages, 10) || 1;
