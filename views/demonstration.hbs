@@ -50,8 +50,13 @@
   </div>
   <div class="upload-box">
     <label for="uploadFile"><strong>Виберіть файли на пристрої:</strong></label>
+    <div class="upload-category-row">
+      <label for="uploadCategory">Категорія для завантажених матеріалів:</label>
+      <select id="uploadCategory"><option value="">Без категорії</option></select>
+      <button id="createCategoryFromUpload" type="button" class="secondary btn-sm"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#plus"></use></svg> Створити категорію</button>
+    </div>
     <div style="margin-top:8px">
-      <input id="uploadFile" type="file" multiple accept=".pdf,.pptx,.mp4,.webm,.m4v,.mov,.ogg,.mp3,.wav">
+      <input id="uploadFile" type="file" multiple accept=".pdf,.ppt,.pptx,.mp4,.webm,.m4v,.mov,.ogg,.mp3,.wav">
     </div>
     <!-- Issue #63, Етап 3: черга вибраних файлів — для кожного можна задати
          власний необов'язковий опис (порожній опис = файл без опису) -->
@@ -62,7 +67,7 @@
   </div>
   <div id="uploadStatus" class="status">Оберіть один або кілька файлів для завантаження.</div>
   <p class="hint">
-    PDF та PPTX після завантаження автоматично конвертуються у PNG-слайди; підтримуються файли розміром до 1 ГБ.
+    PDF, PPT та PPTX після завантаження автоматично конвертуються у PNG-слайди; підтримуються файли розміром до 1 ГБ.
     Опис є необов'язковим — його можна залишити порожнім.
   </p>
 </section>

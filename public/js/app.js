@@ -4,6 +4,7 @@ const $ = id => document.getElementById(id);
 let role = localStorage.getItem("portalRole") || "";
 let pin = sessionStorage.getItem("portalPin") || "";
 let files = [];
+let categories = [];
 
 // Issue #63 Етап 3: черга не залежить від DOM-поля file input.
 let uploadQueueState = [];
@@ -39,7 +40,7 @@ const isStudentsPage = Boolean(window.location.pathname.includes("students"));
 const isMaterialsPage = Boolean(!isDemoPage && !isUploadPage && !isStudentsPage);
 
 // Extensions treated as slides (PNG images, not iframes or video)
-const SLIDE_EXTS = new Set([".pdf", ".pptx"]);
+const SLIDE_EXTS = new Set([".pdf", ".ppt", ".pptx"]);
 
 function setStatus(text) {
   if ($("status")) $("status").textContent = text;
@@ -248,6 +249,16 @@ function esc(value) {
     "&": "&amp;", "<": "&lt;", ">": "&gt;",
     '"': "&quot;", "'": "&#39;"
   })[ch]);
+}
+
+function iconSvg(name) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.classList.add("ui-icon");
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  use.setAttribute("href", "/icons.svg#" + name);
+  svg.append(use);
+  return svg;
 }
 
 function formatSize(bytes) {
@@ -601,9 +612,14 @@ async function refreshFiles() {
     if (pin && role === "teacher") headers["X-Portal-Pin"] = pin;
     const response = await api("/api/files", { headers });
     files = await response.json();
-    if ($("files")) {
-      renderFiles();
+    if (role === "teacher" && pin) {
+      const categoryResponse = await api("/api/categories", { headers });
+      categories = await categoryResponse.json();
+    } else {
+      categories = [];
     }
+    updateUploadCategoryOptions();
+    if ($("files")) renderFiles();
     if (isMaterialsPage) setStatus("Каталог доступний. Матеріалів: " + files.length + ".");
     else if (isUploadPage) setStatus("Файлів на сервері: " + files.length + ".");
   } catch (error) {
@@ -611,12 +627,216 @@ async function refreshFiles() {
   }
 }
 
+function updateUploadCategoryOptions() {
+  const select = $("uploadCategory");
+  if (!select) return;
+  const selected = select.value;
+  select.replaceChildren();
+  const uncategorized = document.createElement("option");
+  uncategorized.value = "";
+  uncategorized.textContent = "Без категорії";
+  select.append(uncategorized);
+  for (const category of categories) {
+    const option = document.createElement("option");
+    option.value = category.id;
+    option.textContent = category.name;
+    select.append(option);
+  }
+  if (Array.from(select.options).some(option => option.value === selected)) select.value = selected;
+}
+
+async function createCategory() {
+  if (!pin || role !== "teacher") { setStatus("Необхідно увійти як викладач."); return; }
+  const name = window.prompt("Назва нової категорії:");
+  if (name === null) return;
+  try {
+    await api("/api/categories", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin, name })
+    });
+    await refreshFiles();
+    const created = categories.find(category => category.name.toLocaleLowerCase("uk") === name.trim().toLocaleLowerCase("uk"));
+    if (created && $("uploadCategory")) $("uploadCategory").value = created.id;
+    setStatus("Категорію створено: " + name.trim());
+  } catch (error) { alert("Не вдалося створити категорію: " + error.message); }
+}
+
+async function deleteCategory(category) {
+  if (!pin || role !== "teacher") { alert("Потрібен PIN викладача."); return; }
+  if (!confirm("Видалити категорію «" + category.name + "»? Матеріали залишаться на сервері та перейдуть у «Без категорії».")) return;
+  try {
+    const result = await api("/api/categories/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin, categoryId: category.id })
+    });
+    await refreshFiles();
+    setStatus("Категорію видалено. Матеріалів збережено: " + (result.affectedFiles || 0) + ".");
+  } catch (error) { alert("Не вдалося видалити категорію: " + error.message); }
+}
+
+async function setFileCategory(fileId, categoryId) {
+  try {
+    await api("/api/files/category", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin, file: fileId, categoryId })
+    });
+    await refreshFiles();
+  } catch (error) { alert("Не вдалося перемістити матеріал: " + error.message); }
+}
+
+async function reorderMaterial(fileId, direction) {
+  try {
+    await api("/api/files/reorder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin, file: fileId, direction })
+    });
+    await refreshFiles();
+  } catch (error) { alert("Не вдалося змінити порядок: " + error.message); }
+}
+
+async function retrySlideConversion(fileId) {
+  try {
+    const manifest = await prepareSlidesBg(fileId);
+    setStatus("PNG-слайди готові: " + manifest.pageCount + " стор.");
+    await refreshFiles();
+  } catch (error) {
+    setStatus("Помилка конвертації «" + fileId + "»: " + error.message);
+    await refreshFiles();
+  }
+}
+
+function createFileCard(file, isTeacher, showCategoryActions) {
+  const item = document.createElement("div");
+  item.className = "file" + (file.hidden ? " file-is-hidden" : "");
+  const info = document.createElement("div");
+  info.className = "file-info";
+  const hiddenBadge = (isTeacher && file.hidden) ? '<span class="badge-hidden">🚫 Приховано</span>' : "";
+  const typeTag = SLIDE_EXTS.has(file.ext) ? "🖼️" : "🎬";
+  info.innerHTML = '<div class="file-name">' + typeTag + " " + esc(file.name) + hiddenBadge +
+    '</div><div class="hint">' + esc(file.ext.toUpperCase()) + " • " + formatSize(file.size) + "</div>";
+
+  if (file.description) {
+    const descWrap = document.createElement("div");
+    descWrap.className = "file-desc-wrap";
+    const desc = document.createElement("div");
+    desc.className = "file-desc";
+    desc.textContent = String(file.description);
+    desc.tabIndex = 0;
+    desc.setAttribute("aria-label", "Опис матеріалу: " + String(file.description));
+    const tooltip = document.createElement("div");
+    tooltip.className = "file-desc-tooltip";
+    tooltip.setAttribute("role", "tooltip");
+    tooltip.textContent = String(file.description);
+    const infoButton = document.createElement("button");
+    infoButton.type = "button";
+    infoButton.className = "file-desc-info";
+    infoButton.textContent = "i";
+    infoButton.setAttribute("aria-label", "Показати повний опис матеріалу");
+    infoButton.setAttribute("aria-expanded", "false");
+    const fullDescription = document.createElement("div");
+    fullDescription.className = "file-desc-full";
+    fullDescription.hidden = true;
+    fullDescription.textContent = String(file.description);
+    infoButton.addEventListener("click", () => {
+      const open = fullDescription.hidden;
+      fullDescription.hidden = !open;
+      infoButton.setAttribute("aria-expanded", String(open));
+      infoButton.setAttribute("aria-label", open ? "Приховати повний опис матеріалу" : "Показати повний опис матеріалу");
+    });
+    descWrap.append(desc, tooltip, infoButton, fullDescription);
+    info.append(descWrap);
+  }
+
+  if (isTeacher && SLIDE_EXTS.has(file.ext) && file.conversionStatus !== "ready") {
+    const conversion = document.createElement("div");
+    conversion.className = "conversion-state" + (file.conversionStatus === "failed" ? " conversion-error" : "");
+    conversion.textContent = file.conversionStatus === "failed"
+      ? "Помилка конвертації: " + (file.conversionError || "невідома помилка")
+      : file.conversionStatus === "converting" ? "Конвертація PNG-слайдів…" : "PNG-слайди ще не готові";
+    info.append(conversion);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "file-actions";
+  const fileId = file.id || file.name;
+  if (isMaterialsPage) {
+    const local = document.createElement("button");
+    local.className = "secondary btn-sm"; local.textContent = "👁️ Відкрити";
+    local.onclick = () => displayLocalFile(fileId); actions.append(local);
+    if (isTeacher) {
+      const broadcast = document.createElement("button");
+      broadcast.className = "btn-sm"; broadcast.textContent = "📺 Транслювати";
+      broadcast.onclick = () => broadcastFile(fileId, true); actions.append(broadcast);
+      const hideBtn = document.createElement("button");
+      hideBtn.className = "btn-sm " + (file.hidden ? "btn-success" : "btn-warning");
+      hideBtn.textContent = file.hidden ? "👁️ Показати" : "🚫 Приховати";
+      hideBtn.onclick = () => toggleHideFile(fileId, file.hidden); actions.append(hideBtn);
+      const delBtn = document.createElement("button");
+      delBtn.className = "btn-sm btn-danger"; delBtn.textContent = "🗑️ Видалити";
+      delBtn.onclick = () => deleteFile(fileId, file.name); actions.append(delBtn);
+    }
+  } else if (isDemoPage && isTeacher) {
+    const broadcast = document.createElement("button");
+    broadcast.className = "btn-sm"; broadcast.textContent = "📺 Показувати всім";
+    broadcast.setAttribute("aria-label", "Показувати всім: " + file.name);
+    broadcast.onclick = () => broadcastFile(fileId, false); actions.append(broadcast);
+    if (showCategoryActions) {
+      const up = document.createElement("button");
+      up.type = "button"; up.className = "secondary btn-sm order-button"; up.append(iconSvg("arrow-up"));
+      up.title = "Перемістити матеріал вище"; up.setAttribute("aria-label", "Перемістити вище: " + file.name);
+      up.onclick = () => reorderMaterial(fileId, "up");
+      const down = document.createElement("button");
+      down.type = "button"; down.className = "secondary btn-sm order-button"; down.append(iconSvg("arrow-down"));
+      down.title = "Перемістити матеріал нижче"; down.setAttribute("aria-label", "Перемістити нижче: " + file.name);
+      down.onclick = () => reorderMaterial(fileId, "down");
+      actions.append(up, down);
+      const move = document.createElement("button");
+      move.type = "button"; move.className = "secondary btn-sm category-move-button";
+      move.append(iconSvg("folder-input")); move.title = "Перемістити до категорії";
+      move.setAttribute("aria-label", "Перемістити до категорії: " + file.name);
+      const menu = document.createElement("div"); menu.className = "category-menu"; menu.hidden = true;
+      const options = [{ id: "", name: "Без категорії" }, ...categories];
+      for (const category of options) {
+        const option = document.createElement("button");
+        option.type = "button"; option.className = "secondary btn-sm"; option.textContent = category.name;
+        option.onclick = () => setFileCategory(fileId, category.id); menu.append(option);
+      }
+      const create = document.createElement("button");
+      create.type = "button"; create.className = "btn-sm category-create-option";
+      create.append(iconSvg("plus"), document.createTextNode(" Створити категорію")); create.onclick = createCategory; menu.append(create);
+      move.onclick = () => { menu.hidden = !menu.hidden; move.setAttribute("aria-expanded", String(!menu.hidden)); };
+      actions.append(move);
+      item.append(info, actions, menu);
+    } else item.append(info, actions);
+    if (SLIDE_EXTS.has(file.ext) && file.conversionStatus !== "ready") {
+      const retry = document.createElement("button");
+      retry.type = "button"; retry.className = "secondary btn-sm";
+      retry.textContent = "Повторити конвертацію"; retry.onclick = () => retrySlideConversion(fileId);
+      actions.append(retry);
+    }
+    return item;
+  } else if (isUploadPage && isTeacher) {
+    const hideBtn = document.createElement("button");
+    hideBtn.className = "btn-sm " + (file.hidden ? "btn-success" : "btn-warning");
+    hideBtn.textContent = file.hidden ? "👁️ Показати" : "🚫 Приховати";
+    hideBtn.onclick = () => toggleHideFile(fileId, file.hidden); actions.append(hideBtn);
+    const delBtn = document.createElement("button");
+    delBtn.className = "btn-sm btn-danger"; delBtn.textContent = "🗑️ Видалити";
+    delBtn.onclick = () => deleteFile(fileId, file.name); actions.append(delBtn);
+  }
+  item.append(info, actions);
+  return item;
+}
+
 function renderFiles() {
   const root = $("files");
   if (!root) return;
   root.replaceChildren();
-
-  if (!files.length) {
+  if (!files.length && !(isDemoPage && role === "teacher")) {
     const msg = role === "teacher"
       ? "Матеріалів ще немає. Завантажте перший файл."
       : "Матеріали наразі відсутні. Очікуйте відкриття матеріалів викладачем.";
@@ -625,118 +845,34 @@ function renderFiles() {
   }
 
   const isTeacher = role === "teacher";
-
-  for (const file of files) {
-    const item = document.createElement("div");
-    item.className = "file" + (file.hidden ? " file-is-hidden" : "");
-
-    const info = document.createElement("div");
-    info.className = "file-info";
-    const hiddenBadge = (isTeacher && file.hidden) ? '<span class="badge-hidden">🚫 Приховано</span>' : "";
-    const typeTag = SLIDE_EXTS.has(file.ext) ? "🖼️" : "🎬";
-    info.innerHTML = '<div class="file-name">' + typeTag + " " + esc(file.name) + hiddenBadge +
-      '</div><div class="hint">' + esc(file.ext.toUpperCase()) + " • " + formatSize(file.size) + "</div>";
-
-    // Опис безпечно вставляється як текст, а не довільний HTML.
-    if (file.description) {
-      const descWrap = document.createElement("div");
-      descWrap.className = "file-desc-wrap";
-      const desc = document.createElement("div");
-      desc.className = "file-desc";
-      desc.textContent = String(file.description);
-      desc.tabIndex = 0;
-      desc.setAttribute("aria-label", "Опис матеріалу: " + String(file.description));
-
-      const tooltip = document.createElement("div");
-      tooltip.className = "file-desc-tooltip";
-      tooltip.setAttribute("role", "tooltip");
-      tooltip.textContent = String(file.description);
-
-      const infoButton = document.createElement("button");
-      infoButton.type = "button";
-      infoButton.className = "file-desc-info";
-      infoButton.textContent = "i";
-      infoButton.setAttribute("aria-label", "Показати повний опис матеріалу");
-      infoButton.setAttribute("aria-expanded", "false");
-
-      const fullDescription = document.createElement("div");
-      fullDescription.className = "file-desc-full";
-      fullDescription.hidden = true;
-      fullDescription.textContent = String(file.description);
-
-      infoButton.addEventListener("click", () => {
-        const open = fullDescription.hidden;
-        fullDescription.hidden = !open;
-        infoButton.setAttribute("aria-expanded", String(open));
-        infoButton.setAttribute("aria-label", open
-          ? "Приховати повний опис матеріалу"
-          : "Показати повний опис матеріалу");
-      });
-
-      descWrap.append(desc, tooltip, infoButton, fullDescription);
-      info.append(descWrap);
+  if (isDemoPage && isTeacher) {
+    const orderedCategories = [...categories].sort((a, b) => (a.order || 0) - (b.order || 0));
+    const groups = [...orderedCategories.map(category => ({ id: category.id, name: category.name, category })),
+      { id: "", name: "Без категорії", category: null }];
+    for (const group of groups) {
+      const groupFiles = files.filter(file => (file.categoryId || "") === group.id);
+      const section = document.createElement("section"); section.className = "category-section";
+      const header = document.createElement("div"); header.className = "category-heading";
+      const title = document.createElement("h4"); title.append(iconSvg("folder"), document.createTextNode(" " + group.name)); header.append(title);
+      if (group.category) {
+        const remove = document.createElement("button");
+        remove.type = "button"; remove.className = "secondary btn-sm"; remove.textContent = "Видалити категорію";
+        remove.setAttribute("aria-label", "Видалити категорію " + group.name);
+        remove.onclick = () => deleteCategory(group.category); header.append(remove);
+      }
+      section.append(header);
+      if (!groupFiles.length) {
+        const empty = document.createElement("p"); empty.className = "hint category-empty";
+        empty.textContent = "У цій категорії поки немає матеріалів."; section.append(empty);
+      } else {
+        for (const file of groupFiles) section.append(createFileCard(file, true, true));
+      }
+      root.append(section);
     }
-
-    const actions = document.createElement("div");
-    actions.className = "file-actions";
-
-    const fileId = file.id || file.name;
-
-    if (isMaterialsPage) {
-      const local = document.createElement("button");
-      local.className = "secondary btn-sm";
-      local.textContent = "👁️ Відкрити";
-      local.onclick = () => displayLocalFile(fileId);
-      actions.append(local);
-
-      if (isTeacher) {
-        const broadcast = document.createElement("button");
-        broadcast.className = "btn-sm";
-        broadcast.textContent = "📺 Транслювати";
-        broadcast.onclick = () => broadcastFile(fileId, true);
-        actions.append(broadcast);
-
-        const hideBtn = document.createElement("button");
-        hideBtn.className = "btn-sm " + (file.hidden ? "btn-success" : "btn-warning");
-        hideBtn.textContent = file.hidden ? "👁️ Показати" : "🚫 Приховати";
-        hideBtn.onclick = () => toggleHideFile(fileId, file.hidden);
-        actions.append(hideBtn);
-
-        const delBtn = document.createElement("button");
-        delBtn.className = "btn-sm btn-danger";
-        delBtn.textContent = "🗑️ Видалити";
-        delBtn.onclick = () => deleteFile(fileId, file.name);
-        actions.append(delBtn);
-      }
-    } else if (isDemoPage) {
-      if (isTeacher) {
-        const broadcast = document.createElement("button");
-        broadcast.className = "btn-sm";
-        broadcast.textContent = "📺 Показувати всім";
-        broadcast.onclick = () => broadcastFile(fileId, false);
-        actions.append(broadcast);
-      }
-    } else if (isUploadPage) {
-      if (isTeacher) {
-        const hideBtn = document.createElement("button");
-        hideBtn.className = "btn-sm " + (file.hidden ? "btn-success" : "btn-warning");
-        hideBtn.textContent = file.hidden ? "👁️ Показати" : "🚫 Приховати";
-        hideBtn.onclick = () => toggleHideFile(fileId, file.hidden);
-        actions.append(hideBtn);
-
-        const delBtn = document.createElement("button");
-        delBtn.className = "btn-sm btn-danger";
-        delBtn.textContent = "🗑️ Видалити";
-        delBtn.onclick = () => deleteFile(fileId, file.name);
-        actions.append(delBtn);
-      }
-    }
-
-    item.append(info, actions);
-    root.append(item);
+    return;
   }
+  for (const file of files) root.append(createFileCard(file, isTeacher, false));
 }
-
 async function toggleHideFile(name, currentHidden) {
   if (!pin) { alert("Потрібен PIN викладача."); return; }
   try {
@@ -992,12 +1128,24 @@ async function pollState(force = false) {
 }
 
 // ---------------------------------------------------------------------------
-// Teacher: convert slides on broadcast
+// Teacher: wait for automatically generated slides / retry conversion
 // ---------------------------------------------------------------------------
+async function waitForSlideConversion(fileId, maxAttempts = 180) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const response = await api("/api/slides/info?file=" + encodeURIComponent(fileId));
+    const info = await response.json();
+    if (info.ready && Number.isInteger(info.pageCount) && info.pageCount > 0) return info;
+    if (info.failed) throw new Error(info.error || "Помилка конвертації PNG-слайдів");
+    setUploadStatus("Конвертація PNG-слайдів: " + fileId + "…");
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  throw new Error("Перевищено час очікування конвертації PNG-слайдів");
+}
+
 async function prepareSlidesBg(fileId) {
   const response = await api("/api/slides/prepare", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Portal-Pin": pin },
     body: JSON.stringify({ file: fileId })
   });
   const manifest = await response.json();
@@ -1098,6 +1246,8 @@ function renderUploadQueue() {
   }
 }
 
+if ($("createCategoryFromUpload")) $("createCategoryFromUpload").onclick = createCategory;
+
 if ($("uploadFile")) {
   $("uploadFile").addEventListener("change", () => {
     const input = $("uploadFile");
@@ -1164,7 +1314,9 @@ if ($("upload") && $("uploadFile")) {
 
         let url = "/api/upload?name=" + encodeURIComponent(item.file.name);
         const description = item.description.trim();
+        const categoryId = $("uploadCategory") ? $("uploadCategory").value : "";
         if (description) url += "&description=" + encodeURIComponent(description);
+        if (categoryId) url += "&categoryId=" + encodeURIComponent(categoryId);
 
         try {
           const response = await api(url, {
@@ -1175,8 +1327,11 @@ if ($("upload") && $("uploadFile")) {
           const result = await response.json();
           const fileId = result.id || item.file.name;
           uploadedCount++;
-          if (SLIDE_EXTS.has(extOf(fileId))) uploadedSlideIds.push(fileId);
-          // Видаляємо лише підтверджено завантажений елемент.
+          if (SLIDE_EXTS.has(extOf(fileId))) {
+            if (result.conversionStatus === "failed") conversionFailures.push(fileId + " — " + (result.conversionError || "PNG-слайди не готові"));
+            else uploadedSlideIds.push(fileId);
+          }
+          // Оригінал збережено навіть у разі помилки конвертації; не дублюємо upload.
           uploadQueueState = uploadQueueState.filter((queued) => queued.key !== item.key);
         } catch (error) {
           item.status = "error";
@@ -1186,10 +1341,12 @@ if ($("upload") && $("uploadFile")) {
       }
 
       renderUploadQueue();
-      // Завантаження завершилося: помилки лишаються в черзі з описами для retry.
+      // Конвертація виконується сервером у фоні; очікуємо підтвердження API,
+      // не запускаючи повторну конвертацію для кожного щойно завантаженого файлу.
       for (const fileId of uploadedSlideIds) {
         try {
-          await prepareSlidesBg(fileId);
+          setUploadStatus("Очікування PNG-слайдів: " + fileId + "…");
+          await waitForSlideConversion(fileId);
         } catch (error) {
           conversionFailures.push(fileId + " — " + (error.message || "Помилка конвертації"));
         }
@@ -1198,7 +1355,7 @@ if ($("upload") && $("uploadFile")) {
       let summary = "Завантажено: " + uploadedCount + ". У черзі залишилося: " + uploadQueueState.length + ".";
       if (failures.length) summary += " Не вдалося завантажити: " + failures.join("; ") + ".";
       if (conversionFailures.length) {
-        summary += " Помилка підготовки PNG (файли не позначено готовими): " + conversionFailures.join("; ") + ".";
+        summary += " Помилка підготовки PNG (оригінали збережено, матеріали не готові до показу): " + conversionFailures.join("; ") + ".";
       } else if (uploadedSlideIds.length) {
         summary += " PNG-слайди підтверджено готовими.";
       }

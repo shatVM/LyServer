@@ -20,14 +20,15 @@ const config = {
   pptxWidth: Number(process.env.PPTX_WIDTH) || 1920,
   pptxHeight: Number(process.env.PPTX_HEIGHT) || 1080,
   allowedExtensions: new Set([
-    ".pdf", ".pptx",
+    ".pdf", ".ppt", ".pptx",
     ".mp4", ".webm", ".m4v", ".mov",
     ".ogg", ".mp3", ".wav"
   ]),
   // Types that are rendered to slide images
-  slideExtensions: new Set([".pdf", ".pptx"]),
+  slideExtensions: new Set([".pdf", ".ppt", ".pptx"]),
   mimeTypes: {
     ".pdf": "application/pdf",
+    ".ppt": "application/vnd.ms-powerpoint",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ".mp4": "video/mp4",
     ".webm": "video/webm",

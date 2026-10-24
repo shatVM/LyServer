@@ -5,6 +5,11 @@ const presenceController = require("../controllers/presenceController");
 const router = express.Router();
 
 router.get("/files", (req, res) => apiController.getFiles(req, res));
+router.get("/categories", (req, res) => apiController.getCategories(req, res));
+router.post("/categories", (req, res) => apiController.createCategory(req, res));
+router.post("/categories/delete", (req, res) => apiController.deleteCategory(req, res));
+router.post("/files/category", (req, res) => apiController.setFileCategory(req, res));
+router.post("/files/reorder", (req, res) => apiController.reorderFile(req, res));
 router.get("/state", (req, res) => apiController.getState(req, res));
 router.post("/control", (req, res) => apiController.updateControl(req, res));
 router.post("/upload", (req, res) => apiController.uploadFile(req, res));

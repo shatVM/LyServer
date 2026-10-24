@@ -3,7 +3,7 @@ const { spawn } = require("node:child_process");
 
 const PIN = "2468";
 const PORT = 3997;
-const base = `http://localhost:${PORT}`;
+const base = `http://127.0.0.1:${PORT}`;
 
 const results = [];
 function check(name, ok, info = "") {
@@ -24,6 +24,10 @@ const TINY_PDF = Buffer.from(
     "%%EOF\n",
   "ascii"
 );
+
+// Binary body for fetch: send explicit ArrayBuffer (undici versions >= 6 may not accept Buffer bodies)
+const TINY_PDF_BODY = new ArrayBuffer(TINY_PDF.length);
+new Uint8Array(TINY_PDF_BODY).set(TINY_PDF);
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -72,15 +76,16 @@ async function main() {
     r = await fetch(`${base}/api/upload?name=${encodeURIComponent("Тестовий файл.pdf")}`, {
       method: "POST",
       headers: { "X-Portal-Pin": PIN, "Content-Type": "application/octet-stream" },
-      body: TINY_PDF
+      body: TINY_PDF_BODY
     });
     const upload = await r.json();
     const fileId = upload.id;
-    check("Викладач: завантаження PDF", r.status === 201 && Boolean(fileId), `status=${r.status}`);
+    check("Викладач: завантаження PDF запускає фонову конвертацію", r.status === 201 && Boolean(fileId) && upload.conversionStatus === "converting", "status=" + r.status + ", conversion=" + upload.conversionStatus);
     if (!fileId) throw new Error("Не вдалося завантажити тестовий файл");
 
     // Issue #63 Етап 3: id завантажених тестових файлів для прибирання в finally
     const e3Ids = [];
+    let e4CategoryId = "";
 
     try {
       // 3. Issue #8: конвертація відбувається одразу після завантаження
@@ -379,7 +384,7 @@ async function main() {
       );
       check(
         "Issue #63 Е3: підсумок не маскує помилки окремих файлів",
-        jsSrc.includes("failures.push") && jsSrc.includes("Помилки: ")
+        jsSrc.includes("failures.push") && jsSrc.includes("Не вдалося завантажити")
       );
       check(
         "Issue #63 Е3: опис у картці безпечно вставляється як текст",
@@ -424,7 +429,7 @@ async function main() {
         {
           method: "POST",
           headers: { "X-Portal-Pin": PIN, "Content-Type": "application/octet-stream" },
-          body: TINY_PDF
+          body: TINY_PDF_BODY
         }
       );
       const e3WithDesc = await r.json();
@@ -439,7 +444,7 @@ async function main() {
       r = await fetch(`${base}/api/upload?name=${encodeURIComponent("E3 без опису.mp3")}`, {
         method: "POST",
         headers: { "X-Portal-Pin": PIN, "Content-Type": "application/octet-stream" },
-        body: TINY_PDF
+        body: TINY_PDF_BODY
       });
       const e3NoDesc = await r.json();
       if (e3NoDesc.id) e3Ids.push(e3NoDesc.id);
@@ -493,7 +498,7 @@ async function main() {
         {
           method: "POST",
           headers: { "X-Portal-Pin": PIN, "Content-Type": "application/octet-stream" },
-          body: TINY_PDF
+          body: TINY_PDF_BODY
         }
       );
       const e3Long = await r.json();
@@ -504,11 +509,101 @@ async function main() {
         `length=${e3Long.description && e3Long.description.length}`
       );
 
+      // Issue #63 Етап 4: категорії, сумісність метаданих, порядок і права доступу.
+      r = await fetch(base + "/api/categories", { headers: { "X-Portal-Pin": PIN } });
+      check("Issue #63 Е4: категорії доступні лише викладачу з PIN", r.status === 200, "status=" + r.status);
+      r = await fetch(base + "/api/categories");
+      check("Issue #63 Е4: учень не отримує список категорій", r.status === 403, "status=" + r.status);
+
+      r = await fetch(base + "/api/categories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, name: "Е4 тестова категорія" })
+      });
+      const createdCategoryData = r.status === 201 ? await r.json() : {};
+      const e4Category = createdCategoryData.category;
+      if (e4Category && e4Category.id) e4CategoryId = e4Category.id;
+      check("Issue #63 Е4: створення категорії з PIN", r.status === 201 && Boolean(e4Category && e4Category.id), "status=" + r.status);
+      const persistedCategoryMeta = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "materials", ".metadata.json"), "utf-8"));
+      check("Issue #63 Е4: категорія збережена у файлі метаданих", Boolean(e4Category && Array.isArray(persistedCategoryMeta.categories) && persistedCategoryMeta.categories.some(category => category.id === e4Category.id)));
+
+      if (e4Category) {
+        r = await fetch(base + "/api/upload?name=" + encodeURIComponent("E4 категорія під час завантаження.mp3") + "&categoryId=" + encodeURIComponent(e4Category.id), {
+          method: "POST",
+          headers: { "X-Portal-Pin": PIN, "Content-Type": "application/octet-stream" },
+          body: TINY_PDF_BODY
+        });
+        const e4Uploaded = await r.json();
+        if (e4Uploaded.id) e3Ids.push(e4Uploaded.id);
+        const uploadedList = await (await fetch(base + "/api/files", { headers: { "X-Portal-Pin": PIN } })).json();
+        const uploadedCategorized = uploadedList.find(item => item.id === e4Uploaded.id);
+        check("Issue #63 Е4: категорію можна вибрати під час завантаження", r.status === 201 && Boolean(uploadedCategorized && uploadedCategorized.categoryId === e4Category.id), "status=" + r.status);
+      }
+
+      if (e4Category && e3WithDesc.id && e3NoDesc.id) {
+        r = await fetch(base + "/api/files/category", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, file: e3WithDesc.id, categoryId: e4Category.id })
+        });
+        check("Issue #63 Е4: матеріал можна перемістити в категорію", r.status === 200, "status=" + r.status);
+
+        r = await fetch(base + "/api/files", { headers: { "X-Portal-Pin": PIN } });
+        const teacherCategoryList = await r.json();
+        const teacherCategorized = teacherCategoryList.find(item => item.id === e3WithDesc.id);
+        check("Issue #63 Е4: категорія присутня у списку викладача", Boolean(teacherCategorized && teacherCategorized.categoryId === e4Category.id));
+
+        r = await fetch(base + "/api/files");
+        const studentCategoryList = await r.json();
+        const studentCategorized = studentCategoryList.find(item => item.id === e3WithDesc.id);
+        check("Issue #63 Е4: categoryId не розкривається учню", Boolean(studentCategorized) && !("categoryId" in studentCategorized) && !("order" in studentCategorized));
+
+        r = await fetch(base + "/api/files/category", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, file: e3NoDesc.id, categoryId: e4Category.id })
+        });
+        check("Issue #63 Е4: другий матеріал переміщено для тесту порядку", r.status === 200, "status=" + r.status);
+
+        r = await fetch(base + "/api/files/reorder", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, file: e3NoDesc.id, direction: "up" })
+        });
+        const reordered = r.status === 200 ? await r.json() : {};
+        const metaPath = require("node:path").join(__dirname, "materials", ".metadata.json");
+        const parsedOrderMeta = JSON.parse(require("node:fs").readFileSync(metaPath, "utf-8"));
+        check("Issue #63 Е4: порядок матеріалів записується на диск", r.status === 200 && Array.isArray(parsedOrderMeta.order) && parsedOrderMeta.order.indexOf(e3NoDesc.id) < parsedOrderMeta.order.indexOf(e3WithDesc.id), JSON.stringify(reordered.order || []));
+
+        const originalPath = require("node:path").join(__dirname, "materials", e3WithDesc.id);
+        r = await fetch(base + "/api/categories/delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, categoryId: e4Category.id })
+        });
+        const deletedCategory = r.status === 200 ? await r.json() : {};
+        const postDeleteMeta = JSON.parse(require("node:fs").readFileSync(metaPath, "utf-8"));
+        check("Issue #63 Е4: видалення категорії не видаляє файли", r.status === 200 && require("node:fs").existsSync(originalPath) && deletedCategory.affectedFiles >= 1 && !postDeleteMeta.files[e3WithDesc.id].categoryId, "status=" + r.status + ", affected=" + deletedCategory.affectedFiles);
+        if (r.status === 200) e4CategoryId = "";
+      }
+
+      const apiControllerSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "controllers", "apiController.js"), "utf-8");
+      check("Issue #63 Е4: upload запускає фонову конвертацію та фіксує помилку", apiControllerSource.includes("slideService.ensureSlides(result.id)") && apiControllerSource.includes('.then(manifest =>') && apiControllerSource.includes('setConversionStatus(result.id, "failed", conversionError)'));
+      const fileServiceSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "services", "fileService.js"), "utf-8");
+      check("Issue #63 Е4: учням не видаються категорії та неготові слайди", fileServiceSource.includes('item.conversionStatus === "ready"') && fileServiceSource.includes('conversionStatus === "ready" && !manifestReady') && fileServiceSource.includes('categoryId: categoryIds.has(info.categoryId) ? info.categoryId : ""'));
+      const slideServiceSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "services", "slideService.js"), "utf-8");
+      check("Issue #63 Е4: готовність вимагає наявні PNG для кожної сторінки", slideServiceSource.includes("function validateManifest(name, manifest)") && slideServiceSource.includes("Некоректний PNG-слайд"));
+      const configSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "config", "index.js"), "utf-8");
+      check("Issue #63 Е4: підтримуються .pdf, .ppt і .pptx", configSource.includes('"\.pdf", ".ppt", ".pptx"') && configSource.includes('slideExtensions: new Set([".pdf", ".ppt", ".pptx"])'));
+      const iconSprite = require("node:fs").readFileSync(require("node:path").join(__dirname, "public", "icons.svg"), "utf-8");
+      const appSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "public", "js", "app.js"), "utf-8");
+      check("Issue #63 Е4: іконки категорій локальні та працюють офлайн", iconSprite.includes('id="folder-input"') && iconSprite.includes('id="arrow-up"') && appSource.includes('use.setAttribute("href", "/icons.svg#" + name)'));
+
       // Захист не ослаб: перевірка PIN під час завантаження
       r = await fetch(`${base}/api/upload?name=${encodeURIComponent("E3 без PIN.mp3")}`, {
         method: "POST",
         headers: { "Content-Type": "application/octet-stream" },
-        body: TINY_PDF
+        body: TINY_PDF_BODY
       });
       check("Issue #63 Е3: завантаження без PIN → 403", r.status === 403, `status=${r.status}`);
 
@@ -528,6 +623,13 @@ async function main() {
       });
       check("Завантаження: заборонений тип → 400", r.status === 400, `status=${r.status}`);
     } finally {
+      if (e4CategoryId) {
+        await fetch(base + "/api/categories/delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, categoryId: e4CategoryId })
+        }).catch(() => {});
+      }
       // Прибирання тестового файлу
       await fetch(`${base}/api/files/delete`, {
         method: "POST",
@@ -550,8 +652,8 @@ async function main() {
       stdio: "ignore"
     });
     try {
-      if (await waitForHealth("http://localhost:3996")) {
-        const base2 = "http://localhost:3996";
+      if (await waitForHealth("http://127.0.0.1:3996")) {
+        const base2 = "http://127.0.0.1:3996";
         const statuses = [];
         for (let i = 0; i < 3; i++) {
           const res = await fetch(base2 + "/api/auth/verify", {
@@ -590,6 +692,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("ERROR:", err.message);
+  console.error("ERROR:", err.stack || err.message);
   process.exit(1);
 });
