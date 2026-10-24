@@ -76,8 +76,14 @@ class ApiController {
       res.status(error.status || 400).send(error.message || "Помилка завантаження");
     }
   }
+  /**
+   * GET /api/categories
+   * Issue #63 Р: читання публічне — учні групують каталог за категоріями.
+   * У відповіді лише самі категорії (id, name, order, createdAt) без будь-яких
+   * даних матеріалів; створення, видалення та зміна складу категорій, як і раніше,
+   * потребують PIN викладача (див. createCategory/deleteCategory/setFileCategory).
+   */
   getCategories(req, res) {
-    if (!auth.requirePin(req, res)) return;
     res.json(fileService.getCategories());
   }
 

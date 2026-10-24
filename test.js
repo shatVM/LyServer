@@ -526,9 +526,23 @@ async function main() {
 
       // Issue #63 Етап 4: категорії, сумісність метаданих, порядок і права доступу.
       r = await fetch(base + "/api/categories", { headers: { "X-Portal-Pin": PIN } });
-      check("Issue #63 Е4: категорії доступні лише викладачу з PIN", r.status === 200, "status=" + r.status);
+      check("Issue #63 Е4: категорії доступні викладачу з PIN", r.status === 200, "status=" + r.status);
+      // Issue #63 Р: читання категорій публічне — учні групують каталог
       r = await fetch(base + "/api/categories");
-      check("Issue #63 Е4: учень не отримує список категорій", r.status === 403, "status=" + r.status);
+      const studentCategories = r.status === 200 ? await r.json() : [];
+      check(
+        "Issue #63 Р: учень отримує список категорій для каталогу",
+        r.status === 200 && Array.isArray(studentCategories) &&
+          studentCategories.every(category => typeof category.id === "string" && typeof category.name === "string"),
+        `status=${r.status}, count=${Array.isArray(studentCategories) ? studentCategories.length : "n/a"}`
+      );
+      // Зміна категорій залишається за викладачем
+      r = await fetch(base + "/api/categories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "учнівська спроба створення" })
+      });
+      check("Issue #63 Р: створення категорії без PIN заборонено", r.status === 403, "status=" + r.status);
 
       r = await fetch(base + "/api/categories", {
         method: "POST",
@@ -570,8 +584,23 @@ async function main() {
 
         r = await fetch(base + "/api/files");
         const studentCategoryList = await r.json();
-        const studentCategorized = studentCategoryList.find(item => item.id === e3WithDesc.id);
-        check("Issue #63 Е4: categoryId не розкривається учню", Boolean(studentCategorized) && !("categoryId" in studentCategorized) && !("order" in studentCategorized));
+        const studentCategorized = studentCategoryList.filter(item => item.id === e3WithDesc.id);
+        // Issue #63 Р: учень отримує categoryId для групування (без дублікатів),
+        // але порядок (order) і стан конвертації, як і раніше, не розкриваються
+        check(
+          "Issue #63 Р: учень отримує categoryId для групування без дублікатів",
+          studentCategorized.length === 1 && studentCategorized[0].categoryId === e4Category.id &&
+            !("order" in studentCategorized[0]) && !("conversionStatus" in studentCategorized[0]) &&
+            !("conversionError" in studentCategorized[0]),
+          JSON.stringify(studentCategorized[0] && studentCategorized[0].categoryId)
+        );
+        // Матеріали без категорії мають порожній categoryId → «Без категорії»
+        check(
+          "Issue #63 Р: матеріали без категорії позначені порожнім categoryId",
+          studentCategoryList.some(item => item.categoryId === "") &&
+            studentCategoryList.some(item => item.categoryId === e4Category.id),
+          `total=${studentCategoryList.length}`
+        );
 
         r = await fetch(base + "/api/files/category", {
           method: "POST",
@@ -590,6 +619,17 @@ async function main() {
         const parsedOrderMeta = JSON.parse(require("node:fs").readFileSync(metaPath, "utf-8"));
         check("Issue #63 Е4: порядок матеріалів записується на диск", r.status === 200 && Array.isArray(parsedOrderMeta.order) && parsedOrderMeta.order.indexOf(e3NoDesc.id) < parsedOrderMeta.order.indexOf(e3WithDesc.id), JSON.stringify(reordered.order || []));
 
+        // Issue #63 Р: встановлений порядок зберігається в каталозі учня
+        r = await fetch(base + "/api/files");
+        const studentOrderList = await r.json();
+        const studentPosNoDesc = studentOrderList.findIndex(item => item.id === e3NoDesc.id);
+        const studentPosWithDesc = studentOrderList.findIndex(item => item.id === e3WithDesc.id);
+        check(
+          "Issue #63 Р: порядок викладача зберігається в каталозі учня",
+          studentPosNoDesc >= 0 && studentPosWithDesc >= 0 && studentPosNoDesc < studentPosWithDesc,
+          JSON.stringify(studentOrderList.map(item => item.id))
+        );
+
         const originalPath = require("node:path").join(__dirname, "materials", e3WithDesc.id);
         r = await fetch(base + "/api/categories/delete", {
           method: "POST",
@@ -605,7 +645,13 @@ async function main() {
       const apiControllerSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "controllers", "apiController.js"), "utf-8");
       check("Issue #63 Е4: upload запускає фонову конвертацію та фіксує помилку", apiControllerSource.includes("slideService.ensureSlides(result.id)") && apiControllerSource.includes('.then(manifest =>') && apiControllerSource.includes('setConversionStatus(result.id, "failed", conversionError)'));
       const fileServiceSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "services", "fileService.js"), "utf-8");
-      check("Issue #63 Е4: учням не видаються категорії та неготові слайди", fileServiceSource.includes('item.conversionStatus === "ready"') && fileServiceSource.includes('conversionStatus === "ready" && !manifestReady') && fileServiceSource.includes('categoryId: categoryIds.has(info.categoryId) ? info.categoryId : ""'));
+      check(
+        "Issue #63 Р: учень отримує categoryId, але не порядок і стан конвертації; неготові слайди відфільтровано",
+        fileServiceSource.includes('item.conversionStatus === "ready"') &&
+          fileServiceSource.includes('conversionStatus === "ready" && !manifestReady') &&
+          fileServiceSource.includes('categoryId: categoryIds.has(info.categoryId) ? info.categoryId : ""') &&
+          fileServiceSource.includes("{ id, name, ext, size, hidden, description, categoryId }")
+      );
       const slideServiceSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "services", "slideService.js"), "utf-8");
       check("Issue #63 Е4: готовність вимагає наявні PNG для кожної сторінки", slideServiceSource.includes("function validateManifest(name, manifest)") && slideServiceSource.includes("Некоректний PNG-слайд"));
       const configSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "config", "index.js"), "utf-8");
@@ -760,6 +806,17 @@ async function main() {
           jsSrc.includes("function restoreLocalViewer()") &&
           jsSrc.includes("if (isMaterialsPage && materialsDemoActive) return;") &&
           jsSrc.includes("if (isMaterialsPage && role === \"teacher\") return;")
+      );
+      // Акордеон: спільний групувальник каталогу, кнопка-заголовок з
+      // aria-expanded/aria-controls, незалежне згортання за id категорії.
+      // Доповнює поведінкові HTTP-тести; роботу DOM перевіряє окрема браузерна перевірка.
+      check(
+        "Issue #63 Р: акордеон категорій у джерелі клієнта та стилях",
+        jsSrc.includes("const collapsedCategoryIds = new Set();") &&
+          jsSrc.includes("function renderCategoryGroups(root)") &&
+          jsSrc.includes("toggle.setAttribute(\"aria-controls\", bodyId)") &&
+          jsSrc.includes("if (isMaterialsPage || (isDemoPage && isTeacher))") &&
+          css.includes(".category-toggle") && css.includes(".category-body[hidden]")
       );
       check(
         "Issue #63 Р: зупинка демонстрації — кнопка викладача та серверний стан",

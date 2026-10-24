@@ -627,10 +627,12 @@ async function refreshFiles() {
     if (pin && role === "teacher") headers["X-Portal-Pin"] = pin;
     const response = await api("/api/files", { headers });
     files = await response.json();
-    if (role === "teacher" && pin) {
-      const categoryResponse = await api("/api/categories", { headers });
-      categories = await categoryResponse.json();
-    } else {
+    // Issue #63 Р: список категорій читається публічно (GET /api/categories) —
+    // учні групують каталог за категоріями, як і викладач
+    try {
+      const categoryResponse = await api("/api/categories");
+      categories = (await categoryResponse.json()) || [];
+    } catch {
       categories = [];
     }
     updateUploadCategoryOptions();
@@ -847,6 +849,80 @@ function createFileCard(file, isTeacher, showCategoryActions) {
   return item;
 }
 
+// Issue #63 Р: стан акордеона категорій зберігається в пам'яті сторінки за
+// id категорії ("" — «Без категорії») і переживає перерисовку каталогу;
+// типово всі категорії розгорнуті. Незалежне згортання: одночасно можуть бути
+// відкриті кілька категорій (див. DECISIONS.md).
+const collapsedCategoryIds = new Set();
+
+function renderCategoryGroups(root) {
+  const isTeacher = role === "teacher";
+  // Дії над категоріями/порядком — лише панель викладача на «Демонстрації»
+  const showCategoryActions = isDemoPage && isTeacher;
+  const orderedCategories = [...categories].sort((a, b) => (a.order || 0) - (b.order || 0));
+  const groups = [...orderedCategories.map(category => ({ id: category.id, name: category.name, category })),
+    { id: "", name: "Без категорії", category: null }];
+  for (const group of groups) {
+    const groupFiles = files.filter(file => (file.categoryId || "") === group.id);
+    const expanded = !collapsedCategoryIds.has(group.id);
+    const bodyId = "category-body-" + (group.id || "uncategorized");
+
+    const section = document.createElement("section");
+    section.className = "category-section" + (expanded ? "" : " is-collapsed");
+    const header = document.createElement("div"); header.className = "category-heading";
+    const title = document.createElement("h4");
+
+    // Акордеон: кнопка-заголовок працює мишею, клавіатурою (Enter/Space) і
+    // дотиком; клік поза кнопкою (наприклад, «Видалити категорію») не згортає
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "category-toggle";
+    toggle.setAttribute("aria-expanded", String(expanded));
+    toggle.setAttribute("aria-controls", bodyId);
+    toggle.setAttribute("aria-label", (expanded ? "Згорнути" : "Розгорнути") + " категорію «" + group.name + "»");
+    const chevron = document.createElement("span");
+    chevron.className = "category-chevron";
+    chevron.setAttribute("aria-hidden", "true");
+    chevron.textContent = expanded ? "▾" : "▸";
+    toggle.append(iconSvg("folder"), document.createTextNode(" " + group.name + " "), chevron);
+    title.append(toggle);
+    header.append(title);
+    if (group.category && showCategoryActions) {
+      const remove = document.createElement("button");
+      remove.type = "button"; remove.className = "secondary btn-sm"; remove.textContent = "Видалити категорію";
+      remove.setAttribute("aria-label", "Видалити категорію " + group.name);
+      remove.onclick = () => deleteCategory(group.category); header.append(remove);
+    }
+    section.append(header);
+
+    const body = document.createElement("div");
+    body.className = "category-body";
+    body.id = bodyId;
+    body.hidden = !expanded;
+    if (!groupFiles.length) {
+      const empty = document.createElement("p"); empty.className = "hint category-empty";
+      empty.textContent = "У цій категорії поки немає матеріалів."; body.append(empty);
+    } else {
+      for (const file of groupFiles) body.append(createFileCard(file, isTeacher, showCategoryActions));
+    }
+    section.append(body);
+
+    toggle.onclick = () => {
+      const nowCollapsed = !collapsedCategoryIds.has(group.id);
+      if (nowCollapsed) collapsedCategoryIds.add(group.id);
+      else collapsedCategoryIds.delete(group.id);
+      const nowExpanded = !nowCollapsed;
+      body.hidden = !nowExpanded;
+      section.classList.toggle("is-collapsed", nowCollapsed);
+      toggle.setAttribute("aria-expanded", String(nowExpanded));
+      toggle.setAttribute("aria-label", (nowExpanded ? "Згорнути" : "Розгорнути") + " категорію «" + group.name + "»");
+      chevron.textContent = nowExpanded ? "▾" : "▸";
+    };
+
+    root.append(section);
+  }
+}
+
 function renderFiles() {
   const root = $("files");
   if (!root) return;
@@ -860,30 +936,10 @@ function renderFiles() {
   }
 
   const isTeacher = role === "teacher";
-  if (isDemoPage && isTeacher) {
-    const orderedCategories = [...categories].sort((a, b) => (a.order || 0) - (b.order || 0));
-    const groups = [...orderedCategories.map(category => ({ id: category.id, name: category.name, category })),
-      { id: "", name: "Без категорії", category: null }];
-    for (const group of groups) {
-      const groupFiles = files.filter(file => (file.categoryId || "") === group.id);
-      const section = document.createElement("section"); section.className = "category-section";
-      const header = document.createElement("div"); header.className = "category-heading";
-      const title = document.createElement("h4"); title.append(iconSvg("folder"), document.createTextNode(" " + group.name)); header.append(title);
-      if (group.category) {
-        const remove = document.createElement("button");
-        remove.type = "button"; remove.className = "secondary btn-sm"; remove.textContent = "Видалити категорію";
-        remove.setAttribute("aria-label", "Видалити категорію " + group.name);
-        remove.onclick = () => deleteCategory(group.category); header.append(remove);
-      }
-      section.append(header);
-      if (!groupFiles.length) {
-        const empty = document.createElement("p"); empty.className = "hint category-empty";
-        empty.textContent = "У цій категорії поки немає матеріалів."; section.append(empty);
-      } else {
-        for (const file of groupFiles) section.append(createFileCard(file, true, true));
-      }
-      root.append(section);
-    }
+  // Issue #63 Р: каталог групують категорії для всіх ролей на сторінці
+  // перегляду (учні бачать категорії) та для викладача на «Демонстрації»
+  if (isMaterialsPage || (isDemoPage && isTeacher)) {
+    renderCategoryGroups(root);
     return;
   }
   for (const file of files) root.append(createFileCard(file, isTeacher, false));

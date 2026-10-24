@@ -145,12 +145,16 @@ class FileService {
       });
 
     if (isTeacher) return allFiles;
-    // Учням не передаємо категорії, порядок або внутрішній стан конвертації.
+    // Учням не передаємо порядок (поле order) або внутрішній стан конвертації.
+    // Issue #63 Р: categoryId передається — він потрібен для групування каталогу
+    // учня за категоріями (один матеріал — одна категорія); самі категорії віддає
+    // GET /api/categories. Приховані та неготові матеріали відфільтровуються нижче
+    // й не потрапляють у відповідь учню.
     // PDF/PPTX доступні лише після підтвердження готового маніфесту.
     return allFiles
       .filter(item => !item.hidden &&
         (!config.slideExtensions.has(item.ext) || item.conversionStatus === "ready"))
-      .map(({ id, name, ext, size, hidden, description }) => ({ id, name, ext, size, hidden, description }));
+      .map(({ id, name, ext, size, hidden, description, categoryId }) => ({ id, name, ext, size, hidden, description, categoryId }));
   }
 
   moveFileToCategory(idOrName, categoryId = "") {
