@@ -164,6 +164,12 @@ async function main() {
       r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1?pin=${PIN}`);
       check("Викладач: приховані слайди доступні", r.status === 200, `status=${r.status}`);
 
+      // Issue #63 Р: публічне /api/slides/info теж не розкриває прихований файл
+      r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`);
+      check("Issue #63 Р: прихований файл закритий у /api/slides/info (учень)", r.status === 404, `status=${r.status}`);
+      r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}&pin=${PIN}`);
+      check("Issue #63 Р: /api/slides/info прихованого файлу з PIN (викладач)", r.status === 200, `status=${r.status}`);
+
       await fetch(`${base}/api/files/toggle-hide`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -607,6 +613,208 @@ async function main() {
       const iconSprite = require("node:fs").readFileSync(require("node:path").join(__dirname, "public", "icons.svg"), "utf-8");
       const appSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "public", "js", "app.js"), "utf-8");
       check("Issue #63 Е4: іконки категорій локальні та працюють офлайн", iconSprite.includes('id="folder-input"') && iconSprite.includes('id="arrow-up"') && appSource.includes('use.setAttribute("href", "/icons.svg#" + name)'));
+
+      // ---------------------------------------------------------------------
+      // Issue #63 (відгук рев'ю): кеш повної перевірки PNG, без витоку
+      // діагностики в публічні відповіді та двохрежимна сторінка учня.
+      // ---------------------------------------------------------------------
+
+      // 1) Кешування повної перевірки PNG-набору в slideService
+      const stateServiceSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "services", "stateService.js"), "utf-8");
+      check(
+        "Issue #63 Р: кеш перевірки PNG з інвалідацією за mtime джерела/теки/маніфесту",
+        slideServiceSource.includes("manifestValidationCache") &&
+          slideServiceSource.includes("function validationFingerprint(name)") &&
+          slideServiceSource.includes("manifestValidationCache.delete(name)") &&
+          slideServiceSource.includes("validateManifestCached(name, existing)") &&
+          slideServiceSource.includes("validateManifestCached(name, manifest)")
+      );
+
+      // Регресія: повторні запити (навігація слайдами, /api/slides/info)
+      // не роблять повну перевірку всіх PNG кожного разу — пошкодження вмісту
+      // наявного файлу без зміни набору файлів не помічається (кеш валідний).
+      // Без кешу validateManifest помітив би це одразу і відповідь була б не ready.
+      const fsMod = require("node:fs");
+      const pageOnePath = require("node:path").join(__dirname, "materials", ".slides", fileId, "page-1.png");
+      try {
+        const originalPng = fsMod.readFileSync(pageOnePath);
+        fsMod.writeFileSync(pageOnePath, Buffer.from("не PNG, а тестове сміття"));
+        r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`);
+        let cacheInfo = await r.json();
+        check(
+          "Issue #63 Р: навігація/info не сканує весь набір повторно (кеш)",
+          r.status === 200 && cacheInfo.ready === true,
+          `status=${r.status}, ready=${cacheInfo.ready}`
+        );
+
+        // Зміна набору файлів (видалення PNG) інвалідовує кеш → не готово
+        fsMod.unlinkSync(pageOnePath);
+        r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`);
+        cacheInfo = r.status === 200 ? await r.json() : { ready: false };
+        check(
+          "Issue #63 Р: видалення PNG інвалідовує кеш перевірки",
+          cacheInfo.ready === false,
+          `status=${r.status}, ready=${cacheInfo.ready}`
+        );
+
+        // Відновлення файлу (зміна набору) — повна перевірка знову підтверджує готовність
+        fsMod.writeFileSync(pageOnePath, originalPng);
+        r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`);
+        cacheInfo = await r.json();
+        check(
+          "Issue #63 Р: відновлення PNG повертає готовність набору",
+          r.status === 200 && cacheInfo.ready === true && cacheInfo.pageCount >= 1,
+          `status=${r.status}, ready=${cacheInfo.ready}, pageCount=${cacheInfo.pageCount}`
+        );
+      } catch (cacheErr) {
+        check("Issue #63 Р: кеш перевірки PNG (збій підготовки тесту)", false, cacheErr.message);
+      }
+
+      // 2) Витік діагностики: учень не бачить conversionError та внутрішніх подробиць
+      r = await fetch(`${base}/api/upload?name=${encodeURIComponent("E5 пошкоджений.pdf")}`, {
+        method: "POST",
+        headers: { "X-Portal-Pin": PIN, "Content-Type": "application/octet-stream" },
+        body: Buffer.from("Це не PDF, а тестовий вміст для помилки конвертації слайдів.")
+      });
+      const e5Upload = r.status === 201 ? await r.json() : {};
+      const e5Id = e5Upload.id;
+      if (e5Id) e3Ids.push(e5Id);
+      check("Issue #63 Р: завантаження пошкодженого PDF для тесту конвертації", Boolean(e5Id), `status=${r.status}`);
+
+      let e5Failed = false;
+      let e5TeacherInfo = null;
+      if (e5Id) {
+        for (let i = 0; i < 30; i++) {
+          r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(e5Id)}&pin=${PIN}`);
+          e5TeacherInfo = await r.json();
+          if (e5TeacherInfo.failed) {
+            e5Failed = true;
+            break;
+          }
+          await delay(1000);
+        }
+        check(
+          "Issue #63 Р: невдала конвертація фіксується як failed",
+          e5Failed,
+          JSON.stringify(e5TeacherInfo)
+        );
+      }
+
+      if (e5Failed) {
+        // Публічна відповідь (без PIN): лише факт помилки, без тексту помилки
+        r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(e5Id)}`);
+        const e5StudentRaw = await r.text();
+        check(
+          "Issue #63 Р: /api/slides/info без PIN не розкриває conversionError",
+          r.status === 200 && !e5StudentRaw.includes("error") && !e5StudentRaw.includes(e5TeacherInfo.error),
+          `status=${r.status}, body=${e5StudentRaw}`
+        );
+        check(
+          "Issue #63 Р: публічна відповідь без локальних шляхів і внутрішніх подробиць",
+          !e5StudentRaw.includes("materials") && !e5StudentRaw.includes(".slides") &&
+            !e5StudentRaw.includes("powershell") && !e5StudentRaw.toLowerCase().includes("stdout") &&
+            !e5StudentRaw.includes("at ") && !e5StudentRaw.includes("Error:"),
+          e5StudentRaw
+        );
+        // Захищений діагностичний шлях: викладач із PIN отримує деталі
+        check(
+          "Issue #63 Р: викладач із PIN отримує деталі помилки конвертації",
+          typeof e5TeacherInfo.error === "string" && e5TeacherInfo.error.length > 0,
+          e5TeacherInfo.error
+        );
+
+        // Неготовий матеріал не потрапляє в каталог учня і без conversionError
+        r = await fetch(base + "/api/files");
+        const e5StudentListRaw = await r.text();
+        const e5StudentList = JSON.parse(e5StudentListRaw);
+        check(
+          "Issue #63 Р: неготовий матеріал закритий для учня у /api/files без conversionError",
+          !e5StudentList.some((f) => f.id === e5Id) && !e5StudentListRaw.includes("conversionError") && !e5StudentListRaw.includes("conversionStatus"),
+          `status=${r.status}`
+        );
+        // Захищений шлях: викладач бачить стан і причину помилки
+        r = await fetch(base + "/api/files", { headers: { "X-Portal-Pin": PIN } });
+        const e5TeacherList = await r.json();
+        const e5TeacherFile = e5TeacherList.find((f) => f.id === e5Id);
+        check(
+          "Issue #63 Р: викладач бачить стан конвертації та причину",
+          Boolean(e5TeacherFile) && e5TeacherFile.conversionStatus === "failed" &&
+            typeof e5TeacherFile.conversionError === "string" && e5TeacherFile.conversionError.length > 0,
+          JSON.stringify(e5TeacherFile && { status: e5TeacherFile.conversionStatus, error: e5TeacherFile.conversionError })
+        );
+      }
+
+      // 3) Одна сторінка учня з двома режимами за серверним станом демонстрації
+      check(
+        "Issue #63 Р: сторінка учня має контейнер каталогу для двох режимів",
+        matHtml.includes('id="materialsCatalogPanel"')
+      );
+      check(
+        "Issue #63 Р: демонстрація у навігації лише для викладача (одна сторінка учня)",
+        matHtml.includes('class="nav-link teacher-only') && matHtml.includes('href="/demonstration"')
+      );
+      check(
+        "Issue #63 Р: JS перемикає режими за серверним станом без перезавантаження",
+        jsSrc.includes("function setMaterialsDemoMode(active, state = {})") &&
+          jsSrc.includes("Boolean(state.file) !== materialsDemoActive") &&
+          jsSrc.includes("function restoreLocalViewer()") &&
+          jsSrc.includes("if (isMaterialsPage && materialsDemoActive) return;") &&
+          jsSrc.includes("if (isMaterialsPage && role === \"teacher\") return;")
+      );
+      check(
+        "Issue #63 Р: зупинка демонстрації — кнопка викладача та серверний стан",
+        demoHtml.includes('id="stopDemo"') &&
+          jsSrc.includes("await postControl({ stop: true });") &&
+          stateServiceSource.includes("if (data && data.stop === true) {")
+      );
+      check(
+        "Issue #63 Р: самостійний перегляд не пише спільний стан демонстрації",
+        jsSrc.includes('if (!pin || role !== "teacher") throw new Error("Потрібні права викладача.")') &&
+          !jsSrc.slice(jsSrc.indexOf("function displayLocalFile(fileId)"), jsSrc.indexOf("function setLocalPage")).includes("postControl")
+      );
+
+      // Початок демонстрації: два «учні» отримують той самий серверний стан
+      r = await fetch(`${base}/api/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, file: fileId, kind: "slides", page: 1 })
+      });
+      check("Issue #63 Р: викладач запускає демонстрацію", r.status === 200, `status=${r.status}`);
+
+      const studentStateA = await (await fetch(base + "/api/state")).json();
+      const studentStateB = await (await fetch(base + "/api/state")).json();
+      check(
+        "Issue #63 Р: два учні бачать той самий активний стан демонстрації",
+        studentStateA.file === fileId && studentStateB.file === fileId &&
+          studentStateA.revision === studentStateB.revision,
+        JSON.stringify({ a: studentStateA.file, b: studentStateB.file, revA: studentStateA.revision, revB: studentStateB.revision })
+      );
+
+      // Спроба учня змінити позицію без PIN не змінює спільний стан
+      r = await fetch(`${base}/api/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file: fileId, kind: "slides", page: 99 })
+      });
+      const stateAfterStudentAttempt = await (await fetch(base + "/api/state")).json();
+      check(
+        "Issue #63 Р: самостійні дії учня не змінюють стан демонстрації",
+        r.status === 403 && stateAfterStudentAttempt.file === fileId && stateAfterStudentAttempt.page === 1,
+        `status=${r.status}, file=${stateAfterStudentAttempt.file}, page=${stateAfterStudentAttempt.page}`
+      );
+
+      // Зупинка демонстрації вчителем скидає стан для всіх клієнтів
+      r = await fetch(`${base}/api/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, stop: true })
+      });
+      const stoppedState = await (await fetch(base + "/api/state")).json();
+      check(
+        "Issue #63 Р: зупинка демонстрації скидає серверний стан (для всіх учнів)",
+        r.status === 200 && stoppedState.file === "" && stoppedState.page === 1,
+        `status=${r.status}, file=${JSON.stringify(stoppedState.file)}, page=${stoppedState.page}`
+      );
 
       // Захист не ослаб: перевірка PIN під час завантаження
       r = await fetch(`${base}/api/upload?name=${encodeURIComponent("E3 без PIN.mp3")}`, {

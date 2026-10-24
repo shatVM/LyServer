@@ -23,6 +23,23 @@ class StateService {
   }
 
   updateState(data) {
+    // Issue #63: явна зупинка спільної демонстрації вчителем (POST /api/control
+    // { stop: true }, лише з PIN). Скидання спільного стану (file "" = показ
+    // неактивний) — сторінки учнів самі повертаються до самостійного перегляду
+    // без перезавантаження; ревізія зростає, тому всі клієнти бачать зупинку.
+    if (data && data.stop === true) {
+      this.shared = {
+        file: "",
+        kind: "",
+        page: 1,
+        time: 0,
+        playing: false,
+        updated: Date.now()
+      };
+      this.revision++;
+      return { ok: true, revision: this.revision, stopped: true };
+    }
+
     if (data.file !== undefined) {
       const filePath = getFilePath(data.file);
       if (!filePath || !fs.existsSync(filePath)) {

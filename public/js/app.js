@@ -27,6 +27,12 @@ let lastVideoUpdate = 0;
 let videoElement = null;
 let applyingRemote = false;
 
+// Issue #63: режим сторінки «Перегляд матеріалів» (одна сторінка учня).
+// Визначається за СЕРВЕРНИМ станом демонстрації (/api/state), а не за
+// локальним станом браузера: true — триває спільна демонстрація вчителя,
+// вибір матеріалів/категорій і самостійна навігація вимкнені.
+let materialsDemoActive = false;
+
 // Current slide page count in demo
 let demoPageCount = 1;
 
@@ -375,6 +381,9 @@ const ARROW_SVG = {
 function slideNavAllowed() {
   // Синхронізована демонстрація: спільний слайд змінює лише викладач (чинні правила)
   if (isDemoPage) return role === "teacher";
+  // Issue #63: на сторінці перегляду в режимі спільної демонстрації — аналогічно:
+  // учень лише спостерігає, позицію задає викладач через серверний стан
+  if (isMaterialsPage && materialsDemoActive) return role === "teacher";
   return true; // самостійний перегляд — локальна навігація
 }
 
@@ -477,7 +486,10 @@ function updateRoleUI() {
   }
 
   if (isMaterialsPage) {
-    if ($("materialsSubtitle")) {
+    // Issue #63: викладач не спостерігає за демонстрацією на цій сторінці —
+    // після входу з ролі учня повертаємо каталог і локальний перегляд
+    if (isTeacher && materialsDemoActive) setMaterialsDemoMode(false, sharedState || {});
+    if ($("materialsSubtitle") && !materialsDemoActive) {
       $("materialsSubtitle").textContent = isTeacher
         ? "Каталог навчальних матеріалів. Ви можете відкривати, транслювати, приховувати та видаляти файли."
         : "Оберіть матеріал для індивідуального вивчення. Особистий перегляд не впливає на інших учасників.";
@@ -528,7 +540,7 @@ function setRole(newRole, newPin = "", newName = "") {
   }
   closeRoleModal();
   updateRoleUI();
-  refreshFiles();
+  filesReady = refreshFiles();
   // Миттєвий старт опитування, якщо увійшли як викладач у поточній сесії
   // (раніше список оновлювався лише після перезавантаження сторінки)
   if (newRole === "teacher") startPresencePolling();
@@ -536,6 +548,9 @@ function setRole(newRole, newPin = "", newName = "") {
   // Симетрично: учень, який увійшов у поточній сесії, шле heartbeat одразу
   if (newRole === "student" && studentDisplayName) startHeartbeat();
   else stopHeartbeat();
+  // Issue #63: сторінка перегляду одразу дізнається серверний стан демонстрації
+  // (режим «спостереження» або каталог) — не чекаючи чергового інтервалу
+  if (isMaterialsPage && newRole !== "teacher") filesReady.finally(() => pollState(true));
 }
 
 // Issue #6: одне поле для прізвища та імені
@@ -943,6 +958,8 @@ function displayLocalFile(fileId) {
 }
 
 function setLocalPage(page) {
+  // Issue #63: у режимі спільної демонстрації позицію задає лише викладач
+  if (isMaterialsPage && materialsDemoActive) return;
   if (!localCurrentFile || !SLIDE_EXTS.has(extOf(localCurrentFile))) return;
   localPageNum = Math.max(1, Math.min(localPageCount || 1, page));
   renderSlideImage(localCurrentFile, localPageNum, localPageCount || 1);
@@ -950,6 +967,67 @@ function setLocalPage(page) {
 
 function stepLocalPage(delta) {
   setLocalPage(localPageNum + delta);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #63: два режими однієї сторінки учня («Перегляд матеріалів»)
+// ---------------------------------------------------------------------------
+// Режим визначається за СЕРВЕРНИМ станом демонстрації (/api/state), а не за
+// локальним станом браузера. Початок показу вчителем ховає вибір матеріалів,
+// категорії та самостійну навігацію — учень лише дивиться синхронізовану
+// демонстрацію. Зупинка показу повертає каталог на тій самій сторінці без
+// перезавантаження, і учень знову обирає матеріали самостійно.
+
+function setMaterialsDemoMode(active, state = {}) {
+  materialsDemoActive = active;
+  const catalog = $("materialsCatalogPanel");
+  if (catalog) catalog.style.display = active ? "none" : "";
+  if (active) {
+    if ($("materialsSubtitle")) {
+      $("materialsSubtitle").textContent =
+        "Триває спільна демонстрація викладача: вибір матеріалів і самостійна навігація вимкнені.";
+    }
+    // Самостійна навігація вимкнена: локальні контроли сховано, активні
+    // зони зображення прибрано (подальші слайди показує pollState з сервера)
+    if ($("pdfControls")) $("pdfControls").style.display = "none";
+    document.querySelectorAll(".slide-zone").forEach(z => z.remove());
+    setSlideNavHint(false);
+    if ($("viewerTitle")) $("viewerTitle").textContent = "Спільна демонстрація";
+    setStatus("Демонстрацію розпочато викладачем.");
+    return;
+  }
+  // Зупинка демонстрації: каталог і особистий перегляд повертаються на цій
+  // самій сторінці; зміст глядача відновлюється з локального стану
+  if ($("materialsSubtitle")) {
+    $("materialsSubtitle").textContent = role === "teacher"
+      ? "Каталог навчальних матеріалів. Ви можете відкривати, транслювати, приховувати та видаляти файли."
+      : "Оберіть матеріал для індивідуального вивчення. Особистий перегляд не впливає на інших учасників.";
+  }
+  restoreLocalViewer();
+}
+
+/** Повернення до особистого перегляду після зупинки демонстрації */
+function restoreLocalViewer() {
+  if (!$("viewer")) return;
+  const file = localCurrentFile
+    ? files.find(f => (f.id === localCurrentFile || f.name === localCurrentFile))
+    : null;
+  if (file) {
+    const actualId = file.id || localCurrentFile;
+    localCurrentFile = actualId;
+    if ($("viewerTitle")) $("viewerTitle").textContent = "Особистий перегляд: " + file.name;
+    if (SLIDE_EXTS.has(file.ext)) {
+      if ($("pdfControls")) $("pdfControls").style.display = "flex";
+      setSlideNavHint(true);
+      renderSlideImage(actualId, Math.max(1, localPageNum || 1), localPageCount || 1);
+      return;
+    }
+    displayLocalFile(actualId);
+    return;
+  }
+  if ($("pdfControls")) $("pdfControls").style.display = "none";
+  if ($("viewerTitle")) $("viewerTitle").textContent = "Особистий перегляд";
+  $("viewer").innerHTML = '<div class="empty">Оберіть файл зі списку та натисніть «Відкрити для себе».</div>';
 }
 
 // ---------------------------------------------------------------------------
@@ -1077,19 +1155,33 @@ async function changeSharedPage(delta) {
 }
 
 async function pollState(force = false) {
-  if (!isDemoPage) return;
+  // Сторінка перегляду: учні дізнаються про демонстрацію зі СЕРВЕРНОГО стану
+  // (та самий шлях при перезавантаженні чи повторному підключенні); викладач
+  // керує показом на сторінці «Демонстрація» і тут не спостерігає
+  if (!isDemoPage && !isMaterialsPage) return;
+  if (isMaterialsPage && role === "teacher") return;
   try {
     const response = await api("/api/state");
     const state = await response.json();
     const prev = sharedState;
     sharedState = state;
 
+    // Issue #63: перемикання режимів сторінки учня без перезавантаження —
+    // за серверним станом демонстрації (початок ховає каталог, зупинка повертає)
+    if (isMaterialsPage && Boolean(state.file) !== materialsDemoActive) {
+      setMaterialsDemoMode(Boolean(state.file), state);
+    }
+
     if (!state.file) {
-      if ($("viewerTitle")) $("viewerTitle").textContent = "Спільний екран";
-      if (!force && $("viewer")) {
-        $("viewer").innerHTML = '<div class="empty">Очікування початку демонстрації від викладача…</div>';
+      if (isDemoPage) {
+        if ($("viewerTitle")) $("viewerTitle").textContent = "Спільний екран";
+        if (!force && $("viewer")) {
+          $("viewer").innerHTML = '<div class="empty">Очікування початку демонстрації від викладача…</div>';
+        }
+        setStatus("Показ ще не розпочато.");
+      } else {
+        setStatus("Демонстрацію не ведеться. Каталог доступний для самостійного перегляду.");
       }
-      setStatus("Показ ще не розпочато.");
       return;
     }
 
@@ -1191,6 +1283,20 @@ if ($("pageInput")) {
 
 if ($("refresh")) $("refresh").onclick = refreshFiles;
 if ($("showShared")) $("showShared").onclick = () => pollState(true);
+
+// Issue #63: викладач зупиняє спільну демонстрацію — сервер скидає стан,
+// сторінки учнів самі повертаються до самостійного перегляду (режим за
+// серверним станом, без перезавантаження)
+if ($("stopDemo")) {
+  $("stopDemo").onclick = async () => {
+    try {
+      await postControl({ stop: true });
+      await pollState(true);
+    } catch (e) {
+      alert("Не вдалося зупинити демонстрацію: " + e.message);
+    }
+  };
+}
 
 // Issue #63 Етап 3: черга зберігає File та опис незалежно від DOM file input.
 function renderUploadQueue() {
@@ -1393,6 +1499,19 @@ if (isDemoPage) {
   // Перший pollState після завантаження списку файлів; подальші — за інтервалом
   filesReady.finally(() => pollState(true));
   setInterval(() => pollState(false), DEMO_STATE_POLL_MS);
+}
+
+// Issue #63: одна сторінка учня з двома режимами. Учень (або гість без ролі)
+// дізнається про демонстрацію зі СЕРВЕРНОГО стану: початок/зупинка показу
+// перемикають сторінку без перезавантаження; перезавантаження або повторне
+// підключення проходять той самий шлях і одразу отримують актуальний стан
+if (isMaterialsPage) {
+  filesReady.finally(() => {
+    if (role !== "teacher") pollState(true);
+  });
+  setInterval(() => {
+    if (role !== "teacher") pollState(false);
+  }, DEMO_STATE_POLL_MS);
 }
 
 // Issue #7: учень повідомляє сервер про активність свого сеансу.

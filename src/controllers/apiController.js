@@ -172,24 +172,45 @@ class ApiController {
   /**
    * GET /api/slides/info?file=<name>
    * Returns cached manifest (pageCount) without conversion.
+   *
+   * Issue #63 (відгук рев'ю): публічна відповідь для учня містить лише факт
+   * готовності/помилки/конвертації — без conversionError, локальних шляхів,
+   * stdout/stderr, stack trace чи команд. Діагностика помилки конвертації
+   * доступна лише викладачу з PIN (захищений діагностичний шлях); повні
+   * подробиці також пишуться у приватний серверний лог (console.error).
+   * Приховані файли для учня не існують (навіть за відомим id, як і у /slides).
    */
   getSlideInfo(req, res) {
     const { file } = req.query;
     if (!file) return res.status(400).send("Не вказано file");
+    const isTeacher = auth.isTeacher(req);
+    if (!fileService.canAccess(file, isTeacher)) {
+      return res.status(404).json({ ready: false });
+    }
     const manifest = slideService.getManifest(file);
     if (!manifest) {
       const metadata = fileService.getMetadata();
       const info = metadata.files && metadata.files[file];
       if (info && info.conversionStatus === "failed") {
-        return res.json({ ready: false, failed: true, error: info.conversionError || "Помилка конвертації" });
+        if (isTeacher) {
+          return res.json({ ready: false, failed: true, error: info.conversionError || "Помилка конвертації" });
+        }
+        return res.json({ ready: false, failed: true });
       }
       if (info && info.conversionStatus === "converting") return res.json({ ready: false, converting: true });
       return res.status(404).json({ ready: false });
     }
     if (manifest.converting) return res.json({ ready: false, converting: true });
     if (!Number.isInteger(manifest.pageCount) || manifest.pageCount < 1) {
-      return res.status(500).json({ ready: false, failed: true, error: "Некоректний маніфест PNG-слайдів" });
+      return res.status(500).json({
+        ready: false,
+        failed: true,
+        ...(isTeacher ? { error: "Некоректний маніфест PNG-слайдів" } : {})
+      });
     }
+    // Учню — лише те, що потрібно для показу; source/generatedAt (внутрішні
+    // подробиці реалізації конвертації) — лише викладачу
+    if (!isTeacher) return res.json({ ready: true, pageCount: manifest.pageCount });
     res.json({ ready: true, ...manifest });
   }
 }

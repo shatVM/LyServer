@@ -68,6 +68,8 @@ function writeManifest(name, data) {
 
 /** Delete all cached slides for a given file */
 function clearSlides(name) {
+  // Issue #63: очищення набору PNG — явна інвалідація кешу перевірки
+  manifestValidationCache.delete(name);
   const folder = slideFolder(name);
   if (fs.existsSync(folder)) {
     fs.rmSync(folder, { recursive: true, force: true });
@@ -93,6 +95,53 @@ function validateManifest(name, manifest) {
     }
   }
   return manifest;
+}
+
+// Issue #63 (відгук рев'ю): кеш результатів повної перевірки PNG-набору.
+// Без кешу кожне перемикання слайда (запит /slides/<file>/<page> → ensureSlides)
+// сканувало ВСІ сторінки (stat + open + read кожного PNG). Тепер повна перевірка
+// виконується лише один раз на зміну набору файлів або стану конвертації.
+//
+// Спотовий ключ (fingerprint) — mtime трьох джерел правди:
+//   1) вихідного файлу (перезапис/заміна джерела),
+//   2) теки .slides/<file>/ (створення/видалення/перейменування PNG міняє mtime теки),
+//   3) manifest.json (написання нового маніфесту після конвертації).
+// Конвертація та очищення завжди створюють або видаляють файли в теці, тому
+// зміна стану конвертації та зміни набору змушують повну перевірку повторитися.
+// Навмисне зміщення вмісту наявного PNG без зміни набору файлів кешем
+// не відстежується — такі файли пише лише сервер, і зробити це можна лише
+// через очищення/повторну конвертацію (зміна mtime теки або маніфесту).
+const manifestValidationCache = new Map();
+
+/** fingerprint стану джерела/набору PNG для file, або null якщо стан невідомий */
+function validationFingerprint(name) {
+  try {
+    const src = fs.statSync(path.join(config.dataDir, name));
+    const folder = fs.statSync(slideFolder(name));
+    const manifest = fs.statSync(manifestPath(name));
+    return src.mtimeMs + "|" + folder.mtimeMs + "|" + manifest.mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Повна перевірка PNG з кешем: той самий набір файлів перевіряється один раз,
+ * повторні запити (навігація слайдами, /api/slides/info, /api/files) обмежуються
+ * трьома stat-викликами. Інвалідація — за зміною mtime джерела/теки/маніфесту
+ * або явним викликом clearSlides().
+ */
+function validateManifestCached(name, manifest) {
+  const fingerprint = validationFingerprint(name);
+  if (fingerprint !== null) {
+    const cached = manifestValidationCache.get(name);
+    if (cached && cached.fingerprint === fingerprint) return cached.manifest;
+  }
+  const validated = validateManifest(name, manifest);
+  if (fingerprint !== null) {
+    manifestValidationCache.set(name, { fingerprint, manifest: validated });
+  }
+  return validated;
 }
 
 /** Return the absolute path to page PNG (1-indexed). Does NOT check existence. */
@@ -256,7 +305,7 @@ async function ensureSlides(name) {
     const srcMtime = fs.statSync(srcPath).mtimeMs;
     if (existing.generatedAt >= srcMtime) {
       try {
-        return validateManifest(name, existing);
+        return validateManifestCached(name, existing);
       } catch {
         // Старий або неповний кеш не є доказом готовності — перебудуємо його.
         clearSlides(name);
@@ -274,7 +323,7 @@ async function ensureSlides(name) {
   };
 
   const task = run()
-    .then(manifest => validateManifest(name, manifest))
+    .then(manifest => validateManifestCached(name, manifest))
     .finally(() => inFlight.delete(name));
   inFlight.set(name, task);
   return task;
@@ -289,7 +338,7 @@ function getManifest(name) {
   if (inFlight.has(name)) return { converting: true };
   const manifest = readManifest(name);
   if (manifest) {
-    try { return validateManifest(name, manifest); }
+    try { return validateManifestCached(name, manifest); }
     catch { return inFlight.has(name) ? { converting: true } : null; }
   }
   return inFlight.has(name) ? { converting: true } : null;

@@ -7,7 +7,9 @@
       <a href="/upload" class="nav-link teacher-only {{isActive activeMenu 'upload'}}" id="navUploadLink">
         <span class="nav-icon">📤</span> Додавання матеріалів
       </a>
-      <a href="/demonstration" class="nav-link {{isActive activeMenu 'demonstration'}}">
+      <!-- Issue #63: одна сторінка перегляду для учня — демонстрація відбувається
+           на ній самій (два режими за серверним станом); пункт лише для викладача -->
+      <a href="/demonstration" class="nav-link teacher-only {{isActive activeMenu 'demonstration'}}">
         <span class="nav-icon">🖥️</span> Демонстрація
       </a>
       <a href="/students" class="nav-link teacher-only {{isActive activeMenu 'students'}}" id="navStudentsLink">
