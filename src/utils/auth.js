@@ -1,24 +1,27 @@
 /**
- * auth.js — перевірка PIN-коду викладача.
+ * auth.js — перевірка PIN-коду викладача та серверних сесій входу.
  *
  * - Порівняння через crypto.timingSafeEqual (стійке до timing-атак);
  * - Ліміт спроб (див. pinLimiter.js);
  * - extractPin шукає PIN у заголовку X-Portal-Pin, тілі JSON та query;
- * - Issue #63 (доробка): медіа-cookie замість ?pin= у URL медіафайлів —
- *   <img>/<video>/слайди надсилають cookie автоматично, тому PIN не потрапляє
- *   в адресний рядок, історію браузера та журнали запитів.
- *   Cookie містить ПОХІДНИЙ токен (HMAC від PIN), а не сам PIN, і діє лише
- *   для медіазапитів (isTeacherMedia), не для операцій керування.
+ * - Issue #63 (Етап 5): вхід обох ролей фіксується серверною сесією
+ *   (sessionService) і передається HttpOnly cookie `ly_session`. Сесії
+ *   зберігаються лише в пам'яті процесу, тому ПЕРЕРЕЗАПУСК сервера скасовує
+ *   всі попередні входи: старі cookie відхиляються, допустимий лише новий
+ *   вхід (POST /api/auth/verify для вчителя, POST /api/auth/session для учня).
+ * - Cookie містить випадковий id сесії, а НЕ PIN: її витік не розкриває PIN
+ *   і не дає прав на POST /api/* (вони вимагають справжній PIN у заголовку/тілі).
  */
 
 const crypto = require("node:crypto");
 const config = require("../config");
 const pinLimiter = require("./pinLimiter");
+const sessionService = require("../services/sessionService");
 
-/** Ім'я HttpOnly cookie медіа-доступу викладача */
-const MEDIA_COOKIE = "ly_media_auth";
-/** Життя cookie — один робочий день (учбовий сеанс) */
-const MEDIA_COOKIE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+/** Ім'я HttpOnly cookie сесії входу (викладач або учень) */
+const SESSION_COOKIE = "ly_session";
+/** Життя cookie — один робочий день (учбовий сеанс); те саме й у sessionService */
+const SESSION_COOKIE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 function sha256(value) {
   return crypto.createHash("sha256").update(String(value)).digest();
@@ -62,40 +65,81 @@ function parseCookies(req) {
   return out;
 }
 
-/**
- * Токен медіа-доступу: HMAC-SHA256 від PIN з фіксованою міткою.
- * Сервер може перерахувати його з config.portalPin — стан не зберігається.
- * У cookie лежить ПОХІДНЕ значення, тому витік самої cookie не розкрє PIN
- * і не дає прав на POST /api/* (вони вимагають справжній PIN у заголовку/тілі).
- */
-function mediaAuthToken() {
-  return crypto
-    .createHmac("sha256", String(config.portalPin))
-    .update("lyserver-media-auth-v1")
-    .digest("hex");
+/** Чинна серверна сесія цього запиту (null — входу немає або він застарів) */
+function readSession(req) {
+  return sessionService.get(parseCookies(req)[SESSION_COOKIE]);
 }
 
-/** Видача HttpOnly медіа-cookie викладачу (при вході та оновленні сесії) */
-function issueMediaCookie(req, res) {
-  res.cookie(MEDIA_COOKIE, mediaAuthToken(), {
+/**
+ * Issue #63 (Етап 5): видача HttpOnly cookie сесії.
+ * Повторний вхід тієї самої ролі ПЕРЕВИКОРИСТОВУЄ наявну сесію (сторінку
+ * викладача перезавантажують часто), а зміна ролі скасовує попередню.
+ */
+function issueSession(req, res, role, name = "") {
+  const existing = readSession(req);
+  if (existing && existing.role === role && (!name || existing.name === name)) {
+    res.cookie(SESSION_COOKIE, existing.id, sessionCookieOptions(req));
+    return existing;
+  }
+  if (existing) sessionService.destroy(existing.id);
+  const session = sessionService.create(role, name);
+  res.cookie(SESSION_COOKIE, session.id, sessionCookieOptions(req));
+  return session;
+}
+
+function sessionCookieOptions(req) {
+  return {
     httpOnly: true,
     sameSite: "strict",
     path: "/",
-    maxAge: MEDIA_COOKIE_MAX_AGE_MS,
+    maxAge: SESSION_COOKIE_MAX_AGE_MS,
     secure: Boolean(req.secure)
-  });
+  };
 }
 
-/** Скасування медіа-cookie (вихід викладача / зміна ролі) */
-function clearMediaCookie(res) {
-  res.clearCookie(MEDIA_COOKIE, { path: "/" });
+/** Скасування сесії на сервері та очищення cookie клієнта (вихід із ролі) */
+function clearSession(req, res) {
+  const existing = readSession(req);
+  if (existing) sessionService.destroy(existing.id);
+  res.clearCookie(SESSION_COOKIE, { path: "/" });
 }
 
-/** Чи присутня валідна медіа-cookie у запиті (порівняння стійке до часу) */
-function hasMediaCookie(req) {
-  const value = parseCookies(req)[MEDIA_COOKIE];
-  if (!value) return false;
-  return safeEqual(value, mediaAuthToken());
+/**
+ * Роль «викладач» для ЧИТАННЯ (каталог /api/files, категорії /api/categories):
+ * PIN у запиті або чинна сесія викладача (її неможливо отримати без PIN).
+ * Без входу — false; викликав відповідає сам (403), лімітатор не чіпає.
+ */
+function isTeacherReader(req) {
+  if (extractPin(req) && isTeacher(req)) return true;
+  const session = readSession(req);
+  return Boolean(session && session.role === "teacher");
+}
+
+/**
+ * Вимога наявної сесії для контентних endpoint-ів (/api/state, heartbeat).
+ * У разі відсутності сам надсилає 401 і повертає null.
+ * PIN викладача у запиті приймається як альтернатива сесії (власні
+ * інструменти вчителя можуть працювати без cookie).
+ */
+function requireViewer(req, res) {
+  if (extractPin(req) && isTeacher(req)) return { pin: true };
+  const session = readSession(req);
+  if (session) return session;
+  res.status(401).send("Сесію не знайдено — увійдіть заново");
+  return null;
+}
+
+/**
+ * Ідентичність для МЕДІАЗАПИТІВ (/files, /slides, /api/slides/info):
+ * викладач (PIN або teacher-сесія) або учасник із чинною сесією.
+ * Без входу — 401; далі право на конкретний файл вирішує mediaAccess.
+ */
+function mediaIdentity(req, res) {
+  if (extractPin(req) && isTeacher(req)) return { isTeacher: true };
+  const session = readSession(req);
+  if (session) return { isTeacher: session.role === "teacher", session };
+  res.status(401).send("Сесію не знайдено — увійдіть заново");
+  return null;
 }
 
 function clientKey(req) {
@@ -106,6 +150,8 @@ function clientKey(req) {
  * Мовчазна перевірка ролі «викладач» (для розділених ресурсів: список файлів,
  * стрімінг, слайди). Невдалий PIN з урахуванням ліміту спроб зараховується,
  * але відповідь не змінюється — для клієнта це просто «не викладач».
+ * Відсутність PIN не зараховується як спроба (інакше анонімні GET-запити
+ * вичерпували б лімітатор і блокували роботу вчителя з того самого IP).
  */
 function isTeacher(req) {
   const pin = extractPin(req);
@@ -121,21 +167,6 @@ function isTeacher(req) {
 
   pinLimiter.registerFailure(key);
   return false;
-}
-
-/**
- * Роль «викладач» для МЕДІАЗАПИТІВ (Issue #63, доробка).
- *
- * <img>/<video>/слайди не вміють додавати заголовки, тому раніше PIN
- * передавався через ?pin= у URL — він потрапляв в історію браузера (відкриття
- * зображення в новій вкладці), журнали звернень і адресний рядок. Тепер
- * браузер сам додає HttpOnly cookie, видану при вході викладача.
- *
- * Медіа-cookie діє ЛИШЕ для медіазапитів: операції керування (/api/control,
- * завантаження, приховування тощо) і надалі вимагають справжній PIN.
- */
-function isTeacherMedia(req) {
-  return isTeacher(req) || hasMediaCookie(req);
 }
 
 /**
@@ -186,10 +217,12 @@ module.exports = {
   safeEqual,
   extractPin,
   isTeacher,
-  isTeacherMedia,
+  isTeacherReader,
   requirePin,
   requirePinJson,
-  issueMediaCookie,
-  clearMediaCookie,
-  hasMediaCookie
+  issueSession,
+  clearSession,
+  readSession,
+  requireViewer,
+  mediaIdentity
 };

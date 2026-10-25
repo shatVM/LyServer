@@ -22,11 +22,9 @@ let localPageCount = 1;
 
 // Shared demo state
 let lastRevision = -1;
-// Issue #63 (Етап 4): окремий лічильник ревізії для оновлення КАТАЛОГУ.
-// lastRevision не оновлюється, коли демо не активне (там pollState завершується
-// раніше), тож використовувати його для каталогу означало б перечитування
-// /api/files що 0.5 с. Тут фіксуємо лише ревізії, які уже обробили.
-let lastCatalogRevision = -1;
+// Issue #63 (Етап 5): окремого лічильника для каталогу більше немає —
+// учнівський каталог прибрано, а викладач перечитує /api/files лише після
+// власних операцій, тому опитувати його за ревізією кожні 0.5 с не треба.
 let sharedState = null;
 let lastVideoUpdate = 0;
 let videoElement = null;
@@ -105,11 +103,13 @@ async function sendHeartbeat(activeOverride) {
     ? activeOverride
     : document.visibilityState !== "hidden";
   try {
-    await fetch("/api/presence/heartbeat", {
+    const response = await fetch("/api/presence/heartbeat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ studentId: ensureStudentId(), name: studentDisplayName, active })
     });
+    // Issue #63 (Етап 5): сесію скасовано (перезапуск сервера) — вхід заново
+    if (response.status === 401) handleSessionExpired();
   } catch { /* silent */ }
 }
 
@@ -306,8 +306,34 @@ function renderStudentsList(list) {
 // ---------------------------------------------------------------------------
 // API
 // ---------------------------------------------------------------------------
+/**
+ * Issue #63 (Етап 5): 401 на будь-якому контентному запиті означає, що сесії
+ * більше немає (перезапуск сервера, вихід, скасування старої cookie) — усі
+ * попередні входи невалідні, тому користувач проходить вхід заново.
+ */
+let sessionExpiredHandled = false;
+
+function handleSessionExpired() {
+  if (sessionExpiredHandled) return;
+  sessionExpiredHandled = true;
+  stopHeartbeat();
+  stopTeacherHeartbeat();
+  stopPresencePolling();
+  role = "";
+  pin = "";
+  localStorage.setItem("portalRole", "");
+  sessionStorage.removeItem("portalPin");
+  updateRoleUI();
+  openRoleModal();
+  showToast("Сесію завершено (перезапуск сервера або вихід) — увійдіть заново.", "warning", 8000);
+}
+
 async function api(url, options = {}) {
   const response = await fetch(url, options);
+  if (response.status === 401) {
+    handleSessionExpired();
+    throw new Error("Сесію не знайдено — увійдіть заново");
+  }
   if (!response.ok) {
     const message = await response.text();
     throw new Error(message || ("HTTP " + response.status));
@@ -361,11 +387,14 @@ function formatSize(bytes) {
 }
 
 function fileUrl(name) {
-  // Issue #63 (доробка): PIN більше НЕ передається у URL медіа (?pin= потрапляв
-  // в історію браузера при відкритті зображення в новій вкладці, у журнали
-  // звернень і в адресний рядок). Замість цього викладач отримує HttpOnly
-  // медіа-cookie при вході (POST /api/auth/verify), і браузер сам додає її до
+  // Issue #63 (доробка/Етап 5): PIN більше НЕ передається у URL медіа (?pin=
+  // потрапляв в історію браузера при відкритті зображення в новій вкладці, у
+  // журнали звернень і в адресний рядок). Замість цього сесія видається
+  // HttpOnly cookie при вході (POST /api/auth/verify для вчителя,
+  // POST /api/auth/session для учня), і браузер сам додає її до
   // <img>/<video>/слайдів — у мережевих запитах URL лишається чистим.
+  // Без чинної сесії медіа недоступні (401), після перезапуску сервера сесія
+  // відновлюється лише повторним входом.
   // API-запити, як і раніше, авторизуються заголовком X-Portal-Pin.
   return "/files/" + encodeURIComponent(name);
 }
@@ -639,11 +668,14 @@ function closeRoleModal() {
 function setRole(newRole, newPin = "", newName = "") {
   const prevRole = role;
   role = newRole;
+  sessionExpiredHandled = false;
   localStorage.setItem("portalRole", newRole);
-  // Issue #63 (доробка): вихід викладача або перехід на роль учня скасовує
-  // HttpOnly медіа-cookie — інакше в цьому браузері лишився б доступ до
-  // прихованих медіафайлів після завершення сеансу викладача
-  if (prevRole === "teacher" && newRole !== "teacher") {
+  // Issue #63 (Етап 5): завершення ролі скасовує СЕРВЕРНУ сесію — інакше у
+  // цьому браузері (або у копії cookie) лишився б доступ до стану показу та
+  // медіафайлів після виходу. Перехід на ІНШУ роль сесію не чіпає: там нову
+  // сесію вже видало /api/auth/verify чи /api/auth/session (інакше logout
+  // тут же знищив би щойно видану сесію нової ролі)
+  if (prevRole && !newRole) {
     fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
   }
   if (newRole === "teacher") {
@@ -703,7 +735,7 @@ const NAME_PART_RE = /^[А-Яа-яЄєІіЇїҐґA-Za-z'’\-]+$/;
 
 // Student login button
 if ($("btnChooseStudent")) {
-  $("btnChooseStudent").onclick = () => {
+  $("btnChooseStudent").onclick = async () => {
     const fullName = ($("modalStudentName") ? $("modalStudentName").value.trim() : "");
     const parts = fullName.split(/\s+/).filter(Boolean);
     const valid = parts.length >= 2 && parts.length <= 4 && parts.every(p => NAME_PART_RE.test(p));
@@ -714,8 +746,33 @@ if ($("btnChooseStudent")) {
       }
       return;
     }
+    // Issue #63 (Етап 5): спочатку серверна сесія, потім ролі — інакше перший
+    // же запит стану демонстрації отримав би 401 і скинув би вхід
+    try {
+      await createStudentSession(parts.join(" "));
+    } catch (error) {
+      if ($("modalStudentError")) {
+        $("modalStudentError").textContent = "Не вдалося увійти: " + error.message;
+        $("modalStudentError").style.display = "block";
+      }
+      return;
+    }
     setRole("student", "", parts.join(" "));
   };
+}
+
+/** Issue #63 (Етап 5): вхід учня — POST /api/auth/session (сесія на сервері) */
+async function createStudentSession(name) {
+  const response = await fetch("/api/auth/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name })
+  });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || ("HTTP " + response.status));
+  }
+  return true;
 }
 
 // Enter key in student name field
@@ -767,15 +824,27 @@ if ($("btnPromptTeacherLogin")) {
 // Files list
 // ---------------------------------------------------------------------------
 async function refreshFiles() {
+  // Issue #63 (Етап 5): загальний каталог — лише викладач (сервер повертає
+  // 403 без PIN). Учневі нічого перечитувати: його сторінка показує тільки
+  // активну демонстрацію, тому запит /api/files для не-викладача не робиться.
+  if (role !== "teacher") {
+    files = [];
+    categories = [];
+    updateUploadCategoryOptions();
+    if ($("files")) renderFiles();
+    if (isMaterialsPage || isUploadPage) {
+      setStatus("Каталог недоступний: учні бачать лише активну демонстрацію викладача.");
+    }
+    return;
+  }
   try {
     const headers = {};
-    if (pin && role === "teacher") headers["X-Portal-Pin"] = pin;
+    if (pin) headers["X-Portal-Pin"] = pin;
     const response = await api("/api/files", { headers });
     files = await response.json();
-    // Issue #63 Р: список категорій читається публічно (GET /api/categories) —
-    // учні групують каталог за категоріями, як і викладач
+    // Issue #63 (Етап 5): категорії теж лише для викладача (403 без PIN)
     try {
-      const categoryResponse = await api("/api/categories");
+      const categoryResponse = await api("/api/categories", { headers });
       categories = (await categoryResponse.json()) || [];
     } catch {
       categories = [];
@@ -1227,17 +1296,23 @@ function renderFiles() {
   const root = $("files");
   if (!root) return;
   root.replaceChildren();
+  // Issue #63 (Етап 5): учні не отримують загального каталогу — ні в API,
+  // ні в розмітці. Контроль серверний (/api/files → 403), тут лише стан UI
+  if (role !== "teacher") {
+    root.innerHTML = '<div class="empty">' +
+      "Каталог недоступний. Учні бачать лише те, що викладач демонструє зараз." +
+      '</div>';
+    return;
+  }
   if (!files.length && !(isDemoPage && role === "teacher")) {
-    const msg = role === "teacher"
-      ? "Матеріалів ще немає. Завантажте перший файл."
-      : "Матеріали наразі відсутні. Очікуйте відкриття матеріалів викладачем.";
+    const msg = "Матеріалів ще немає. Завантажте перший файл.";
     root.innerHTML = '<div class="empty">' + msg + '</div>';
     return;
   }
 
   const isTeacher = role === "teacher";
-  // Issue #63 Р: каталог групують категорії для всіх ролей на сторінці
-  // перегляду (учні бачать категорії) та для викладача на «Демонстрації»
+  // Issue #63 Р: каталог групують категорії для викладача («Перегляд
+  // матеріалів» і «Демонстрація»); учнівський каталог прибрано в Етапі 5
   if (isMaterialsPage || (isDemoPage && isTeacher)) {
     renderCategoryGroups(root);
     return;
@@ -1365,10 +1440,10 @@ function stepLocalPage(delta) {
 // Issue #63: два режими однієї сторінки учня («Перегляд матеріалів»)
 // ---------------------------------------------------------------------------
 // Режим визначається за СЕРВЕРНИМ станом демонстрації (/api/state), а не за
-// локальним станом браузера. Початок показу вчителем ховає вибір матеріалів,
-// категорії та самостійну навігацію — учень лише дивиться синхронізовану
-// демонстрацію. Зупинка показу повертає каталог на тій самій сторінці без
-// перезавантаження, і учень знову обирає матеріали самостійно.
+// локальним станом браузера. Початок показу вчителем ховає вибір матеріалів і
+// самостійну навігацію — учасник лише дивиться синхронізовану демонстрацію.
+// Issue #63 (Етап 5): для учня каталог узагалі недоступний (див. refreshFiles),
+// тому після зупинки показу він не «повертається» — він і не був показаний.
 
 function setMaterialsDemoMode(active, state = {}) {
   materialsDemoActive = active;
@@ -1388,12 +1463,12 @@ function setMaterialsDemoMode(active, state = {}) {
     setStatus("Демонстрацію розпочато викладачем.");
     return;
   }
-  // Зупинка демонстрації: каталог і особистий перегляд повертаються на цій
-  // самій сторінці; зміст глядача відновлюється з локального стану
+  // Зупинка демонстрації: викладач повертається до каталогу; для учня каталог
+  // недоступний — лишається очікування наступної демонстрації
   if ($("materialsSubtitle")) {
     $("materialsSubtitle").textContent = role === "teacher"
       ? "Каталог навчальних матеріалів. Ви можете відкривати, транслювати, приховувати та видаляти файли."
-      : "Оберіть матеріал для індивідуального вивчення. Особистий перегляд не впливає на інших учасників.";
+      : "Учні бачать лише активну демонстрацію викладача. Загальний каталог для ролі «учень» недоступний.";
   }
   restoreLocalViewer();
 }
@@ -1418,26 +1493,12 @@ function restoreLocalViewer() {
     return;
   }
   if ($("pdfControls")) $("pdfControls").style.display = "none";
-  if ($("viewerTitle")) $("viewerTitle").textContent = "Особистий перегляд";
-  $("viewer").innerHTML = '<div class="empty">Оберіть файл зі списку та натисніть «Відкрити для себе».</div>';
-}
-
-/**
- * Issue #63 (Етап 4): якщо учень саме переглядав матеріал, який учитель зробив
- * прихованим (або видалив), — коректно завершити цей перегляд і повернути його
- * до актуального каталогу. Викликається після перечитування каталогу в pollState:
- * для учня прихований матеріал зникає з files, отже, локальний перегляд не може
- * тривати. Спільна демонстрація НЕ переривається (учитель має право показувати
- * приховані матеріали) — режим демонстрації перевіряється окремо.
- */
-function closeLocalViewIfHidden() {
-  if (!isMaterialsPage || materialsDemoActive || role === "teacher" || !localCurrentFile) return;
-  const viewing = files.find(f => (f.id === localCurrentFile || f.name === localCurrentFile));
-  if (viewing) return;
-  localCurrentFile = "";
-  localPageNum = 1;
-  localPageCount = 1;
-  restoreLocalViewer();
+  // Issue #63 (Етап 5): у не-викладача каталогу немає — замість підказки
+  // «оберіть файл» показуємо очікування демонстрації
+  if ($("viewerTitle")) $("viewerTitle").textContent = role === "teacher" ? "Особистий перегляд" : "Очікування демонстрації";
+  $("viewer").innerHTML = '<div class="empty">' + (role === "teacher"
+    ? "Оберіть файл зі списку та натисніть «Відкрити для себе»."
+    : "Демонстрацію ще не розпочато. Учні бачать лише те, що транслює викладач.") + '</div>';
 }
 
 // ---------------------------------------------------------------------------
@@ -1720,8 +1781,10 @@ async function changeSharedPage(delta) {
 async function pollState(force = false) {
   // Сторінка перегляду: учні дізнаються про демонстрацію зі СЕРВЕРНОГО стану
   // (та самий шлях при перезавантаженні чи повторному підключенні); викладач
-  // керує показом на сторінці «Демонстрація» і тут не спостерігає
+  // керує показом на сторінці «Демонстрація» і тут не спостерігає.
+  // Issue #63 (Етап 5): без чинного входу стан не опитується (сервер → 401)
   if (!isDemoPage && !isMaterialsPage) return;
+  if (!role) return;
   if (isMaterialsPage && role === "teacher") return;
   try {
     const response = await api("/api/state");
@@ -1729,21 +1792,9 @@ async function pollState(force = false) {
     const prev = sharedState;
     sharedState = state;
 
-    // Issue #63 (Етап 4): нова ревізія — сигнал, що вчитель оновив щось спільне
-    // (зокрема приховав або опублікував матеріал; toggle-hide теж піднімає ревізію
-    // через stateService.touch()). Учень перечитує каталог із сервера: прихований
-    // матеріал зникає, опублікований з'являється — без перезавантаження сторінки,
-    // через НАЯВНИЙ механізм /api/state (без окремого каналу сповіщень).
-    // Лічильник тут окремий від lastRevision (див. коментар біля його оголошення).
-    if (role !== "teacher") {
-      if (force) {
-        lastCatalogRevision = state.revision;
-      } else if (state.revision !== lastCatalogRevision) {
-        lastCatalogRevision = state.revision;
-        await refreshFiles();
-        closeLocalViewIfHidden();
-      }
-    }
+    // Issue #63 (Етап 5): каталог для не-викладача не перечитується — учень
+    // його взагалі не отримує (/api/files → 403). Зміни видимості вчителя
+    // позначаються ревізією, але впливають лише на медіа активного показу.
 
     // Issue #63: перемикання режимів сторінки учня без перезавантаження —
     // за серверним станом демонстрації (початок ховає каталог, зупинка повертає)
@@ -1757,9 +1808,11 @@ async function pollState(force = false) {
         if (!force && $("viewer")) {
           $("viewer").innerHTML = '<div class="empty">Очікування початку демонстрації від викладача…</div>';
         }
-        setStatus("Показ ще не розпочато.");
+        setStatus(role === "teacher" ? "Показ ще не розпочато." : "Демонстрацію не ведеться. Каталог недоступний — дочекайтеся показу викладача.");
       } else {
-        setStatus("Демонстрацію не ведеться. Каталог доступний для самостійного перегляду.");
+        setStatus(role === "teacher"
+          ? "Каталог доступний."
+          : "Демонстрацію не ведеться. Каталог недоступний — дочекайтеся показу викладача.");
       }
       return;
     }
@@ -1796,7 +1849,9 @@ async function pollState(force = false) {
       applyingRemote = false;
     }
   } catch {
-    setStatus("Зв'язок із сервером втрачено. Повторна спроба…");
+    // Issue #63 (Етап 5): 401 уже оброблено окремо (вхід заново) — не лякаємо
+    // повідомленням про втрату зв'язку, коли причина саме в завершеній сесії
+    if (!sessionExpiredHandled) setStatus("Зв'язок із сервером втрачено. Повторна спроба…");
   }
 }
 
@@ -2070,12 +2125,41 @@ if ($("upload") && $("uploadFile")) {
 // шукають ім'я файлу у масиві files і без нього показують сирий id (гонка двох
 // паралельних fetch на завантаженні сторінки)
 let filesReady = Promise.resolve();
+
+/**
+ * Issue #63 (Етап 5): відновлення серверної сесії при завантаженні сторінки.
+ *
+ * PIN зберігається лише в sessionStorage (на одну вкладку), а cookie сесії —
+ * на сервері. Після перезапуску LyServer усі попередні сесії скасовані, тому:
+ *  - викладач без PIN у цій вкладці проходить вхід заново (форма ролі);
+ *  - викладач із PIN проходить повторну верифікацію — стара cookie невалідна;
+ *  - учень дізнається про скасування з першого ж запиту стану (401 → вхід).
+ * Поки сесію не відновлено, опитування стану не починається (гонка з verify).
+ */
+async function bootstrapSession() {
+  if (role !== "teacher") return;
+  if (!pin) {
+    handleSessionExpired();
+    return;
+  }
+  try {
+    const response = await fetch("/api/auth/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin })
+    });
+    if (!response.ok) handleSessionExpired();
+  } catch {
+    /* сервер недоступний — стан опитування повідомить про помилку зв'язку */
+  }
+}
+
 if (!role) {
   openRoleModal();
   updateRoleUI();
 } else {
   updateRoleUI();
-  filesReady = refreshFiles();
+  filesReady = bootstrapSession().then(() => refreshFiles());
 }
 
 if (isDemoPage) {
@@ -2115,15 +2199,6 @@ if (role === "teacher") {
   // Issue #63: heartbeat викладача — без нього активний показ зупиняється
   // автоматично, коли вчитель іде (вкладка, «Вийти», зв'язок)
   startTeacherHeartbeat();
-  // Issue #63 (доробка): оновлюємо HttpOnly медіа-cookie. При перезавантаженні
-  // сторінки PIN береться з sessionStorage, але cookie видавався лише при
-  // вході — без оновлення <img>/<video> викладача втратили б доступ після
-  // вичерпання терміну дії; запит нічого не змінює, якщо PIN невірний
-  if (pin) {
-    fetch("/api/auth/verify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pin })
-    }).catch(() => {});
-  }
+// Issue #63 (Етап 5): сесію викладача відновлює bootstrapSession() перед
+// першим pollState — окремо оновлювати cookie тут уже не потрібно
 }

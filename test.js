@@ -8,6 +8,45 @@ const base = `http://127.0.0.1:${PORT}`;
 // Діагностика CI: лог запущеного екземпляра сервера (stdout/stderr/exit)
 let SERVER_LOG = "";
 
+// ---------------------------------------------------------------------------
+// Issue #63 (Етап 5): сесії входу.
+// Контентні endpoint-ів (/api/state, /files, /slides, heartbeat) вимагають
+// чинної сесії, тому тести логіняться окремо для кожної інстанції сервера.
+// Сесія — HttpOnly cookie `ly_session`, значення — випадковий id на сервері;
+// після перезапуску сервера вона стає недійсною (див. restart нижче).
+// ---------------------------------------------------------------------------
+const sessions = new Map(); // base URL інстанції -> значення ly_session
+
+async function studentLogin(b = base, name = "Тестовий Учень", register = true) {
+  const r = await fetch(b + "/api/auth/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name })
+  });
+  const m = (r.headers.get("set-cookie") || "").match(/ly_session=([^;]+)/);
+  const value = m ? m[1] : "";
+  // register=false — окремий «другий клієнт»: не замінює основну сесію у map
+  if (value && register) sessions.set(b, value);
+  return { status: r.status, cookie: value };
+}
+
+/** Заголовки учнівської сесії для контентних запитів */
+function sess(b = base) {
+  const value = sessions.get(b) || "";
+  return value ? { Cookie: "ly_session=" + value } : {};
+}
+
+/** Заголовки сесії викладача (зберігаємо окремо — вона йде від /auth/verify) */
+let teacherSession = "";
+function tSess() {
+  return teacherSession ? { Cookie: "ly_session=" + teacherSession } : {};
+}
+
+function extractSessionCookie(res) {
+  const m = (res.headers.get("set-cookie") || "").match(/ly_session=([^;]+)/);
+  return m ? m[1] : "";
+}
+
 const results = [];
 function check(name, ok, info = "") {
   results.push({ Test: name, Result: ok ? "PASS" : "FAIL", Info: info });
@@ -48,16 +87,21 @@ async function waitForHealth(url, tries = 40) {
 }
 
 async function main() {
-  // --- Основний екземпляр сервера ---
-  const child = spawn(process.execPath, ["server.js"], {
-    env: { ...process.env, PORT: String(PORT), PORTAL_PIN: PIN },
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  child.stdout.on("data", (chunk) => { SERVER_LOG += chunk; });
-  child.stderr.on("data", (chunk) => { SERVER_LOG += chunk; });
-  child.on("exit", (code, signal) => {
-    SERVER_LOG += `[server exit] code=${code} signal=${signal}\n`;
-  });
+  // --- Основний екземпляр сервера (перезапуск перевіряємо в кінці, див. Issue #63) ---
+  function startServer() {
+    const proc = spawn(process.execPath, ["server.js"], {
+      env: { ...process.env, PORT: String(PORT), PORTAL_PIN: PIN },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    proc.stdout.on("data", (chunk) => { SERVER_LOG += chunk; });
+    proc.stderr.on("data", (chunk) => { SERVER_LOG += chunk; });
+    proc.on("exit", (code, signal) => {
+      SERVER_LOG += `[server exit] code=${code} signal=${signal}\n`;
+    });
+    return proc;
+  }
+
+  let child = startServer();
 
   try {
     if (!(await waitForHealth(base))) {
@@ -80,6 +124,21 @@ async function main() {
       body: JSON.stringify({ pin: PIN })
     });
     check("Верифікація PIN викладача", r.status === 200, `status=${r.status}`);
+    // Issue #63 (Етап 5): вхід видає серверну сесію (HttpOnly cookie ly_session)
+    teacherSession = extractSessionCookie(r);
+    check(
+      "Вхід викладача видає серверну сесію (ly_session)",
+      teacherSession.length >= 32,
+      `cookieLen=${teacherSession.length}`
+    );
+
+    // Issue #63 (Етап 5): окрема сесія учня для контентних endpoint-ів
+    const studentLoginResult = await studentLogin(base, "Коваленко Олена");
+    check(
+      "Вхід учня видає серверну сесію (ly_session)",
+      studentLoginResult.status === 200 && studentLoginResult.cookie.length >= 32,
+      `status=${studentLoginResult.status}, cookieLen=${studentLoginResult.cookie.length}`
+    );
 
     // 2. Завантаження PDF викладачем
     r = await fetch(`${base}/api/upload?name=${encodeURIComponent("Тестовий файл.pdf")}`, {
@@ -98,9 +157,12 @@ async function main() {
 
     try {
       // 3. Issue #8: конвертація відбувається одразу після завантаження
+      // Issue #63 (Етап 5): /api/slides/info потребує сесії або PIN
       let manifest = null;
       for (let i = 0; i < 60; i++) {
-        const res = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`);
+        const res = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`, {
+          headers: { "X-Portal-Pin": PIN }
+        });
         const data = await res.json();
         if (data.ready) {
           manifest = data;
@@ -114,14 +176,21 @@ async function main() {
         manifest ? `pageCount=${manifest.pageCount}` : "не готово за 60 с"
       );
 
-      // 4. Учень отримує зображення, сирий PDF закритий
+      // 4. Медіа: без входу — 401; учень поза активним показом — 404;
+      //    викладач бачить і PNG-слайди, і сирий PDF
       r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`);
+      check("Issue #63 (Етап 5): медіа без входу → 401", r.status === 401, `status=${r.status}`);
+
+      r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`, { headers: sess() });
+      check("Issue #63 (Етап 5): слайди поза показом для учня → 404", r.status === 404, `status=${r.status}`);
+
+      r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`, { headers: sess() });
+      check("Issue #63 (Етап 5): сирий PDF поза показом для учня → 404", r.status === 404, `status=${r.status}`);
+
+      r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1?pin=${PIN}`);
       const img = Buffer.from(await r.arrayBuffer());
       const isPng = img.length > 8 && img.slice(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-      check("Issue #8: учень отримує PNG-слайд", r.status === 200 && isPng, `status=${r.status}`);
-
-      r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`);
-      check("Issue #8: сирий PDF закритий для учня", r.status === 403, `status=${r.status}`);
+      check("Issue #8: викладач отримує PNG-слайд", r.status === 200 && isPng, `status=${r.status}`);
 
       r = await fetch(`${base}/files/${encodeURIComponent(fileId)}?pin=${PIN}`);
       check("Викладач: сирий PDF доступний", r.status === 200, `status=${r.status}`);
@@ -144,7 +213,7 @@ async function main() {
       // 6. Issue #4: прихований файл недоступний учням
       // Issue #63 Етап 4 §2: ревізія /api/state ДО зміни видимості — порівняємо
       // після, щоб показати миттєву синхронізацію через наявний механізм стану
-      const s4RevBeforeHide = (await (await fetch(base + "/api/state")).json()).revision;
+      const s4RevBeforeHide = (await (await fetch(base + "/api/state", { headers: sess() })).json()).revision;
       r = await fetch(`${base}/api/files/toggle-hide`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -152,33 +221,39 @@ async function main() {
       });
       check("Викладач: приховування файлу", r.status === 200, `status=${r.status}`);
 
-      // Issue #63 Етап 4 §2: ДВА незалежні учнівські клієнти опитують /api/state
-      // і каталог: обидва бачать нову ревізію (сигнал перечитати каталог) та
-      // актуальний список матеріалів — без перезавантаження сторінки
-      const s4StateA = await (await fetch(base + "/api/state")).json();
-      const s4StateB = await (await fetch(base + "/api/state")).json();
-      const s4StudentListA = await (await fetch(base + "/api/files")).json();
-      const s4StudentListB = await (await fetch(base + "/api/files")).json();
+      // Issue #63 Етап 4 §2 + Етап 5: ДВА незалежні клієнти учнів опитують
+      // /api/state — обидва бачать нову ревізію; а от каталог і його metadata
+      // для них ЗАКРИТІ на сервері (не приховуванням кнопок, а відповіддю 403)
+      const s4StateA = await (await fetch(base + "/api/state", { headers: sess() })).json();
+      const s4StateB = await (await fetch(base + "/api/state", { headers: sess() })).json();
+      const s4StudentFilesRes = await fetch(base + "/api/files", { headers: sess() });
+      const s4StudentCatsRes = await fetch(base + "/api/categories", { headers: sess() });
       check(
-        "Issue #63 Е4: два учнівські клієнти бачать нову ревізію та актуальний каталог",
+        "Issue #63 Е4: два клієнти учнів бачать нову ревізію, каталог для них закритий",
         s4StateA.revision > s4RevBeforeHide &&
           s4StateB.revision === s4StateA.revision &&
-          !s4StudentListA.some((f) => f.id === fileId) &&
-          !s4StudentListB.some((f) => f.id === fileId),
-        JSON.stringify({ before: s4RevBeforeHide, a: s4StateA.revision, b: s4StateB.revision })
+          s4StudentFilesRes.status === 403 &&
+          s4StudentCatsRes.status === 403,
+        JSON.stringify({ before: s4RevBeforeHide, a: s4StateA.revision, b: s4StateB.revision, files: s4StudentFilesRes.status, cat: s4StudentCatsRes.status })
       );
 
-      const studentList = await (await fetch(base + "/api/files")).json();
+      // Issue #63 (Етап 5): загальний каталог недоступний і взагалі без входу
+      const noAuthFiles = await fetch(base + "/api/files");
+      const noAuthState = await fetch(base + "/api/state");
       check(
-        "Issue #4: прихованого файлу немає в каталозі учня",
-        !studentList.some((f) => f.id === fileId)
+        "Issue #63 (Етап 5): без входу каталог → 403, стан демонстрації → 401",
+        noAuthFiles.status === 403 && noAuthState.status === 401,
+        `files=${noAuthFiles.status}, state=${noAuthState.status}`
       );
+
+      r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`, { headers: sess() });
+      check("Issue #4: прихований файл закритий для учня (/files)", r.status === 404, `status=${r.status}`);
 
       r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`);
-      check("Issue #4: прихований файл закритий (/files)", r.status === 404, `status=${r.status}`);
+      check("Issue #63 (Етап 5): медіа взагалі без входу → 401", r.status === 401, `status=${r.status}`);
 
-      r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`);
-      check("Issue #4: приховані слайди закриті (/slides)", r.status === 404, `status=${r.status}`);
+      r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`, { headers: sess() });
+      check("Issue #4: приховані слайди закриті для учня (/slides)", r.status === 404, `status=${r.status}`);
 
       r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1?pin=${PIN}`);
       check("Викладач: приховані слайди доступні", r.status === 200, `status=${r.status}`);
@@ -188,14 +263,46 @@ async function main() {
       // доступ через query-pin (той самий extractPin, що й заголовок X-Portal-Pin)
       r = await fetch(`${base}/files/${encodeURIComponent(fileId)}?pin=${PIN}`);
       check("Issue #63 Е4: викладач відкриває прихований файл через query-pin", r.status === 200, `status=${r.status}`);
-      r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`);
-      check("Issue #63 Е4: той самий файл без PIN лишається закритим", r.status === 404, `status=${r.status}`);
+      r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`, { headers: sess() });
+      check("Issue #63 Е4: той самий файл для учня лишається закритим (404)", r.status === 404, `status=${r.status}`);
 
-      // Issue #63 Р: публічне /api/slides/info теж не розкриває прихований файл
-      r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`);
+      // Issue #63 Р + Етап 5: /api/slides/info теж не розкриває прихований файл
+      r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`, { headers: sess() });
       check("Issue #63 Р: прихований файл закритий у /api/slides/info (учень)", r.status === 404, `status=${r.status}`);
       r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}&pin=${PIN}`);
       check("Issue #63 Р: /api/slides/info прихованого файлу з PIN (викладач)", r.status === 200, `status=${r.status}`);
+
+      // Issue #63 (Етап 5): чинна СЕСІЯ учня не авторизує жодної операції
+      // керування — сервер вимагає PIN (403), а не прихований кнопку в UI
+      const mgmtControl = await fetch(base + "/api/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...sess() },
+        body: JSON.stringify({ file: fileId, kind: "slides", page: 1, time: 0, playing: false })
+      });
+      const mgmtUpload = await fetch(base + "/api/upload?name=" + encodeURIComponent("учень-спроба.pdf"), {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream", ...sess() },
+        body: TINY_PDF_BODY
+      });
+      const mgmtDelete = await fetch(base + "/api/files/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...sess() },
+        body: JSON.stringify({ file: fileId })
+      });
+      const mgmtCategories = await fetch(base + "/api/categories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...sess() },
+        body: JSON.stringify({ name: "Учнівська категорія" })
+      });
+      check(
+        "Issue #63 (Етап 5): сесія учня не авторизує керування (контроль/завантаження/видалення/категорії → 403)",
+        mgmtControl.status === 403 && mgmtUpload.status === 403 &&
+          mgmtDelete.status === 403 && mgmtCategories.status === 403,
+        JSON.stringify({
+          control: mgmtControl.status, upload: mgmtUpload.status,
+          del: mgmtDelete.status, cat: mgmtCategories.status
+        })
+      );
 
       await fetch(`${base}/api/files/toggle-hide`, {
         method: "POST",
@@ -203,23 +310,26 @@ async function main() {
         body: JSON.stringify({ pin: PIN, file: fileId, hidden: false })
       });
 
-      // Issue #63 Етап 4 §2: публікація матеріалу — ревізія зростає знову, і
-      // обидва клієнти отримують файл у каталозі на наступному опитуванні
-      const s4StateShow = await (await fetch(base + "/api/state")).json();
-      const s4ListShowA = await (await fetch(base + "/api/files")).json();
-      const s4ListShowB = await (await fetch(base + "/api/files")).json();
+      // Issue #63 Етап 4 §2 + Етап 5: публікація матеріалу піднімає ревізію —
+      // обидва клієнти учнів це бачать; а от каталог і надалі для них закритий
+      // (загального каталогу в ролі «учень» не існує), тож метадані недоступні
+      const s4StateShow = await (await fetch(base + "/api/state", { headers: sess() })).json();
+      const s4CatShowA = await fetch(base + "/api/files", { headers: sess() });
+      const s4CatShowB = await fetch(base + "/api/categories", { headers: sess() });
+      const s4TeacherList = await (await fetch(base + "/api/files", { headers: { "X-Portal-Pin": PIN } })).json();
       check(
-        "Issue #63 Е4: після публікації ревізія зросла і файл повернувся в каталог учнів",
+        "Issue #63 Е4: після публікації ревізія зросла, а каталог учнів лишається закритим",
         s4StateShow.revision > s4StateA.revision &&
-          s4ListShowA.some((f) => f.id === fileId) &&
-          s4ListShowB.some((f) => f.id === fileId),
-        JSON.stringify({ hiddenRev: s4StateA.revision, showRev: s4StateShow.revision })
+          s4CatShowA.status === 403 &&
+          s4CatShowB.status === 403 &&
+          s4TeacherList.some((f) => f.id === fileId),
+        JSON.stringify({ hiddenRev: s4StateA.revision, showRev: s4StateShow.revision, studentFiles: s4CatShowA.status })
       );
 
       // ---------------------------------------------------------------------
-      // Issue #63 (доробка): 1) медіа активної демонстрації прихованого
-      // матеріалу для учня (серверна перевірка на кожен запит); 2) медіа-cookie
-      // викладача замість ?pin= у URL (PIN не потрапляє в історію/журнали).
+      // Issue #63 (доробка/Етап 5): 1) медіа активної демонстрації прихованого
+      // матеріалу для учня (серверна перевірка на кожен запит); 2) вхід обох
+      // ролей через серверну сесію (HttpOnly cookie), скасовувану перезапуском.
       // ---------------------------------------------------------------------
 
       // (а) приховуємо PDF-тестофайл для перевірок доступу
@@ -230,44 +340,44 @@ async function main() {
       });
       check("Issue #63 Д: приховування файлу перед перевірками медіа", r.status === 200, `status=${r.status}`);
 
-      // (б) вхід викладача видає HttpOnly медіа-cookie з похідним токеном
+      // (б) вхід викладача видає HttpOnly cookie серверної сесії (ly_session)
       r = await fetch(base + "/api/auth/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pin: PIN })
       });
       const dSetCookie = r.headers.get("set-cookie") || "";
-      const dCookieMatch = dSetCookie.match(/ly_media_auth=([^;]+)/);
+      const dCookieMatch = dSetCookie.match(/ly_session=([^;]+)/);
       const dCookie = dCookieMatch ? dCookieMatch[1] : "";
       check(
-        "Issue #63 Д: вхід викладача видає HttpOnly SameSite=Strict медіа-cookie",
+        "Issue #63 (Етап 5): вхід викладача видає HttpOnly SameSite=Strict cookie сесії",
         r.status === 200 && Boolean(dCookie) && /HttpOnly/i.test(dSetCookie) && /SameSite=Strict/i.test(dSetCookie),
         dSetCookie.slice(0, 160) || `status=${r.status}`
       );
       check(
-        "Issue #63 Д: у cookie похідний токен, а не сам PIN",
+        "Issue #63 (Етап 5): у cookie випадковий id сесії, а не сам PIN",
         Boolean(dCookie) && dCookie !== PIN && dCookie.length >= 32,
         dCookie ? `length=${dCookie.length}` : "cookie відсутня"
       );
 
       if (dCookie) {
-        // (в) медіа-cookie відкриває медіа прихованого файлу — без ?pin= у URL
-        const dHdr = { Cookie: `ly_media_auth=${dCookie}` };
+        // (в) сесія викладача відкриває медіа прихованого файлу — без ?pin= у URL
+        const dHdr = { Cookie: `ly_session=${dCookie}` };
         r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`, { headers: dHdr });
-        check("Issue #63 Д: медіа-cookie відкриває прихований файл викладачу (/files)", r.status === 200, `status=${r.status}`);
+        check("Issue #63 Д: сесія викладача відкриває прихований файл (/files)", r.status === 200, `status=${r.status}`);
         r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`, { headers: dHdr });
-        check("Issue #63 Д: медіа-cookie відкриває приховані слайди викладачу (/slides)", r.status === 200, `status=${r.status}`);
+        check("Issue #63 Д: сесія викладача відкриває приховані слайди (/slides)", r.status === 200, `status=${r.status}`);
         r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`, { headers: dHdr });
-        check("Issue #63 Д: медіа-cookie працює в /api/slides/info", r.status === 200, `status=${r.status}`);
+        check("Issue #63 Д: сесія викладача працює в /api/slides/info", r.status === 200, `status=${r.status}`);
         // (г) підроблена cookie та cookie без прав керування
-        r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`, { headers: { Cookie: "ly_media_auth=" + "ab".repeat(32) } });
-        check("Issue #63 Д: підроблена медіа-cookie не дає доступу", r.status === 404, `status=${r.status}`);
+        r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`, { headers: { Cookie: "ly_session=" + "ab".repeat(32) } });
+        check("Issue #63 Д: підроблена cookie сесії не дає доступу", r.status === 401, `status=${r.status}`);
         r = await fetch(base + "/api/control", {
           method: "POST",
-          headers: { "Content-Type": "application/json", Cookie: `ly_media_auth=${dCookie}` },
+          headers: { "Content-Type": "application/json", Cookie: `ly_session=${dCookie}` },
           body: JSON.stringify({ page: 1 })
         });
-        check("Issue #63 Д: медіа-cookie НЕ авторизує операції керування", r.status === 403, `status=${r.status}`);
+        check("Issue #63 Д: сесія НЕ авторизує операції керування (потрібен PIN)", r.status === 403, `status=${r.status}`);
       }
 
       // (д) ПОКАЗ прихованого PDF: учень бачить медіа, але не каталог
@@ -278,10 +388,21 @@ async function main() {
       });
       check("Issue #63 Д: показ прихованого матеріалу запущено", r.status === 200, `status=${r.status}`);
 
-      r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`);
+      r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`, { headers: sess() });
       check("Issue #63 Д: учень отримує слайди прихованого матеріалу під час показу", r.status === 200, `status=${r.status}`);
 
-      r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`);
+      // Issue #63 (Етап 5): два НЕЗАЛЕЖНІ клієнти учнів (окремі сесії) одночасно
+      // отримують медіа активної демонстрації
+      const secondStudent = await studentLogin(base, "Іваненко Петро", false);
+      const twoA = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`, { headers: sess() });
+      const twoB = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`, { headers: { Cookie: `ly_session=${secondStudent.cookie}` } });
+      check(
+        "Issue #63 (Етап 5): два клієнти учнів одночасно отримують медіа показу",
+        twoA.status === 200 && twoB.status === 200 && twoA.status === twoB.status,
+        `a=${twoA.status}, b=${twoB.status}`
+      );
+
+      r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`, { headers: sess() });
       const dInfo = r.status === 200 ? await r.json() : {};
       check(
         "Issue #63 Д: /api/slides/info готовий для учня під час показу прихованого",
@@ -289,20 +410,21 @@ async function main() {
         `status=${r.status}, ready=${dInfo.ready}`
       );
 
-      const dStudentList = await (await fetch(base + "/api/files")).json();
+      const dCatStatus = (await fetch(base + "/api/files", { headers: sess() })).status;
       check(
-        "Issue #63 Д: у каталозі учня прихований матеріал НЕ з'являється під час показу",
-        !dStudentList.some((f) => f.id === fileId)
+        "Issue #63 (Етап 5): під час показу каталог для учня лишається закритим (403)",
+        dCatStatus === 403,
+        `status=${dCatStatus}`
       );
 
-      const dState = await (await fetch(base + "/api/state")).json();
+      const dState = await (await fetch(base + "/api/state", { headers: sess() })).json();
       check(
         "Issue #63 Д: стан показу містить оригінальну назву для заголовка учня",
         dState.file === fileId && typeof dState.fileName === "string" && dState.fileName.length > 0,
         JSON.stringify({ file: dState.file, fileName: dState.fileName })
       );
 
-      r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`);
+      r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`, { headers: sess() });
       check(
         "Issue #63 Д: сирий PDF для учня закритий і під час показу (лише слайди)",
         r.status === 403,
@@ -341,14 +463,14 @@ async function main() {
         });
         check("Issue #63 Д: показ прихованого відео-матеріалу запущено", r.status === 200, `status=${r.status}`);
 
-        r = await fetch(`${base}/files/${encodeURIComponent(dVideoId)}`);
+        r = await fetch(`${base}/files/${encodeURIComponent(dVideoId)}`, { headers: sess() });
         const dVideoBack = Buffer.from(await r.arrayBuffer());
         check(
           "Issue #63 Д: учень отримує медіа відео під час його показу",
           r.status === 200 && dVideoBack.length === dVideoBytes.length,
           `status=${r.status}, len=${dVideoBack.length}`
         );
-        r = await fetch(`${base}/files/${encodeURIComponent(dVideoId)}`);
+        r = await fetch(`${base}/files/${encodeURIComponent(dVideoId)}`, { headers: sess() });
         const dVideoAfterSwitch0 = r.status;
         // Перемикання показу на інший матеріал
         await fetch(base + "/api/control", {
@@ -356,7 +478,7 @@ async function main() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ pin: PIN, file: fileId, kind: "slides", page: 1 })
         });
-        r = await fetch(`${base}/files/${encodeURIComponent(dVideoId)}`);
+        r = await fetch(`${base}/files/${encodeURIComponent(dVideoId)}`, { headers: sess() });
         check(
           "Issue #63 Д: після перемикання показу доступ до попереднього прихованого зникає",
           dVideoAfterSwitch0 === 200 && r.status === 404,
@@ -369,19 +491,19 @@ async function main() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ pin: PIN, stop: true })
         });
-        r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`);
+        r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`, { headers: sess() });
         check(
           "Issue #63 Д: після завершення показу прихований PDF знову закритий",
           r.status === 404,
           `status=${r.status}`
         );
-        r = await fetch(`${base}/files/${encodeURIComponent(dVideoId)}`);
+        r = await fetch(`${base}/files/${encodeURIComponent(dVideoId)}`, { headers: sess() });
         check(
           "Issue #63 Д: після завершення показу приховане відео знову закрите",
           r.status === 404,
           `status=${r.status}`
         );
-        r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`);
+        r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`, { headers: sess() });
         check(
           "Issue #63 Д: після завершення показу /api/slides/info теж закритий",
           r.status === 404,
@@ -397,12 +519,20 @@ async function main() {
       });
 
       // 7. Issue #7: присутність і активність сесії
+      // Issue #63 (Етап 5): без чинної сесії присутність не реєструється
       r = await fetch(`${base}/api/presence/heartbeat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ studentId: "s_test_0", name: "Без входу", active: true })
+      });
+      check("Присутність: heartbeat без сесії → 401", r.status === 401, `status=${r.status}`);
+
+      r = await fetch(`${base}/api/presence/heartbeat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...sess() },
         body: JSON.stringify({ studentId: "s_test_1", name: "Тестовий Учень", active: true })
       });
-      check("Присутність: heartbeat активного учня", r.status === 200, `status=${r.status}`);
+      check("Присутність: heartbeat активного учня (з сесією)", r.status === 200, `status=${r.status}`);
 
       r = await fetch(`${base}/api/presence/students`);
       check("Присутність: список без PIN → 403", r.status === 403, `status=${r.status}`);
@@ -414,7 +544,7 @@ async function main() {
       // Неактивна сесія через form-data (як navigator.sendBeacon)
       await fetch(`${base}/api/presence/heartbeat`, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: { "Content-Type": "application/x-www-form-urlencoded", ...sess() },
         body: new URLSearchParams({ studentId: "s_test_1", name: "Тестовий Учень", active: "false" })
       });
       list = await (await fetch(`${base}/api/presence/students?pin=${PIN}`)).json();
@@ -718,13 +848,15 @@ async function main() {
         Boolean(e3F1 && e3F2) && e3F1.description === e3Desc && e3F2.description === "",
         JSON.stringify({ withDesc: e3F1 && e3F1.description, noDesc: e3F2 && e3F2.description })
       );
-      // Учень бачить опис видимого файлу (лише читання), приховані — закриті (Е2/Е4)
-      e3List = await (await fetch(base + "/api/files")).json();
-      const e3Student = e3List.find((f) => f.id === e3WithDesc.id);
+      // Issue #63 (Етап 5): учень не отримує загального каталогу — разом із
+      // описами та іншими метаданими (серверна відповідь 403, не приховування
+      // кнопок в інтерфейсі); приховані матеріали в ньому не фільтруються,
+      // бо каталогу для ролі «учень» просто не існує
+      const e3StudentCat = await fetch(base + "/api/files", { headers: sess() });
       check(
-        "Issue #63 Е3: учень бачить опис видимого файлу",
-        Boolean(e3Student) && e3Student.description === e3Desc,
-        JSON.stringify(e3Student && e3Student.description)
+        "Issue #63 (Етап 5): описи й метадані каталогу недоступні учневі (403)",
+        e3StudentCat.status === 403,
+        `status=${e3StudentCat.status}`
       );
 
       // Наддовгий опис обрізається до config.maxDescriptionLength (500)
@@ -747,14 +879,12 @@ async function main() {
       // Issue #63 Етап 4: категорії, сумісність метаданих, порядок і права доступу.
       r = await fetch(base + "/api/categories", { headers: { "X-Portal-Pin": PIN } });
       check("Issue #63 Е4: категорії доступні викладачу з PIN", r.status === 200, "status=" + r.status);
-      // Issue #63 Р: читання категорій публічне — учні групують каталог
-      r = await fetch(base + "/api/categories");
-      const studentCategories = r.status === 200 ? await r.json() : [];
+      // Issue #63 (Етап 5): читання категорій — теж лише викладачем
+      r = await fetch(base + "/api/categories", { headers: sess() });
       check(
-        "Issue #63 Р: учень отримує список категорій для каталогу",
-        r.status === 200 && Array.isArray(studentCategories) &&
-          studentCategories.every(category => typeof category.id === "string" && typeof category.name === "string"),
-        `status=${r.status}, count=${Array.isArray(studentCategories) ? studentCategories.length : "n/a"}`
+        "Issue #63 (Етап 5): читання категорій закрито для учня (403)",
+        r.status === 403,
+        `status=${r.status}`
       );
       // Зміна категорій залишається за викладачем
       r = await fetch(base + "/api/categories", {
@@ -802,24 +932,21 @@ async function main() {
         const teacherCategorized = teacherCategoryList.find(item => item.id === e3WithDesc.id);
         check("Issue #63 Е4: категорія присутня у списку викладача", Boolean(teacherCategorized && teacherCategorized.categoryId === e4Category.id));
 
-        r = await fetch(base + "/api/files");
-        const studentCategoryList = await r.json();
-        const studentCategorized = studentCategoryList.filter(item => item.id === e3WithDesc.id);
-        // Issue #63 Р: учень отримує categoryId для групування (без дублікатів),
-        // але порядок (order) і стан конвертації, як і раніше, не розкриваються
+        r = await fetch(base + "/api/files", { headers: sess() });
+        // Issue #63 (Етап 5): у ролі «учень» немає ні каталогу, ні його
+        // метаданих (categoryId, order, conversionStatus) — відповідь 403
         check(
-          "Issue #63 Р: учень отримує categoryId для групування без дублікатів",
-          studentCategorized.length === 1 && studentCategorized[0].categoryId === e4Category.id &&
-            !("order" in studentCategorized[0]) && !("conversionStatus" in studentCategorized[0]) &&
-            !("conversionError" in studentCategorized[0]),
-          JSON.stringify(studentCategorized[0] && studentCategorized[0].categoryId)
+          "Issue #63 (Етап 5): учень не отримує каталог із категоріями (403)",
+          r.status === 403,
+          `status=${r.status}`
         );
         // Матеріали без категорії мають порожній categoryId → «Без категорії»
+        // (перевіряємо по списку викладача — учнівського списку більше немає)
         check(
-          "Issue #63 Р: матеріали без категорії позначені порожнім categoryId",
-          studentCategoryList.some(item => item.categoryId === "") &&
-            studentCategoryList.some(item => item.categoryId === e4Category.id),
-          `total=${studentCategoryList.length}`
+          "Issue #63 Р: у каталозі викладача є й без категорії, й із категорією",
+          teacherCategoryList.some(item => item.categoryId === "") &&
+            teacherCategoryList.some(item => item.categoryId === e4Category.id),
+          `total=${teacherCategoryList.length}`
         );
 
         r = await fetch(base + "/api/files/category", {
@@ -839,15 +966,17 @@ async function main() {
         const parsedOrderMeta = JSON.parse(require("node:fs").readFileSync(metaPath, "utf-8"));
         check("Issue #63 Е4: порядок матеріалів записується на диск", r.status === 200 && Array.isArray(parsedOrderMeta.order) && parsedOrderMeta.order.indexOf(e3NoDesc.id) < parsedOrderMeta.order.indexOf(e3WithDesc.id), JSON.stringify(reordered.order || []));
 
-        // Issue #63 Р: встановлений порядок зберігається в каталозі учня
-        r = await fetch(base + "/api/files");
-        const studentOrderList = await r.json();
-        const studentPosNoDesc = studentOrderList.findIndex(item => item.id === e3NoDesc.id);
-        const studentPosWithDesc = studentOrderList.findIndex(item => item.id === e3WithDesc.id);
+        // Issue #63 Р + Етап 5: порядок викладача зберігається в його каталозі,
+        // а в каталог учня запит узагалі не проходить (403)
+        const teacherOrderList = await (await fetch(base + "/api/files", { headers: { "X-Portal-Pin": PIN } })).json();
+        const teacherPosNoDesc = teacherOrderList.findIndex(item => item.id === e3NoDesc.id);
+        const teacherPosWithDesc = teacherOrderList.findIndex(item => item.id === e3WithDesc.id);
+        const studentOrderStatus = (await fetch(base + "/api/files", { headers: sess() })).status;
         check(
-          "Issue #63 Р: порядок викладача зберігається в каталозі учня",
-          studentPosNoDesc >= 0 && studentPosWithDesc >= 0 && studentPosNoDesc < studentPosWithDesc,
-          JSON.stringify(studentOrderList.map(item => item.id))
+          "Issue #63 (Етап 5): порядок викладача в його каталозі, каталог учня закритий",
+          teacherPosNoDesc >= 0 && teacherPosWithDesc >= 0 && teacherPosNoDesc < teacherPosWithDesc &&
+            studentOrderStatus === 403,
+          JSON.stringify({ order: teacherOrderList.map(item => item.id).slice(0, 6), studentStatus: studentOrderStatus })
         );
 
         const originalPath = require("node:path").join(__dirname, "materials", e3WithDesc.id);
@@ -935,7 +1064,7 @@ async function main() {
 
         // Порядок: переміщення вгору реально міняє позицію і зберігається на диску
         // (метадані переживають перезапуск сервера — файл читається всіма екземплярами)
-        r = await fetch(base + "/api/categories");
+        r = await fetch(base + "/api/categories", { headers: { "X-Portal-Pin": PIN } });
         let s4Cats = r.status === 200 ? await r.json() : [];
         const s4PosB = s4Cats.findIndex(category => category.id === s4CatB.id);
         r = await fetch(base + "/api/categories/reorder", {
@@ -944,7 +1073,7 @@ async function main() {
           body: JSON.stringify({ pin: PIN, categoryId: s4CatB.id, direction: "up" })
         });
         const s4Reorder = r.status === 200 ? await r.json() : {};
-        s4Cats = await (await fetch(base + "/api/categories")).json();
+        s4Cats = await (await fetch(base + "/api/categories", { headers: { "X-Portal-Pin": PIN } })).json();
         const s4NewPosB = s4Cats.findIndex(category => category.id === s4CatB.id);
         const s4MetaPath = require("node:path").join(__dirname, "materials", ".metadata.json");
         const s4DiskMeta = JSON.parse(require("node:fs").readFileSync(s4MetaPath, "utf-8"));
@@ -994,16 +1123,15 @@ async function main() {
         });
         const s4RenFile = r.status === 200 ? await r.json() : {};
         const s4TeacherList = await (await fetch(base + "/api/files", { headers: { "X-Portal-Pin": PIN } })).json();
-        const s4StudentList = await (await fetch(base + "/api/files")).json();
+        const s4StudentListStatus = (await fetch(base + "/api/files", { headers: sess() })).status;
         const s4TeacherOne = s4TeacherList.find(item => item.id === e3NoDesc.id);
-        const s4StudentOne = s4StudentList.find(item => item.id === e3NoDesc.id);
         check(
-          "Issue #63 §3.2: нову назву бачать і вчитель, і учень; id та вміст не змінені",
+          "Issue #63 §3.2 + Етап 5: назву бачить викладач, id та вміст не змінені, каталог учня закритий",
           r.status === 200 && s4RenFile.file === e3NoDesc.id && s4RenFile.name === "Етап4 перейменований" &&
             Boolean(s4TeacherOne) && s4TeacherOne.name === "Етап4 перейменований" &&
-            Boolean(s4StudentOne) && s4StudentOne.name === "Етап4 перейменований" &&
+            s4StudentListStatus === 403 &&
             require("node:fs").existsSync(require("node:path").join(__dirname, "materials", e3NoDesc.id)),
-          JSON.stringify({ teacher: s4TeacherOne && s4TeacherOne.name, student: s4StudentOne && s4StudentOne.name })
+          JSON.stringify({ teacher: s4TeacherOne && s4TeacherOne.name, studentStatus: s4StudentListStatus })
         );
 
         r = await fetch(base + "/api/files/rename", {
@@ -1034,7 +1162,7 @@ async function main() {
       check("Issue #63 Е4: upload запускає фонову конвертацію та фіксує помилку", apiControllerSource.includes("slideService.ensureSlides(result.id)") && apiControllerSource.includes('.then(manifest =>') && apiControllerSource.includes('setConversionStatus(result.id, "failed", conversionError)'));
       const fileServiceSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "services", "fileService.js"), "utf-8");
       check(
-        "Issue #63 Р: учень отримує categoryId, але не порядок і стан конвертації; неготові слайди відфільтровано",
+        "Issue #63 Р: у списку матеріалів є categoryId, але не порядок і стан конвертації; неготові слайди відфільтровано",
         fileServiceSource.includes('item.conversionStatus === "ready"') &&
           fileServiceSource.includes('conversionStatus === "ready" && !manifestReady') &&
           fileServiceSource.includes('categoryId: categoryIds.has(info.categoryId) ? info.categoryId : ""') &&
@@ -1076,10 +1204,11 @@ async function main() {
           s4CssSource.includes("object-fit: contain")
       );
       check(
-        "Issue #63 Е4: клієнт перечитує каталог на новій ревізії та закриває перегляд прихованого",
-        appSource.includes("lastCatalogRevision = state.revision") &&
-          appSource.includes("function closeLocalViewIfHidden()") &&
-          appSource.includes("await refreshFiles();")
+        "Issue #63 (Етап 5): клієнт читає каталог лише в ролі викладача, опитування — лише з входом",
+        appSource.includes('if (role !== "teacher") {') &&
+          appSource.includes("if (!role) return;") &&
+          appSource.includes("createStudentSession") &&
+          !appSource.includes("lastCatalogRevision")
       );
       const s4StateServiceSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "services", "stateService.js"), "utf-8");
       check(
@@ -1107,28 +1236,38 @@ async function main() {
           s4UrlSlice.includes('return "/slides/" + encodeURIComponent(name) + "/" + page;')
       );
       check(
-        "Issue #63 Д: HttpOnly медіа-cookie — видача, скасування, isTeacherMedia",
-        s4AuthSource.includes("function issueMediaCookie") &&
-          s4AuthSource.includes("function clearMediaCookie") &&
-          s4AuthSource.includes("function isTeacherMedia") &&
+        "Issue #63 (Етап 5): серверні сесії — видача, скасування, входи обох ролей",
+        s4AuthSource.includes("function issueSession") &&
+          s4AuthSource.includes("function clearSession") &&
+          s4AuthSource.includes("function requireViewer") &&
+          s4AuthSource.includes("function mediaIdentity") &&
           s4AuthSource.includes("httpOnly: true") &&
           s4AuthSource.includes("sameSite: \"strict\"") &&
-          s4AuthSource.includes("function mediaAuthToken") &&
-          apiControllerSource.includes("auth.issueMediaCookie(req, res)") &&
+          s4AuthSource.includes("sessionService") &&
+          !s4AuthSource.includes("mediaAuthToken") &&
+          apiControllerSource.includes('auth.issueSession(req, res, "teacher"') &&
+          apiControllerSource.includes('auth.issueSession(req, res, "student"') &&
+          s4RoutesSource.includes('"/auth/session"') &&
           s4RoutesSource.includes('"/auth/logout"')
       );
       check(
         "Issue #63 Д: серверний дозвіл медіа активної демонстрації (mediaAccess)",
         s4MediaSource.includes("stateService.isCurrentlyDemonstrated(name)") &&
           s4FileCtlSource.includes("canViewMedia(name, isTeacher)") &&
-          s4SlideCtlSource.includes("canViewMedia(name, auth.isTeacherMedia(req))") &&
+          s4SlideCtlSource.includes("canViewMedia(name, identity.isTeacher)") &&
           apiControllerSource.includes("canViewMedia(file, isTeacher)")
       );
       check(
-        "Issue #63 Д: клієнт оновлює cookie при завантаженні викладача і скасовує при виході",
+        "Issue #63 Д: клієнт відновлює сесію при завантаженні і скасовує її при зміні ролі",
         appSource.includes('fetch("/api/auth/verify"') &&
           appSource.includes('fetch("/api/auth/logout"') &&
-          appSource.includes('prevRole === "teacher" && newRole !== "teacher"')
+          appSource.includes('fetch("/api/auth/session"') &&
+          appSource.includes("prevRole && !newRole")
+      );
+      check(
+        "Issue #63 (Етап 5): перезапуск сервера скасовує всі сесії (reset на старті)",
+        require("node:fs").readFileSync(require("node:path").join(__dirname, "server.js"), "utf-8")
+          .includes("sessionService.reset()")
       );
       check(
         "Issue #63 Д: стан показу має назву та isCurrentlyDemonstrated (автозупинку)",
@@ -1157,12 +1296,13 @@ async function main() {
       // не роблять повну перевірку всіх PNG кожного разу — пошкодження вмісту
       // наявного файлу без зміни набору файлів не помічається (кеш валідний).
       // Без кешу validateManifest помітив би це одразу і відповідь була б не ready.
+      // Issue #63 (Етап 5): /api/slides/info потребує сесії або PIN — тут PIN.
       const fsMod = require("node:fs");
       const pageOnePath = require("node:path").join(__dirname, "materials", ".slides", fileId, "page-1.png");
       try {
         const originalPng = fsMod.readFileSync(pageOnePath);
         fsMod.writeFileSync(pageOnePath, Buffer.from("не PNG, а тестове сміття"));
-        r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`);
+        r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`, { headers: { "X-Portal-Pin": PIN } });
         let cacheInfo = await r.json();
         check(
           "Issue #63 Р: навігація/info не сканує весь набір повторно (кеш)",
@@ -1172,7 +1312,7 @@ async function main() {
 
         // Зміна набору файлів (видалення PNG) інвалідовує кеш → не готово
         fsMod.unlinkSync(pageOnePath);
-        r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`);
+        r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`, { headers: { "X-Portal-Pin": PIN } });
         cacheInfo = r.status === 200 ? await r.json() : { ready: false };
         check(
           "Issue #63 Р: видалення PNG інвалідовує кеш перевірки",
@@ -1182,7 +1322,7 @@ async function main() {
 
         // Відновлення файлу (зміна набору) — повна перевірка знову підтверджує готовність
         fsMod.writeFileSync(pageOnePath, originalPng);
-        r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`);
+        r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`, { headers: { "X-Portal-Pin": PIN } });
         cacheInfo = await r.json();
         check(
           "Issue #63 Р: відновлення PNG повертає готовність набору",
@@ -1224,16 +1364,17 @@ async function main() {
       }
 
       if (e5Failed) {
-        // Публічна відповідь (без PIN): лише факт помилки, без тексту помилки
-        r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(e5Id)}`);
+        // Учень поза активним показом: файл для нього не існує (404), отже
+        // ні conversionError, ні жодних подробиць конвертації не буває
+        r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(e5Id)}`, { headers: sess() });
         const e5StudentRaw = await r.text();
         check(
-          "Issue #63 Р: /api/slides/info без PIN не розкриває conversionError",
-          r.status === 200 && !e5StudentRaw.includes("error") && !e5StudentRaw.includes(e5TeacherInfo.error),
+          "Issue #63 (Етап 5): /api/slides/info для учня поза показом → 404 без подробиць",
+          r.status === 404 && !e5StudentRaw.includes("error") && !e5StudentRaw.includes(e5TeacherInfo.error),
           `status=${r.status}, body=${e5StudentRaw}`
         );
         check(
-          "Issue #63 Р: публічна відповідь без локальних шляхів і внутрішніх подробиць",
+          "Issue #63 Р: відповідь без локальних шляхів і внутрішніх подробиць",
           !e5StudentRaw.includes("materials") && !e5StudentRaw.includes(".slides") &&
             !e5StudentRaw.includes("powershell") && !e5StudentRaw.toLowerCase().includes("stdout") &&
             !e5StudentRaw.includes("at ") && !e5StudentRaw.includes("Error:"),
@@ -1246,13 +1387,11 @@ async function main() {
           e5TeacherInfo.error
         );
 
-        // Неготовий матеріал не потрапляє в каталог учня і без conversionError
-        r = await fetch(base + "/api/files");
-        const e5StudentListRaw = await r.text();
-        const e5StudentList = JSON.parse(e5StudentListRaw);
+        // Неготовий матеріал недоступний учневі узагалі (каталог закритий)
+        r = await fetch(base + "/api/files", { headers: sess() });
         check(
-          "Issue #63 Р: неготовий матеріал закритий для учня у /api/files без conversionError",
-          !e5StudentList.some((f) => f.id === e5Id) && !e5StudentListRaw.includes("conversionError") && !e5StudentListRaw.includes("conversionStatus"),
+          "Issue #63 (Етап 5): неготовий матеріал недоступний учневі — каталог закритий (403)",
+          r.status === 403,
           `status=${r.status}`
         );
         // Захищений шлях: викладач бачить стан і причину помилки
@@ -1376,8 +1515,8 @@ async function main() {
       });
       check("Issue #63 Р: викладач запускає демонстрацію", r.status === 200, `status=${r.status}`);
 
-      const studentStateA = await (await fetch(base + "/api/state")).json();
-      const studentStateB = await (await fetch(base + "/api/state")).json();
+      const studentStateA = await (await fetch(base + "/api/state", { headers: sess() })).json();
+      const studentStateB = await (await fetch(base + "/api/state", { headers: sess() })).json();
       check(
         "Issue #63 Р: два учні бачать той самий активний стан демонстрації",
         studentStateA.file === fileId && studentStateB.file === fileId &&
@@ -1391,7 +1530,7 @@ async function main() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ file: fileId, kind: "slides", page: 99 })
       });
-      const stateAfterStudentAttempt = await (await fetch(base + "/api/state")).json();
+      const stateAfterStudentAttempt = await (await fetch(base + "/api/state", { headers: sess() })).json();
       check(
         "Issue #63 Р: самостійні дії учня не змінюють стан демонстрації",
         r.status === 403 && stateAfterStudentAttempt.file === fileId && stateAfterStudentAttempt.page === 1,
@@ -1404,7 +1543,7 @@ async function main() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pin: PIN, stop: true })
       });
-      const stoppedState = await (await fetch(base + "/api/state")).json();
+      const stoppedState = await (await fetch(base + "/api/state", { headers: sess() })).json();
       check(
         "Issue #63 Р: зупинка демонстрації скидає серверний стан (для всіх учнів)",
         r.status === 200 && stoppedState.file === "" && stoppedState.page === 1,
@@ -1447,11 +1586,14 @@ async function main() {
         const wdogUp = await waitForHealth(wdogBase);
         check("Issue #63: екземпляр сервера для тесту автозупинки запущено", wdogUp, "port=" + WDOG_PORT);
         if (wdogUp) {
+          // Issue #63 (Етап 5): на тестовому екземплярі — власна сесія учня
+          await studentLogin(wdogBase, "Учень автозупинки");
+
           // Issue #63 (§3.1): порядок категорій переживає перезапуск сервера —
           // «свіжий» екземпляр читає той самий файл метаданих і повертає той
           // самий перелік у тому самому порядку
-          const mainCats = await (await fetch(base + "/api/categories")).json();
-          const freshCats = await (await fetch(wdogBase + "/api/categories")).json();
+          const mainCats = await (await fetch(base + "/api/categories", { headers: { "X-Portal-Pin": PIN } })).json();
+          const freshCats = await (await fetch(wdogBase + "/api/categories", { headers: { "X-Portal-Pin": PIN } })).json();
           const mainIds = (mainCats || []).map(category => category.id).join(",");
           const freshIds = (freshCats || []).map(category => category.id).join(",");
           check(
@@ -1466,7 +1608,7 @@ async function main() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ pin: PIN, file: fileId, kind: "slides", page: 1 })
           });
-          let wState = await (await fetch(wdogBase + "/api/state")).json();
+          let wState = await (await fetch(wdogBase + "/api/state", { headers: sess(wdogBase) })).json();
           check(
             "Issue #63: показ стартує на тестовому екземплярі",
             r.status === 200 && wState.file === fileId,
@@ -1477,7 +1619,7 @@ async function main() {
           // Перевірка виконується в GET /api/state, який учні опитують саме
           // так, тож тест відтворює реальний шлях відновлення каталогу.
           await delay(3600);
-          wState = await (await fetch(wdogBase + "/api/state")).json();
+          wState = await (await fetch(wdogBase + "/api/state", { headers: sess(wdogBase) })).json();
           check(
             "Issue #63: без вчителя демонстрація зупиняється автоматично",
             wState.file === "" && wState.revision > 0,
@@ -1497,7 +1639,7 @@ async function main() {
             body: "{}"
           });
           await delay(1800);
-          wState = await (await fetch(wdogBase + "/api/state")).json();
+          wState = await (await fetch(wdogBase + "/api/state", { headers: sess(wdogBase) })).json();
           check(
             "Issue #63: heartbeat викладача утримує активний показ",
             r.status === 200 && wState.file === fileId,
@@ -1594,6 +1736,104 @@ async function main() {
       }
     } finally {
       child2.kill();
+    }
+
+    // 11. Issue #63 (Етап 5): ПЕРЕРЕЗАПУСК сервера анулює всі входи.
+    //    Старі cookie викладача й учня відхиляються (401), матеріали та
+    //    метадані зберігаються, а після повторного входу права повертаються.
+    try {
+      const filesBefore = await (await fetch(base + "/api/files", { headers: { "X-Portal-Pin": PIN } })).json();
+      const catsBefore = await (await fetch(base + "/api/categories", { headers: { "X-Portal-Pin": PIN } })).json();
+      const oldTeacherCookie = teacherSession;
+      const oldStudentCookie = sessions.get(base) || "";
+
+      await new Promise((resolve) => {
+        child.once("exit", resolve);
+        child.kill();
+        setTimeout(resolve, 8000);
+      });
+      child = startServer();
+      const restarted = await waitForHealth(base, 60);
+      check("Issue #63 (Етап 5): сервер перезапущено для тесту сесій", restarted, `port=${PORT}`);
+      sessions.delete(base);
+      teacherSession = "";
+
+      if (restarted) {
+        const oldTeacherState = await fetch(base + "/api/state", {
+          headers: { Cookie: `ly_session=${oldTeacherCookie}` }
+        });
+        const oldStudentState = await fetch(base + "/api/state", {
+          headers: { Cookie: `ly_session=${oldStudentCookie}` }
+        });
+        const oldTeacherMedia = await fetch(base + "/files/невіснуючий-файл.pdf", {
+          headers: { Cookie: `ly_session=${oldTeacherCookie}` }
+        });
+        const oldTeacherCatalog = await fetch(base + "/api/files", {
+          headers: { Cookie: `ly_session=${oldTeacherCookie}` }
+        });
+        check(
+          "Issue #63 (Етап 5): старі сесії після перезапуску не відновлюють доступ",
+          oldTeacherState.status === 401 &&
+            oldStudentState.status === 401 &&
+            oldTeacherMedia.status === 401 &&
+            oldTeacherCatalog.status === 403,
+          JSON.stringify({
+            teacherState: oldTeacherState.status,
+            studentState: oldStudentState.status,
+            teacherMedia: oldTeacherMedia.status,
+            teacherCatalog: oldTeacherCatalog.status
+          })
+        );
+
+        // Повторний вхід: ті самі облікові дані, нові сесії
+        const reVerify = await fetch(base + "/api/auth/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN })
+        });
+        teacherSession = extractSessionCookie(reVerify);
+        const reStudent = await studentLogin(base, "Коваленко Олена");
+        const reStudentState = await fetch(base + "/api/state", { headers: sess() });
+        const reTeacherMedia = await fetch(base + "/files/невіснуючий-файл.pdf", { headers: tSess() });
+        check(
+          "Issue #63 (Етап 5): після повторного входу доступ відповідно до ролі",
+          reVerify.status === 200 && Boolean(teacherSession) &&
+            reStudent.status === 200 && Boolean(reStudent.cookie) &&
+            reStudentState.status === 200 &&
+            reTeacherMedia.status === 404 && // 404, а не 401: сесія дійсна, файлу просто немає
+            Boolean(oldTeacherCookie) && teacherSession !== oldTeacherCookie,
+          JSON.stringify({
+            verify: reVerify.status,
+            student: reStudent.status,
+            state: reStudentState.status,
+            teacherMedia: reTeacherMedia.status
+          })
+        );
+
+        // Дані, які зберігаються на диску, перезапуск не чіпає
+        const filesAfter = await (await fetch(base + "/api/files", { headers: { "X-Portal-Pin": PIN } })).json();
+        const catsAfter = await (await fetch(base + "/api/categories", { headers: { "X-Portal-Pin": PIN } })).json();
+        check(
+          "Issue #63 (Етап 5): матеріали та категорії не втрачені після перезапуску",
+          JSON.stringify(filesAfter) === JSON.stringify(filesBefore) &&
+            JSON.stringify(catsAfter) === JSON.stringify(catsBefore),
+          JSON.stringify({ files: filesAfter.length, cats: catsAfter.length })
+        );
+
+        // Після перезапуску лімітатор спроб PIN теж порожній (стан у пам'яті)
+        const postRestartPin = await fetch(base + "/api/auth/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: "0000" })
+        });
+        check(
+          "Issue #63 (Етап 5): після перезапуску лімітатор спроб PIN порожній (не 429)",
+          postRestartPin.status === 403,
+          `status=${postRestartPin.status}`
+        );
+      }
+    } finally {
+      child.kill();
     }
   } finally {
     child.kill();

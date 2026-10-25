@@ -12,33 +12,63 @@ class ApiController {
     if (!auth.requirePinJson(req, res)) return;
     // Вхід учителя = присутність на зв'язку (автозупинка показу при виході)
     presenceService.markTeacherSeen();
-    // Issue #63 (доробка): медіа-cookie замість ?pin= у URL <img>/<video>/слайдів —
-    // HttpOnly, значення — похідний токен (не сам PIN), діє лише для медіазапитів
-    auth.issueMediaCookie(req, res);
+    // Issue #63 (Етап 5): вхід фіксується серверною сесією (HttpOnly cookie),
+    // тому після перезапуску сервера старі cookie не відновлюють доступ
+    auth.issueSession(req, res, "teacher");
     res.json({ ok: true, role: "teacher" });
   }
 
   /**
-   * POST /api/auth/logout — скасування медіа-cookie (вихід викладача або
-   * перехід на роль учня). Ендпоінт навмисно не вимагає PIN: він лише видаляє
-   * cookie самого клієнта, прав він не надає.
+   * POST /api/auth/session { name } — вхід учня (Issue #63, Етап 5).
+   *
+   * Сесія потрібна, щоб стан демонстрації та медіа показу отримували лише
+   * учасники порталу: старі сесії після перезапуску сервера відхиляються
+   * (401), і учень проходить вхід заново. PIN не потрібен — учень лише
+   * вказує показне ім'я; права керування сесія не дає.
+   */
+  createStudentSession(req, res) {
+    const body = req.body || {};
+    const name = typeof body.name === "string" ? body.name.slice(0, 80) : "";
+    const session = auth.issueSession(req, res, "student", name);
+    res.json({ ok: true, role: "student", session: session.id.length > 0 });
+  }
+
+  /**
+   * POST /api/auth/logout — скасування сесії (виходь із ролі викладача або
+   * учня). Сесію знищено на СЕРВЕРІ, тому повторне використання старої cookie
+   * (її копії) вже не дає доступу; клієнту додатково очищається cookie.
+   * Ендпоінт навмисно не вимагає PIN: він лише прибирає доступ самого клієнта.
    */
   logoutMedia(req, res) {
-    auth.clearMediaCookie(res);
+    auth.clearSession(req, res);
     res.json({ ok: true });
   }
 
+  /**
+   * GET /api/files — каталог матеріалів.
+   * Issue #63 (Етап 5): ЛИШЕ викладач (PIN або його сесія). Учень не отримує
+   * загального каталогу (ні прихованого, ні опублікованого): його сторінка
+   * показує лише активну демонстрацію. Без входу — 403 без запису в лімітатор.
+   */
   getFiles(req, res) {
+    if (!auth.isTeacherReader(req)) {
+      return res.status(403).send("Каталог доступний лише викладачу");
+    }
     try {
-      const isTeacher = auth.isTeacher(req);
-      const files = fileService.getFilesList(isTeacher);
+      const files = fileService.getFilesList(true);
       res.json(files);
     } catch (error) {
       res.status(500).send("Не вдалося отримати список файлів: " + error.message);
     }
   }
 
+  /**
+   * GET /api/state — стан активної демонстрації (лише для входилих).
+   * Issue #63 (Етап 5): потрібна чинна сесія (учень/викладач) або PIN;
+   * без входу — 401, після перезапуску сервера старі сесії теж дають 401.
+   */
   getState(req, res) {
+    if (!auth.requireViewer(req, res)) return;
     res.json(stateService.getState());
   }
 
@@ -97,12 +127,16 @@ class ApiController {
   }
   /**
    * GET /api/categories
-   * Issue #63 Р: читання публічне — учні групують каталог за категоріями.
-   * У відповіді лише самі категорії (id, name, order, createdAt) без будь-яких
-   * даних матеріалів; створення, видалення та зміна складу категорій, як і раніше,
-   * потребують PIN викладача (див. createCategory/deleteCategory/setFileCategory).
+   * Issue #63 (Етап 5): читання ЛИШЕ для викладача (PIN або сесія; 403 без
+   * входу). Категорії описують структуру загального каталогу, а учневі каталог
+   * у цілому недоступний — разом із /api/files він закривається серверно, а не
+   * приховуванням кнопок в інтерфейсі. Створення, видалення та зміна складу
+   * категорій, як і раніше, потребують PIN (див. createCategory/...).
    */
   getCategories(req, res) {
+    if (!auth.isTeacherReader(req)) {
+      return res.status(403).send("Категорії доступні лише викладачу");
+    }
     res.json(fileService.getCategories());
   }
 
@@ -232,6 +266,9 @@ class ApiController {
    * GET /api/slides/info?file=<name>
    * Returns cached manifest (pageCount) without conversion.
    *
+   * Issue #63 (Етап 5): без чинної сесії або PIN відповідь — 401; для учня
+   * файл не існує поза активною демонстрацією.
+   *
    * Issue #63 (відгук рев'ю): публічна відповідь для учня містить лише факт
    * готовності/помилки/конвертації — без conversionError, локальних шляхів,
    * stdout/stderr, stack trace чи команд. Діагностика помилки конвертації
@@ -243,7 +280,9 @@ class ApiController {
   getSlideInfo(req, res) {
     const { file } = req.query;
     if (!file) return res.status(400).send("Не вказано file");
-    const isTeacher = auth.isTeacherMedia(req);
+    const identity = auth.mediaIdentity(req, res);
+    if (!identity) return;
+    const isTeacher = identity.isTeacher;
     if (!canViewMedia(file, isTeacher)) {
       return res.status(404).json({ ready: false });
     }

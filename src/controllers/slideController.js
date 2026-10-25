@@ -41,9 +41,11 @@ class SlideController {
 
     // Issue #4: приховані файли недоступні учням (навіть за відомим id),
     // включаючи запуск конвертації.
-    // Issue #63 (доробка): виняток — матеріал, який викладач демонструє
-    // зараз (медіа-cookie викладача або активний показ), див. mediaAccess
-    if (!canViewMedia(name, auth.isTeacherMedia(req))) {
+    // Issue #63 (доробка/Етап 5): медіа-ідентичність — PIN або чинна сесія
+    // (без входу — 401); учень бачить ЛИШЕ медіа активної демонстрації
+    const identity = auth.mediaIdentity(req, res);
+    if (!identity) return;
+    if (!canViewMedia(name, identity.isTeacher)) {
       return res.status(404).send("Файл не знайдено");
     }
 

@@ -14,9 +14,11 @@ class FileController {
       return res.status(400).send("Некоректне ім'я файлу");
     }
 
-    // Issue #63 (доробка): викладач ідентифікується також за HttpOnly
-    // медіа-cookie — у <img>/<video> PIN більше не передається у URL
-    const isTeacher = auth.isTeacherMedia(req);
+    // Issue #63 (доробка/Етап 5): викладач ідентифікується за PIN або HttpOnly
+    // сесією — у <img>/<video> PIN більше не передається у URL. Без входу — 401.
+    const identity = auth.mediaIdentity(req, res);
+    if (!identity) return;
+    const isTeacher = identity.isTeacher;
 
     const filePath = fileService.getFilePath(name);
     if (!filePath || !fs.existsSync(filePath)) {

@@ -17,7 +17,10 @@ router.get("/state", (req, res) => apiController.getState(req, res));
 router.post("/control", (req, res) => apiController.updateControl(req, res));
 router.post("/upload", (req, res) => apiController.uploadFile(req, res));
 router.post("/auth/verify", (req, res) => apiController.verifyAuth(req, res));
-// Issue #63 (доробка): скасування медіа-cookie при виході викладача
+// Issue #63 (Етап 5): вхід учня — серверна сесія (HttpOnly cookie), без PIN.
+// Без неї учень не отримує стан демонстрації та медіа показу.
+router.post("/auth/session", (req, res) => apiController.createStudentSession(req, res));
+// Issue #63 (доробка/Етап 5): вихід — скасування сесії на сервері та cookie
 router.post("/auth/logout", (req, res) => apiController.logoutMedia(req, res));
 router.post("/files/toggle-hide", (req, res) => apiController.toggleHide(req, res));
 router.post("/files/delete", (req, res) => apiController.deleteFile(req, res));

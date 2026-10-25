@@ -11,11 +11,15 @@ class PresenceController {
   /**
    * POST /api/presence/heartbeat
    * Body: { studentId, name, active }
-   * Called every ~2s by each student (HEARTBEAT_MS in public/js/app.js). No auth required.
+   * Called every ~2s by each student (HEARTBEAT_MS in public/js/app.js).
    * Issue #7: поле active — ознака активності сесії (вкладка видима).
    * Приймається і як JSON, і як form-data (для navigator.sendBeacon).
+   * Issue #63 (Етап 5): потрібна чинна сесія входу (401 без неї) — після
+   * перезапуску сервера старі cookie не «відновлюють» присутність учня,
+   * а анонімні клієнти не можуть наповнювати список присутності.
    */
   heartbeat(req, res) {
+    if (!auth.requireViewer(req, res)) return;
     const { studentId, name } = req.body || {};
     if (!studentId || typeof studentId !== "string") {
       return res.status(400).json({ ok: false, message: "Відсутній studentId" });
