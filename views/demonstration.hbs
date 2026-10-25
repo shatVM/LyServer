@@ -27,7 +27,12 @@
         <input id="pageInput" class="page-input" type="number" min="1" step="1" inputmode="numeric" placeholder="№">
         <button id="gotoPage" class="secondary btn-sm">Перейти</button>
       </div>
-      <span class="hint">Керування показом (викладач)</span>
+      <div class="row">
+        <!-- Issue #63: явна зупинка демонстрації — сервер скидає спільний стан,
+             сторінки учнів самі повертаються до самостійного перегляду -->
+        <button id="stopDemo" class="secondary btn-sm" title="Зупинити спільну демонстрацію">⏹ Зупинити демонстрацію</button>
+        <span class="hint">Керування показом (викладач)</span>
+      </div>
     </div>
 
     <!-- Live Viewer for everyone -->
@@ -50,8 +55,13 @@
   </div>
   <div class="upload-box">
     <label for="uploadFile"><strong>Виберіть файли на пристрої:</strong></label>
+    <div class="upload-category-row">
+      <label for="uploadCategory">Категорія для завантажених матеріалів:</label>
+      <select id="uploadCategory"><option value="">Без категорії</option></select>
+      <button id="createCategoryFromUpload" type="button" class="secondary btn-sm"><svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#plus"></use></svg> Створити категорію</button>
+    </div>
     <div style="margin-top:8px">
-      <input id="uploadFile" type="file" multiple accept=".pdf,.pptx,.mp4,.webm,.m4v,.mov,.ogg,.mp3,.wav">
+      <input id="uploadFile" type="file" multiple accept=".pdf,.ppt,.pptx,.mp4,.webm,.m4v,.mov,.ogg,.mp3,.wav">
     </div>
     <!-- Issue #63, Етап 3: черга вибраних файлів — для кожного можна задати
          власний необов'язковий опис (порожній опис = файл без опису) -->
@@ -62,19 +72,59 @@
   </div>
   <div id="uploadStatus" class="status">Оберіть один або кілька файлів для завантаження.</div>
   <p class="hint">
-    PDF та PPTX після завантаження автоматично конвертуються у PNG-слайди; підтримуються файли розміром до 1 ГБ.
+    PDF, PPT та PPTX після завантаження автоматично конвертуються у PNG-слайди; підтримуються файли розміром до 1 ГБ.
     Опис є необов'язковим — його можна залишити порожнім.
   </p>
 </section>
 
-<!-- Issue #63, Етап 2: панель показу матеріалів (заголовок оновлено цим етапом) -->
+<!-- Issue #63, Етап 2: панель показу матеріалів (заголовок оновлено цим етапом).
+     Етап 4 (§3): єдина панель керування вчителя — приватний перегляд, спільна
+     демонстрація, видимість, перейменування, категорії та порядок -->
 <section class="panel demo-controls-panel teacher-only" id="teacherBroadcastPanel" style="display:none">
   <div class="panel-header-row">
     <h3>Матеріали</h3>
-    <button id="refresh" class="secondary btn-sm">🔄 Оновити</button>
+    <div class="row">
+      <!-- Issue #63 (доробка): дві окремі кнопки «Згорнути всі» / «Розгорнути всі» -->
+      <button id="collapseAllCategoriesBtn" type="button" class="secondary btn-sm" title="Згорнути всі категорії" aria-label="Згорнути всі категорії">
+        <svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#arrow-up"></use></svg>
+        <span class="btn-text">Згорнути всі</span>
+      </button>
+      <button id="expandAllCategoriesBtn" type="button" class="secondary btn-sm" title="Розгорнути всі категорії" aria-label="Розгорнути всі категорії">
+        <svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#arrow-down"></use></svg>
+        <span class="btn-text">Розгорнути всі</span>
+      </button>
+      <button id="createCategoryBtn" type="button" class="secondary btn-sm" title="Створити нову категорію">
+        <svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#plus"></use></svg> Створити категорію
+      </button>
+      <button id="refresh" class="secondary btn-sm">🔄 Оновити</button>
+    </div>
   </div>
-  <p class="hint">Оберіть матеріал (включно з прихованими від учнів) для трансляції на спільний екран:</p>
+  <p class="hint">Оберіть матеріал (включно з прихованими від учнів): 👁️ приватний перегляд або 📺 спільна демонстрація. Тут само — видимість, категорії та порядок:</p>
   <div id="files" class="files-list">
     <div class="empty">Завантаження списку…</div>
   </div>
 </section>
+
+<!-- Issue #63 (§3.3): приватний перегляд викладача в модальному вікні.
+     Відкривається дією «👁️ Перегляд», закривається кнопкою ✕ або Escape;
+     не змінює стан спільної демонстрації -->
+<div id="previewModal" class="modal-backdrop preview-backdrop" style="display:none">
+  <div class="modal-card preview-modal-card" role="dialog" aria-modal="true" aria-labelledby="previewModalTitle">
+    <div class="preview-modal-header">
+      <h3 id="previewModalTitle">Приватний перегляд</h3>
+      <button type="button" id="previewClose" class="secondary btn-sm preview-close"
+              aria-label="Закрити приватний перегляд" title="Закрити (Esc)">✕</button>
+    </div>
+    <div class="row preview-controls" id="previewControls" style="display:none">
+      <button type="button" id="previewPrev" class="secondary btn-sm">← Попередня</button>
+      <span class="hint" id="previewPageLabel">Сторінка 1</span>
+      <button type="button" id="previewNext" class="secondary btn-sm">Наступна →</button>
+      <input id="previewPageInput" class="page-input" type="number" min="1" step="1" inputmode="numeric" placeholder="№" aria-label="Номер сторінки">
+      <button type="button" id="previewGoto" class="secondary btn-sm">Перейти</button>
+    </div>
+    <div id="previewViewer" class="preview-viewer">
+      <div class="empty">Завантаження…</div>
+    </div>
+    <p class="hint preview-hint">Приватний перегляд: це вікно бачите лише ви — спільну демонстрацію воно не змінює.</p>
+  </div>
+</div>

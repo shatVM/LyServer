@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const { Transform } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 const config = require("../config");
+const slideService = require("./slideService");
 const { getFilePath, safeFilename } = require("../utils/fileHelpers");
 
 // Ensure data directory exists
@@ -46,41 +47,236 @@ class FileService {
     return idOrName;
   }
 
+  getCategories() {
+    const metadata = this.getMetadata();
+    return (Array.isArray(metadata.categories) ? metadata.categories : [])
+      .filter(item => item && typeof item.id === "string" && typeof item.name === "string")
+      .sort((a, b) => (a.order || 0) - (b.order || 0) || a.name.localeCompare(b.name, "uk"));
+  }
+
+  createCategory(rawName) {
+    const name = String(rawName || "").replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 60);
+    if (!name) throw Object.assign(new Error("Введіть назву категорії"), { status: 400 });
+    const metadata = this.getMetadata();
+    if (!Array.isArray(metadata.categories)) metadata.categories = [];
+    if (metadata.categories.some(category => category.name.toLocaleLowerCase("uk") === name.toLocaleLowerCase("uk"))) {
+      throw Object.assign(new Error("Категорія з такою назвою вже існує"), { status: 409 });
+    }
+    const category = {
+      id: "category_" + crypto.randomBytes(6).toString("hex"),
+      name,
+      order: metadata.categories.length,
+      createdAt: Date.now()
+    };
+    metadata.categories.push(category);
+    this.saveMetadata(metadata);
+    return category;
+  }
+
+  deleteCategory(categoryId) {
+    const metadata = this.getMetadata();
+    if (!Array.isArray(metadata.categories)) metadata.categories = [];
+    const category = metadata.categories.find(item => item.id === categoryId);
+    if (!category) throw Object.assign(new Error("Категорію не знайдено"), { status: 404 });
+    metadata.categories = metadata.categories.filter(item => item.id !== categoryId)
+      .map((item, index) => ({ ...item, order: index }));
+    let affectedFiles = 0;
+    for (const [id, rawInfo] of Object.entries(metadata.files || {})) {
+      if (rawInfo && typeof rawInfo === "object" && rawInfo.categoryId === categoryId) {
+        metadata.files[id] = { ...rawInfo, categoryId: "" };
+        affectedFiles++;
+      }
+    }
+    this.saveMetadata(metadata);
+    return { ok: true, categoryId, affectedFiles };
+  }
+
+  // Issue #63: перейменування категорії вчителем — змінюється лише назва;
+  // id, порядок (order) і createdAt зберігаються, тому посилання матеріалів
+  // на категорію не ламаються.
+  renameCategory(categoryId, rawName) {
+    const name = String(rawName || "").replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 60);
+    if (!name) throw Object.assign(new Error("Некоректна назва категорії"), { status: 400 });
+    const metadata = this.getMetadata();
+    if (!Array.isArray(metadata.categories)) metadata.categories = [];
+    const category = metadata.categories.find(item => item.id === categoryId);
+    if (!category) throw Object.assign(new Error("Категорію не знайдено"), { status: 404 });
+    const duplicate = metadata.categories.some(item => item.id !== categoryId &&
+      String(item.name).toLocaleLowerCase("uk") === name.toLocaleLowerCase("uk"));
+    if (duplicate) throw Object.assign(new Error("Категорія з такою назвою вже існує"), { status: 409 });
+    category.name = name;
+    this.saveMetadata(metadata);
+    return { ok: true, category };
+  }
+
+  // Issue #63: переміщення категорії вгору/вниз. Порядок (order 0..n-1)
+  // зберігається в метаданих, тому переживає перезавантаження сторінки,
+  // інший пристрій і перезапуск сервера. На межі списку — без змін (ідемпотентно).
+  reorderCategory(categoryId, direction) {
+    if (direction !== "up" && direction !== "down") {
+      throw Object.assign(new Error("Напрямок має бути up або down"), { status: 400 });
+    }
+    const metadata = this.getMetadata();
+    const categories = (Array.isArray(metadata.categories) ? metadata.categories : [])
+      .slice()
+      .sort((a, b) => (a.order || 0) - (b.order || 0) || String(a.name).localeCompare(String(b.name), "uk"));
+    const index = categories.findIndex(item => item.id === categoryId);
+    if (index === -1) throw Object.assign(new Error("Категорію не знайдено"), { status: 404 });
+    const target = index + (direction === "up" ? -1 : 1);
+    const moved = target >= 0 && target < categories.length;
+    if (moved) {
+      [categories[index], categories[target]] = [categories[target], categories[index]];
+    }
+    metadata.categories = categories.map((item, position) => ({ ...item, order: position }));
+    this.saveMetadata(metadata);
+    return { ok: true, moved, categories: this.getCategories() };
+  }
+
   getFilesList(isTeacher = false) {
     const metadata = this.getMetadata();
     const hiddenSet = new Set(metadata.hidden);
     const fileMap = metadata.files || {};
+    const categories = Array.isArray(metadata.categories) ? metadata.categories : [];
+    const categoryIds = new Set(categories.map(category => category.id));
+    const order = Array.isArray(metadata.order) ? metadata.order : [];
+    const orderIndex = new Map(order.map((id, index) => [id, index]));
 
     const allFiles = fs.readdirSync(config.dataDir, { withFileTypes: true })
       .filter(item => item.isFile() && !item.name.startsWith("."))
       .map(item => {
         const full = path.join(config.dataDir, item.name);
-        const fileInfo = fileMap[item.name];
-        const displayName = (fileInfo && fileInfo.originalName)
-          ? fileInfo.originalName
-          : item.name;
-
+        const rawInfo = fileMap[item.name];
+        const info = rawInfo && typeof rawInfo === "object"
+          ? rawInfo
+          : { originalName: typeof rawInfo === "string" ? rawInfo : item.name };
+        const ext = path.extname(item.name).toLowerCase();
+        let conversionStatus = info.conversionStatus || "";
+        let conversionError = typeof info.conversionError === "string" ? info.conversionError : "";
+        if (config.slideExtensions.has(ext)) {
+          const manifest = slideService.getManifest(item.name);
+          const manifestReady = manifest && Number.isInteger(manifest.pageCount) && manifest.pageCount > 0;
+          if (conversionStatus === "ready" && !manifestReady) {
+            // Не покладаємося лише на старий прапорець ready, якщо PNG зникли або пошкоджені.
+            conversionStatus = "failed";
+            conversionError = conversionError || "PNG-слайди відсутні або пошкоджені";
+          } else if (!conversionStatus) {
+            if (manifestReady) conversionStatus = "ready";
+            else if (manifest && manifest.converting) conversionStatus = "converting";
+            else conversionStatus = "pending";
+          }
+        }
         return {
-          id: item.name, // The unique disk identifier (e.g. file_1712345678_abcd.pdf)
-          name: displayName, // User-friendly Ukrainian/Cyrillic title
-          ext: path.extname(item.name).toLowerCase(),
+          id: item.name,
+          name: info.originalName || item.name,
+          ext,
           size: fs.statSync(full).size,
           hidden: hiddenSet.has(item.name),
-          // Issue #63 Етап 3: опис матеріалу; старі записи без опису → порожній рядок
-          description: (fileInfo && typeof fileInfo.description === "string")
-            ? fileInfo.description
-            : ""
+          description: typeof info.description === "string" ? info.description : "",
+          categoryId: categoryIds.has(info.categoryId) ? info.categoryId : "",
+          order: orderIndex.has(item.name) ? orderIndex.get(item.name) : Number.MAX_SAFE_INTEGER,
+          conversionStatus,
+          conversionError
         };
       })
       .filter(item => config.allowedExtensions.has(item.ext))
-      .sort((a, b) => a.name.localeCompare(b.name, "uk"));
+      .sort((a, b) => {
+        const aHasOrder = orderIndex.has(a.id), bHasOrder = orderIndex.has(b.id);
+        if (aHasOrder !== bHasOrder) return aHasOrder ? 1 : -1;
+        return aHasOrder ? a.order - b.order : a.name.localeCompare(b.name, "uk");
+      });
 
-    if (isTeacher) {
-      return allFiles;
+    if (isTeacher) return allFiles;
+    // Учням не передаємо порядок (поле order) або внутрішній стан конвертації.
+    // Issue #63 Р: categoryId передається — він потрібен для групування каталогу
+    // учня за категоріями (один матеріал — одна категорія); самі категорії віддає
+    // GET /api/categories. Приховані та неготові матеріали відфільтровуються нижче
+    // й не потрапляють у відповідь учню.
+    // PDF/PPTX доступні лише після підтвердження готового маніфесту.
+    return allFiles
+      .filter(item => !item.hidden &&
+        (!config.slideExtensions.has(item.ext) || item.conversionStatus === "ready"))
+      .map(({ id, name, ext, size, hidden, description, categoryId }) => ({ id, name, ext, size, hidden, description, categoryId }));
+  }
+
+  moveFileToCategory(idOrName, categoryId = "") {
+    const safe = safeFilename(idOrName);
+    const filePath = getFilePath(safe);
+    if (!filePath || !fs.existsSync(filePath)) throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
+    const validCategory = String(categoryId || "");
+    if (validCategory && !this.getCategories().some(category => category.id === validCategory)) {
+      throw Object.assign(new Error("Категорію не знайдено"), { status: 404 });
     }
+    const metadata = this.getMetadata();
+    if (!metadata.files || typeof metadata.files !== "object") metadata.files = {};
+    const current = metadata.files[safe];
+    metadata.files[safe] = {
+      ...(current && typeof current === "object" ? current : { originalName: typeof current === "string" ? current : safe }),
+      categoryId: validCategory
+    };
+    this.saveMetadata(metadata);
+    return { ok: true, file: safe, categoryId: validCategory };
+  }
 
-    // Students only see non-hidden files
-    return allFiles.filter(item => !item.hidden);
+  reorderFile(idOrName, direction) {
+    if (direction !== "up" && direction !== "down") {
+      throw Object.assign(new Error("Напрямок має бути up або down"), { status: 400 });
+    }
+    const safe = safeFilename(idOrName);
+    const filePath = getFilePath(safe);
+    if (!filePath || !fs.existsSync(filePath)) throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
+    const metadata = this.getMetadata();
+    const all = this.getFilesList(true);
+    const current = all.find(item => item.id === safe);
+    if (!current) throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
+    const group = all.filter(item => item.categoryId === current.categoryId);
+    const currentIndex = group.findIndex(item => item.id === safe);
+    const targetIndex = currentIndex + (direction === "up" ? -1 : 1);
+    const ordered = all.map(item => item.id);
+    if (targetIndex >= 0 && targetIndex < group.length) {
+      const a = ordered.indexOf(group[currentIndex].id);
+      const b = ordered.indexOf(group[targetIndex].id);
+      [ordered[a], ordered[b]] = [ordered[b], ordered[a]];
+    }
+    metadata.order = ordered;
+    this.saveMetadata(metadata);
+    return { ok: true, order: ordered };
+  }
+
+  setConversionStatus(idOrName, status, errorMessage = "") {
+    const safe = safeFilename(idOrName);
+    const filePath = getFilePath(safe);
+    if (!filePath || !fs.existsSync(filePath)) return;
+    const metadata = this.getMetadata();
+    if (!metadata.files || typeof metadata.files !== "object") metadata.files = {};
+    const current = metadata.files[safe];
+    metadata.files[safe] = {
+      ...(current && typeof current === "object" ? current : { originalName: typeof current === "string" ? current : safe }),
+      conversionStatus: status
+    };
+    if (errorMessage) metadata.files[safe].conversionError = String(errorMessage).slice(0, 500);
+    else delete metadata.files[safe].conversionError;
+    this.saveMetadata(metadata);
+  }
+  // Issue #63: перейменування матеріалу вчителем — змінюється лише показна
+  // назва (originalName у метаданих); ідентифікатор файлу, шлях до вмісту,
+  // опис і категорія не змінюються, тому наявні посилання не ламаються.
+  renameFile(idOrName, rawName) {
+    const safe = safeFilename(idOrName);
+    const filePath = getFilePath(safe);
+    if (!filePath || !fs.existsSync(filePath)) {
+      throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
+    }
+    const name = String(rawName || "").replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 120);
+    if (!name) throw Object.assign(new Error("Некоректна назва матеріалу"), { status: 400 });
+    const metadata = this.getMetadata();
+    if (!metadata.files || typeof metadata.files !== "object") metadata.files = {};
+    const current = metadata.files[safe];
+    const base = current && typeof current === "object"
+      ? current
+      : { originalName: typeof current === "string" ? current : safe, uploadedAt: Date.now() };
+    metadata.files[safe] = { ...base, originalName: name };
+    this.saveMetadata(metadata);
+    return { ok: true, file: safe, name };
   }
 
   toggleHide(idOrName, shouldHide) {
@@ -128,6 +324,7 @@ class FileService {
     if (metadata.files && metadata.files[safe]) {
       delete metadata.files[safe];
     }
+    if (Array.isArray(metadata.order)) metadata.order = metadata.order.filter(id => id !== safe);
     this.saveMetadata(metadata);
 
     return { ok: true, name: safe };
@@ -136,7 +333,7 @@ class FileService {
   // Issue #63 Етап 3: необов'язковий опис матеріалу (rawDescription) зберігається
   // в наявних метаданих files[id].description; порожній опис не записується,
   // тому формат записів без опису не змінюється (сумісність зі старими даними)
-  async saveFileStream(requestStream, rawOriginalName, rawDescription) {
+  async saveFileStream(requestStream, rawOriginalName, rawDescription, rawCategoryId = "") {
     const orig = path.basename(String(rawOriginalName || "").trim());
     if (!orig) {
       const error = new Error("Некоректне ім'я файлу");
@@ -184,13 +381,22 @@ class FileService {
       // Record correspondence in metadata
       const metadata = this.getMetadata();
       if (!metadata.files) metadata.files = {};
+      const categoryId = String(rawCategoryId || "");
+      if (categoryId && !(Array.isArray(metadata.categories) && metadata.categories.some(category => category.id === categoryId))) {
+        fs.unlinkSync(filePath);
+        throw Object.assign(new Error("Категорію не знайдено"), { status: 400 });
+      }
       metadata.files[fileId] = {
         originalName: orig,
         uploadedAt: Date.now(),
         size: bytes,
-        // Опис додаємо лише за наявності — без опису запис ідентичний старому формату
-        ...(description ? { description } : {})
+        ...(description ? { description } : {}),
+        ...(categoryId ? { categoryId } : {}),
+        ...(config.slideExtensions.has(ext) ? { conversionStatus: "converting" } : {})
       };
+      if (!Array.isArray(metadata.order)) metadata.order = [];
+      metadata.order = metadata.order.filter(id => id !== fileId);
+      metadata.order.push(fileId);
       this.saveMetadata(metadata);
 
       return {
@@ -218,6 +424,19 @@ class FileService {
     const metadata = this.getMetadata();
     const hiddenSet = new Set(metadata.hidden || []);
     return !hiddenSet.has(name);
+  }
+
+  /**
+   * Issue #63 (доробка §3): чи матеріал зараз прихований.
+   * Використовується станом демонстрації (/api/state → blocked): щойно
+   * викладач приховує матеріал, який демонструється, клієнти учнів мають
+   * негайно прибрати його з екрана.
+   */
+  isHidden(name) {
+    const safe = safeFilename(name);
+    if (!safe) return false;
+    const metadata = this.getMetadata();
+    return new Set(metadata.hidden || []).has(safe);
   }
 }
 

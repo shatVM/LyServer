@@ -11,6 +11,7 @@ const fs = require("node:fs");
 const slideService = require("../services/slideService");
 const fileService = require("../services/fileService");
 const auth = require("../utils/auth");
+const { canViewMedia } = require("../utils/mediaAccess");
 const config = require("../config");
 const path = require("node:path");
 
@@ -39,8 +40,12 @@ class SlideController {
     }
 
     // Issue #4: приховані файли недоступні учням (навіть за відомим id),
-    // включаючи запуск конвертації
-    if (!fileService.canAccess(name, auth.isTeacher(req))) {
+    // включаючи запуск конвертації.
+    // Issue #63 (доробка/Етап 5): медіа-ідентичність — PIN або чинна сесія
+    // (без входу — 401); учень бачить ЛИШЕ медіа активної демонстрації
+    const identity = auth.mediaIdentity(req, res);
+    if (!identity) return;
+    if (!canViewMedia(name, identity.isTeacher)) {
       return res.status(404).send("Файл не знайдено");
     }
 
@@ -61,7 +66,13 @@ class SlideController {
         dotfiles: "allow",
         headers: {
           "Content-Type": "image/png",
-          "Cache-Control": "public, max-age=3600"
+          // Issue #63 (аудит кешування): приватний ресурс. Раніше тут було
+          // "public, max-age=3600" — через це учень міг бачити PNG прихованого
+          // матеріалу з локального кешу до години ПІСЛЯ завершення показу.
+          // no-store забороняє зберігати слайд у кеші браузера/спільних кешах,
+          // тому повторний запит після зупинки/перемикання завжди йде на сервер.
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff"
         }
       });
     } catch (error) {

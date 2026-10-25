@@ -4,6 +4,7 @@ const $ = id => document.getElementById(id);
 let role = localStorage.getItem("portalRole") || "";
 let pin = sessionStorage.getItem("portalPin") || "";
 let files = [];
+let categories = [];
 
 // Issue #63 Етап 3: черга не залежить від DOM-поля file input.
 let uploadQueueState = [];
@@ -21,16 +22,44 @@ let localPageCount = 1;
 
 // Shared demo state
 let lastRevision = -1;
+// Issue #63 (доробка): ревізія каталогу. Сервер збільшує state.revision при
+// зміні видимості/складу каталогу (toggle-hide тощо), тому клієнт учня
+// перечитує /api/files на зміну ревізії — публікація або приховування
+// матеріалу викладачем оновлює його список без перезавантаження сторінки.
+// null — перший стан ще не отримано (початкове завантаження вже зроблено
+// refreshFiles при вході).
+let lastCatalogRevision = null;
 let sharedState = null;
 let lastVideoUpdate = 0;
 let videoElement = null;
 let applyingRemote = false;
+
+// Issue #63: режим сторінки «Перегляд матеріалів» (одна сторінка учня).
+// Визначається за СЕРВЕРНИМ станом демонстрації (/api/state), а не за
+// локальним станом браузера: true — триває спільна демонстрація вчителя,
+// вибір матеріалів/категорій і самостійна навігація вимкнені.
+let materialsDemoActive = false;
 
 // Current slide page count in demo
 let demoPageCount = 1;
 
 // Issue #61: файл, для якого вже показано початкову підказку навігації (демонстрація)
 let sharedNavHintFile = null;
+
+// Issue #63 (доробка): номер останнього відображення у спільному глядачі.
+// displaySharedFile асинхронно читає /api/slides/info; якщо за цей час стан
+// уже змінився (інший цикл опитування), відповідь застаріла — малювати її
+// не можна, інакше глядач відкочується до попереднього матеріалу.
+let viewerRenderSeq = 0;
+
+// Issue #63 (доробка): глибина активних циклів опитування стану — див. pollState
+let pollBusyDepth = 0;
+
+// Issue #63 (доробка §3): спільний глядач учня очищено через недоступність
+// активного матеріалу (state.blocked). Прапорець змушує наступне відновлення
+// показу (наприклад, після публікації матеріалу назад) намалювати матеріал
+// навіть за того самого файлу й того самого слайда.
+let sharedViewerCleared = false;
 
 // Determine current page type
 const isDemoPage = Boolean(window.location.pathname.includes("demonstration"));
@@ -39,7 +68,7 @@ const isStudentsPage = Boolean(window.location.pathname.includes("students"));
 const isMaterialsPage = Boolean(!isDemoPage && !isUploadPage && !isStudentsPage);
 
 // Extensions treated as slides (PNG images, not iframes or video)
-const SLIDE_EXTS = new Set([".pdf", ".pptx"]);
+const SLIDE_EXTS = new Set([".pdf", ".ppt", ".pptx"]);
 
 function setStatus(text) {
   if ($("status")) $("status").textContent = text;
@@ -93,11 +122,13 @@ async function sendHeartbeat(activeOverride) {
     ? activeOverride
     : document.visibilityState !== "hidden";
   try {
-    await fetch("/api/presence/heartbeat", {
+    const response = await fetch("/api/presence/heartbeat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ studentId: ensureStudentId(), name: studentDisplayName, active })
     });
+    // Issue #63 (Етап 5): сесію скасовано (перезапуск сервера) — вхід заново
+    if (response.status === 401) handleSessionExpired();
   } catch { /* silent */ }
 }
 
@@ -135,6 +166,66 @@ function reportActivityChange(active) {
     }
   } catch { /* fallback нижче */ }
   sendHeartbeat(active);
+}
+
+// ---------------------------------------------------------------------------
+// Teacher heartbeat (Issue #63: вихід учителя зупиняє демонстрацію)
+// ---------------------------------------------------------------------------
+
+/**
+ * Heartbeat викладача: сервер бачить, що вчитель у сесії. Якщо вчитель
+ * виходить (закрив вкладку, «Вийти», втрата зв'язку) — heartbeat зникає і
+ * сервер сам зупиняє активну демонстрацію, щоб учні не застрягали в режимі
+ * показу без керування (див. stateService.getState).
+ */
+async function sendTeacherHeartbeat() {
+  if (role !== "teacher" || !pin) return;
+  try {
+    await fetch("/api/presence/teacher", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Portal-Pin": pin },
+      body: JSON.stringify({})
+    });
+  } catch { /* silent */ }
+}
+
+let teacherHeartbeatTimer = null;
+
+/** Старт heartbeat викладача (вхід або перезавантаження сторінки) */
+function startTeacherHeartbeat() {
+  if (teacherHeartbeatTimer) clearInterval(teacherHeartbeatTimer);
+  sendTeacherHeartbeat();
+  teacherHeartbeatTimer = setInterval(sendTeacherHeartbeat, HEARTBEAT_MS);
+}
+
+/** Зупинка heartbeat викладача (вихід із ролі) */
+function stopTeacherHeartbeat() {
+  if (teacherHeartbeatTimer) {
+    clearInterval(teacherHeartbeatTimer);
+    teacherHeartbeatTimer = null;
+  }
+}
+
+/**
+ * Закриття вкладки викладачем (pagehide): sendBeacon несе PIN у тілі, бо не
+ * дозволяє заголовки; якщо показ активний — сервер зупиняє його одразу.
+ * Якщо beacon не дійде, сервер доб'є тайм-аутом присутності викладача.
+ */
+function reportTeacherLeave() {
+  if (role !== "teacher" || !pin) return;
+  const body = JSON.stringify({ pin, stop: true });
+  try {
+    if (navigator.sendBeacon &&
+        navigator.sendBeacon("/api/control", new Blob([body], { type: "application/json" }))) {
+      return;
+    }
+  } catch { /* fallback нижче */ }
+  fetch("/api/control", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive: true
+  }).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -234,8 +325,34 @@ function renderStudentsList(list) {
 // ---------------------------------------------------------------------------
 // API
 // ---------------------------------------------------------------------------
+/**
+ * Issue #63 (Етап 5): 401 на будь-якому контентному запиті означає, що сесії
+ * більше немає (перезапуск сервера, вихід, скасування старої cookie) — усі
+ * попередні входи невалідні, тому користувач проходить вхід заново.
+ */
+let sessionExpiredHandled = false;
+
+function handleSessionExpired() {
+  if (sessionExpiredHandled) return;
+  sessionExpiredHandled = true;
+  stopHeartbeat();
+  stopTeacherHeartbeat();
+  stopPresencePolling();
+  role = "";
+  pin = "";
+  localStorage.setItem("portalRole", "");
+  sessionStorage.removeItem("portalPin");
+  updateRoleUI();
+  openRoleModal();
+  showToast("Сесію завершено (перезапуск сервера або вихід) — увійдіть заново.", "warning", 8000);
+}
+
 async function api(url, options = {}) {
   const response = await fetch(url, options);
+  if (response.status === 401) {
+    handleSessionExpired();
+    throw new Error("Сесію не знайдено — увійдіть заново");
+  }
   if (!response.ok) {
     const message = await response.text();
     throw new Error(message || ("HTTP " + response.status));
@@ -250,16 +367,59 @@ function esc(value) {
   })[ch]);
 }
 
+function iconSvg(name) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.classList.add("ui-icon");
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  use.setAttribute("href", "/icons.svg#" + name);
+  svg.append(use);
+  return svg;
+}
+
+/**
+ * Issue #63 (Етап 4): кнопка дії над матеріалом — іконка + підпис (.btn-label).
+ * На мобільному підпис ховається CSS-ом (лише іконки), тому НАЗВА дії завжди
+ * продубльована в aria-label/title: кнопка лишається зрозумілою для клавіатури
+ * та скринрідера і має достатній розмір натискання (див. .file-actions у CSS).
+ */
+function actionButton(className, iconName, labelText, title, ariaLabel, onclick) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = className;
+  if (iconName) btn.append(iconSvg(iconName));
+  if (labelText) {
+    const label = document.createElement("span");
+    label.className = "btn-label";
+    label.textContent = labelText;
+    btn.append(label);
+  }
+  if (title) btn.title = title;
+  if (ariaLabel) btn.setAttribute("aria-label", ariaLabel);
+  btn.onclick = onclick;
+  return btn;
+}
+
 function formatSize(bytes) {
   if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + " КБ";
   return (bytes / (1024 * 1024)).toFixed(1) + " МБ";
 }
 
 function fileUrl(name) {
+  // Issue #63 (доробка/Етап 5): PIN більше НЕ передається у URL медіа (?pin=
+  // потрапляв в історію браузера при відкритті зображення в новій вкладці, у
+  // журнали звернень і в адресний рядок). Замість цього сесія видається
+  // HttpOnly cookie при вході (POST /api/auth/verify для вчителя,
+  // POST /api/auth/session для учня), і браузер сам додає її до
+  // <img>/<video>/слайдів — у мережевих запитах URL лишається чистим.
+  // Без чинної сесії медіа недоступні (401), після перезапуску сервера сесія
+  // відновлюється лише повторним входом.
+  // API-запити, як і раніше, авторизуються заголовком X-Portal-Pin.
   return "/files/" + encodeURIComponent(name);
 }
 
 function slideUrl(name, page) {
+  // Issue #63 (доробка): див. fileUrl — медіа-доступ через cookie, без ?pin= у URL
   return "/slides/" + encodeURIComponent(name) + "/" + page;
 }
 
@@ -277,17 +437,21 @@ function isSlideType(name) {
 // ---------------------------------------------------------------------------
 
 /** Show a single slide image in #viewer */
-function renderSlideImage(name, page, totalPages) {
-  const viewer = $("viewer");
+function renderSlideImage(name, page, totalPages, ctx) {
+  // Issue #63 (§3.3): ctx — цільовий контейнер для модального приватного
+  // прев'ю; без контейнера працює як раніше (спільний/локальний #viewer)
+  const viewer = (ctx && ctx.viewer) || $("viewer");
   if (!viewer) return;
 
   // Update page label
-  if ($("pageLabel")) {
+  const labelEl = ctx && ctx.label !== undefined ? ctx.label : $("pageLabel");
+  if (labelEl) {
     const ext = extOf(name).toUpperCase();
-    $("pageLabel").textContent = ext.slice(1) + ": слайд " + page + " / " + totalPages;
+    labelEl.textContent = ext.slice(1) + ": слайд " + page + " / " + totalPages;
   }
   // Issue #9: поле номера слайду синхронізується з поточним сторінкою
-  if ($("pageInput")) $("pageInput").value = page;
+  const inputEl = ctx && ctx.input !== undefined ? ctx.input : $("pageInput");
+  if (inputEl) inputEl.value = page;
 
   // Build or reuse <img>
   let img = viewer.querySelector("img.slide-img");
@@ -300,24 +464,35 @@ function renderSlideImage(name, page, totalPages) {
   }
 
   img.alt = "Слайд " + page;
-  img.src = slideUrl(name, page) + "?t=" + Date.now(); // cache-bust during prepare
+  // Cache-bust під час конвертації: параметр t додаємо через ? або & залежно
+  // від наявності query (медіа-доступ тепер через cookie, а не через pin у URL)
+  const slideSrc = slideUrl(name, page);
+  img.src = slideSrc + (slideSrc.includes("?") ? "&" : "?") + "t=" + Date.now();
 
   // Show loading overlay only when first loaded
   img.onload = () => {};
   img.onerror = () => {
+    // Якщо цей <img> уже замінено іншим показом (дані зіткнення застаріли),
+    // його відміна не має чіпати поточний вміст глядача
+    if (img.parentNode !== viewer) return;
     viewer.innerHTML = '<div class="empty">⚠️ Помилка завантаження зображення слайду ' + page + '</div>';
   };
 
-  // Issue #61: активні зони лівої/правої половини зображення (ліва — назад, права — уперед)
-  if (slideNavAllowed()) ensureSlideZones(viewer);
+  // Issue #61: активні зони лівої/правої половини зображення (ліва — назад, права — уперед).
+  // Модальне прев'ю передає власний обробник (onZoneStep), щоб приватна
+  // навігація НЕ змінювала спільний стан демонстрації (§3.3)
+  const zoneAllowed = ctx && ctx.zoneAllowed !== undefined ? ctx.zoneAllowed : slideNavAllowed();
+  if (zoneAllowed) ensureSlideZones(viewer, ctx && ctx.onZoneStep);
 }
 
 /**
  * Prepare slides on the server (conversion) and then display the first slide.
  * Shows a progress indicator while converting.
  */
-async function prepareAndShowSlides(name, page, onReady) {
-  const viewer = $("viewer");
+async function prepareAndShowSlides(name, page, onReady, target) {
+  // Issue #63 (§3.3): target — контейнер модального приватного прев'ю;
+  // за замовчуванням, як і раніше, — спільний/локальний #viewer
+  const viewer = target || $("viewer");
   if (viewer) {
     viewer.innerHTML = '<div class="empty slide-loading">🔄 Конвертація слайдів… Зачекайте, будь ласка.</div>';
   }
@@ -326,9 +501,11 @@ async function prepareAndShowSlides(name, page, onReady) {
     let pageCount = null;
     if (role === "teacher") {
       // Викладач може явно запустити конвертацію (Issue #2: prepare — тільки для викладача)
+      // Issue #63 (§3.3): /api/slides/prepare вимагає PIN (Issue #8) — без заголовка
+      // сервер відповідав 403 і приватний перегляд слайдів показував помилку
       const res = await api("/api/slides/prepare", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Portal-Pin": pin },
         body: JSON.stringify({ file: name })
       });
       pageCount = (await res.json()).pageCount;
@@ -364,6 +541,9 @@ const ARROW_SVG = {
 function slideNavAllowed() {
   // Синхронізована демонстрація: спільний слайд змінює лише викладач (чинні правила)
   if (isDemoPage) return role === "teacher";
+  // Issue #63: на сторінці перегляду в режимі спільної демонстрації — аналогічно:
+  // учень лише спостерігає, позицію задає викладач через серверний стан
+  if (isMaterialsPage && materialsDemoActive) return role === "teacher";
   return true; // самостійний перегляд — локальна навігація
 }
 
@@ -383,7 +563,7 @@ function setSlideNavHint(on) {
  * Issue #61: активні зони лівої/правої половини зображення (без текстових підписів).
  * Створюються один раз на контент глядача — обробники подій не дублюються.
  */
-function ensureSlideZones(viewer) {
+function ensureSlideZones(viewer, onStep) {
   if (!viewer || viewer.querySelector(".slide-zone")) return;
 
   ["prev", "next"].forEach(side => {
@@ -418,9 +598,12 @@ function ensureSlideZones(viewer) {
 
     zone.addEventListener("click", () => {
       if (touchScrolled) return;                 // було прокручування, а не натискання
-      if (!slideNavAllowed()) return;            // учень на демонстрації не змінює спільний слайд
-      if (viewer.classList.contains("nav-hint")) setSlideNavHint(false);
-      navigateSlide(side === "prev" ? -1 : 1);   // на межах перемикання не відбувається (кламп)
+      // Модальне прев'ю (onStep) завжди навігує лише свій контейнер; без
+      // обробника — чинне правило: учень на демонстрації не змінює спільний слайд
+      if (!onStep && !slideNavAllowed()) return;
+      viewer.classList.remove("nav-hint");
+      const delta = side === "prev" ? -1 : 1;
+      if (onStep) onStep(delta); else navigateSlide(delta); // на межах перемикання не відбувається (кламп)
     });
 
     viewer.appendChild(zone);
@@ -449,6 +632,25 @@ function updateRoleUI() {
     el.style.display = isTeacher ? "" : "none";
   });
 
+  // Issue #63 (§3 + доробка §1): єдиний робочий простір вчителя — «Демонстрація»
+  // (перегляд, додавання та учні об'єднані там). Пункти цих розділів у
+  // навігації ховаються ЛИШЕ для вчителя, а сторінку «Перегляд матеріалів»
+  // викладачу взагалі закрито: сервер перенаправляє прямий URL на
+  // /demonstration, а клієнт робить те саме після входу на цій сторінці
+  // (див. DECISIONS.md).
+  if (isTeacher) {
+    if ($("navMaterialsLink")) $("navMaterialsLink").style.display = "none";
+    if ($("navUploadLink")) $("navUploadLink").style.display = "none";
+    if ($("navStudentsLink")) $("navStudentsLink").style.display = "none";
+    // Issue #63 (доробка §1): викладач не працює зі сторінкою самостійного
+    // перегляду — одразу переводимо на «Демонстрацію». Спрацьовує і після
+    // входу прямо тут, і коли сесію викладача відновлено на вже відкритій
+    // сторінці (bootstrapSession); циклів немає: /demonstration не перенаправляє
+    if (isMaterialsPage) window.location.replace("/demonstration");
+  } else if ($("navMaterialsLink")) {
+    $("navMaterialsLink").style.display = ""; // повернути після виходу з ролі вчителя
+  }
+
   if (isUploadPage) {
     if ($("studentUploadBlock")) $("studentUploadBlock").style.display = isTeacher ? "none" : "block";
     if ($("teacherUploadBlock")) $("teacherUploadBlock").style.display = isTeacher ? "grid" : "none";
@@ -466,7 +668,10 @@ function updateRoleUI() {
   }
 
   if (isMaterialsPage) {
-    if ($("materialsSubtitle")) {
+    // Issue #63: викладач не спостерігає за демонстрацією на цій сторінці —
+    // після входу з ролі учня повертаємо каталог і локальний перегляд
+    if (isTeacher && materialsDemoActive) setMaterialsDemoMode(false, sharedState || {});
+    if ($("materialsSubtitle") && !materialsDemoActive) {
       $("materialsSubtitle").textContent = isTeacher
         ? "Каталог навчальних матеріалів. Ви можете відкривати, транслювати, приховувати та видаляти файли."
         : "Оберіть матеріал для індивідуального вивчення. Особистий перегляд не впливає на інших учасників.";
@@ -490,8 +695,18 @@ function closeRoleModal() {
 }
 
 function setRole(newRole, newPin = "", newName = "") {
+  const prevRole = role;
   role = newRole;
+  sessionExpiredHandled = false;
   localStorage.setItem("portalRole", newRole);
+  // Issue #63 (Етап 5): завершення ролі скасовує СЕРВЕРНУ сесію — інакше у
+  // цьому браузері (або у копії cookie) лишився б доступ до стану показу та
+  // медіафайлів після виходу. Перехід на ІНШУ роль сесію не чіпає: там нову
+  // сесію вже видало /api/auth/verify чи /api/auth/session (інакше logout
+  // тут же знищив би щойно видану сесію нової ролі)
+  if (prevRole && !newRole) {
+    fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+  }
   if (newRole === "teacher") {
     pin = newPin;
     sessionStorage.setItem("portalPin", newPin);
@@ -507,7 +722,16 @@ function setRole(newRole, newPin = "", newName = "") {
       sendHeartbeat();
     }
   } else {
-    // logout
+    // logout. Вихід учителя (Issue #63): одразу зупинити спільну демонстрацію,
+    // поки є PIN, — інакше учні застрягають у режимі показу без керування.
+    // Якщо запит не дійде, сервер доб'є тайм-аутом присутності викладача.
+    if (prevRole === "teacher") {
+      fetch("/api/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin, stop: true })
+      }).catch(() => {});
+    }
     pin = "";
     sessionStorage.removeItem("portalPin");
     studentDisplayName = "";
@@ -517,14 +741,22 @@ function setRole(newRole, newPin = "", newName = "") {
   }
   closeRoleModal();
   updateRoleUI();
-  refreshFiles();
+  filesReady = refreshFiles();
   // Миттєвий старт опитування, якщо увійшли як викладач у поточній сесії
   // (раніше список оновлювався лише після перезавантаження сторінки)
-  if (newRole === "teacher") startPresencePolling();
-  else stopPresencePolling();
+  if (newRole === "teacher") {
+    startPresencePolling();
+    startTeacherHeartbeat();
+  } else {
+    stopPresencePolling();
+    stopTeacherHeartbeat();
+  }
   // Симетрично: учень, який увійшов у поточній сесії, шле heartbeat одразу
   if (newRole === "student" && studentDisplayName) startHeartbeat();
   else stopHeartbeat();
+  // Issue #63: сторінка перегляду одразу дізнається серверний стан демонстрації
+  // (режим «спостереження» або каталог) — не чекаючи чергового інтервалу
+  if (isMaterialsPage && newRole !== "teacher") filesReady.finally(() => pollState(true));
 }
 
 // Issue #6: одне поле для прізвища та імені
@@ -532,7 +764,7 @@ const NAME_PART_RE = /^[А-Яа-яЄєІіЇїҐґA-Za-z'’\-]+$/;
 
 // Student login button
 if ($("btnChooseStudent")) {
-  $("btnChooseStudent").onclick = () => {
+  $("btnChooseStudent").onclick = async () => {
     const fullName = ($("modalStudentName") ? $("modalStudentName").value.trim() : "");
     const parts = fullName.split(/\s+/).filter(Boolean);
     const valid = parts.length >= 2 && parts.length <= 4 && parts.every(p => NAME_PART_RE.test(p));
@@ -543,8 +775,33 @@ if ($("btnChooseStudent")) {
       }
       return;
     }
+    // Issue #63 (Етап 5): спочатку серверна сесія, потім ролі — інакше перший
+    // же запит стану демонстрації отримав би 401 і скинув би вхід
+    try {
+      await createStudentSession(parts.join(" "));
+    } catch (error) {
+      if ($("modalStudentError")) {
+        $("modalStudentError").textContent = "Не вдалося увійти: " + error.message;
+        $("modalStudentError").style.display = "block";
+      }
+      return;
+    }
     setRole("student", "", parts.join(" "));
   };
+}
+
+/** Issue #63 (Етап 5): вхід учня — POST /api/auth/session (сесія на сервері) */
+async function createStudentSession(name) {
+  const response = await fetch("/api/auth/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name })
+  });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || ("HTTP " + response.status));
+  }
+  return true;
 }
 
 // Enter key in student name field
@@ -596,14 +853,36 @@ if ($("btnPromptTeacherLogin")) {
 // Files list
 // ---------------------------------------------------------------------------
 async function refreshFiles() {
+  // Issue #63 (доробка): самостійний перегляд опублікованих матеріалів
+  // відновлено. Без входу каталогу немає (сервер → 403, а перший запит після
+  // втрати сесії → 401); для учня сервер віддає ЛИШЕ опубліковані та готові
+  // матеріали, для викладача — повний каталог (включно з прихованим).
+  if (!role) {
+    files = [];
+    categories = [];
+    updateUploadCategoryOptions();
+    if ($("files")) renderFiles();
+    if (isMaterialsPage || isUploadPage) {
+      setStatus("Увійдіть, щоб бачити каталог матеріалів.");
+    }
+    return;
+  }
   try {
     const headers = {};
-    if (pin && role === "teacher") headers["X-Portal-Pin"] = pin;
+    if (pin) headers["X-Portal-Pin"] = pin;
     const response = await api("/api/files", { headers });
     files = await response.json();
-    if ($("files")) {
-      renderFiles();
+    // Категорії: обидві ролі отримують УСІ створені категорії (Issue #63,
+    // доробка §2); видимість матеріалів усередині визначає /api/files —
+    // для учня сервер віддає лише опубліковані та готові
+    try {
+      const categoryResponse = await api("/api/categories", { headers });
+      categories = (await categoryResponse.json()) || [];
+    } catch {
+      categories = [];
     }
+    updateUploadCategoryOptions();
+    if ($("files")) renderFiles();
     if (isMaterialsPage) setStatus("Каталог доступний. Матеріалів: " + files.length + ".");
     else if (isUploadPage) setStatus("Файлів на сервері: " + files.length + ".");
   } catch (error) {
@@ -611,132 +890,483 @@ async function refreshFiles() {
   }
 }
 
+function updateUploadCategoryOptions() {
+  const select = $("uploadCategory");
+  if (!select) return;
+  const selected = select.value;
+  select.replaceChildren();
+  const uncategorized = document.createElement("option");
+  uncategorized.value = "";
+  uncategorized.textContent = "Без категорії";
+  select.append(uncategorized);
+  for (const category of categories) {
+    const option = document.createElement("option");
+    option.value = category.id;
+    option.textContent = category.name;
+    select.append(option);
+  }
+  if (Array.from(select.options).some(option => option.value === selected)) select.value = selected;
+}
+
+async function createCategory() {
+  if (!pin || role !== "teacher") { setStatus("Необхідно увійти як викладач."); return; }
+  const name = window.prompt("Назва нової категорії:");
+  if (name === null) return;
+  try {
+    await api("/api/categories", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin, name })
+    });
+    await refreshFiles();
+    const created = categories.find(category => category.name.toLocaleLowerCase("uk") === name.trim().toLocaleLowerCase("uk"));
+    if (created && $("uploadCategory")) $("uploadCategory").value = created.id;
+    setStatus("Категорію створено: " + name.trim());
+  } catch (error) { alert("Не вдалося створити категорію: " + error.message); }
+}
+
+// Issue #63 (доробка): дві окремі кнопки «Згорнути всі» / «Розгорнути всі» категорій
+function collapseAllCategories() {
+  categories.forEach(cat => expandedCategoryIds.delete(cat.id));
+  // Перемальовуємо каталог
+  if ($("files")) renderFiles();
+}
+
+function expandAllCategories() {
+  categories.forEach(cat => expandedCategoryIds.add(cat.id));
+  // Перемальовуємо каталог
+  if ($("files")) renderFiles();
+}
+
+async function deleteCategory(category) {
+  if (!pin || role !== "teacher") { alert("Потрібен PIN викладача."); return; }
+  if (!confirm("Видалити категорію «" + category.name + "»? Матеріали залишаться на сервері та перейдуть у «Без категорії».")) return;
+  try {
+    const result = await api("/api/categories/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin, categoryId: category.id })
+    });
+    await refreshFiles();
+    setStatus("Категорію видалено. Матеріалів збережено: " + (result.affectedFiles || 0) + ".");
+  } catch (error) { alert("Не вдалося видалити категорію: " + error.message); }
+}
+
+async function setFileCategory(fileId, categoryId) {
+  try {
+    await api("/api/files/category", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin, file: fileId, categoryId })
+    });
+    await refreshFiles();
+  } catch (error) { alert("Не вдалося перемістити матеріал: " + error.message); }
+}
+
+// Issue #63 (§3.1): перейменування категорії — зберігає id, порядок і склад
+async function renameCategory(category) {
+  if (!pin || role !== "teacher") { alert("Потрібен PIN викладача."); return; }
+  const name = window.prompt("Нова назва категорії:", category.name);
+  if (name === null) return;
+  if (!name.trim()) { alert("Назва категорії не може бути порожньою."); return; }
+  try {
+    await api("/api/categories/rename", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin, categoryId: category.id, name: name.trim() })
+    });
+    await refreshFiles();
+    setStatus("Категорію перейменовано: «" + name.trim() + "».");
+  } catch (error) { alert("Не вдалося перейменувати категорію: " + error.message); }
+}
+
+// Issue #63 (§3.1): переміщення категорії вгору/вниз — порядок на сервері
+async function reorderCategory(category, direction) {
+  if (!pin || role !== "teacher") { alert("Потрібен PIN викладача."); return; }
+  try {
+    await api("/api/categories/reorder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin, categoryId: category.id, direction })
+    });
+    await refreshFiles();
+  } catch (error) { alert("Не вдалося змінити порядок категорій: " + error.message); }
+}
+
+// Issue #63 (§3.2): перейменування матеріалу — лише показна назва на сервері
+async function renameMaterial(fileId, currentName) {
+  if (!pin || role !== "teacher") { alert("Потрібен PIN викладача."); return; }
+  const name = window.prompt("Нова назва матеріалу:", currentName);
+  if (name === null) return;
+  if (!name.trim()) { alert("Назва матеріалу не може бути порожньою."); return; }
+  try {
+    await api("/api/files/rename", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin, file: fileId, name: name.trim() })
+    });
+    await refreshFiles();
+    setStatus("Матеріал перейменовано: «" + name.trim() + "».");
+  } catch (error) { alert("Не вдалося перейменувати матеріал: " + error.message); }
+}
+
+async function reorderMaterial(fileId, direction) {
+  try {
+    await api("/api/files/reorder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin, file: fileId, direction })
+    });
+    await refreshFiles();
+  } catch (error) { alert("Не вдалося змінити порядок: " + error.message); }
+}
+
+async function retrySlideConversion(fileId) {
+  try {
+    const manifest = await prepareSlidesBg(fileId);
+    setStatus("PNG-слайди готові: " + manifest.pageCount + " стор.");
+    await refreshFiles();
+  } catch (error) {
+    setStatus("Помилка конвертації «" + fileId + "»: " + error.message);
+    await refreshFiles();
+  }
+}
+
+function createFileCard(file, isTeacher, showCategoryActions) {
+  const item = document.createElement("div");
+  item.className = "file" + (file.hidden ? " file-is-hidden" : "");
+  const info = document.createElement("div");
+  info.className = "file-info";
+  // Issue #63 (Етап 4): видима текстова мітка «Приховано» прибрана — прихований
+  // стан позначається насиченим червоним оформленням картки (.file-is-hidden).
+  // Для скринрідера стан дублюється службовим текстом, щоб не покладатися лише
+  // на колір; видимий індикатор дії «Приховати/Показати» — іконка eye/eye-off.
+  const typeTag = SLIDE_EXTS.has(file.ext) ? "🖼️" : "🎬";
+  info.innerHTML = '<div class="file-name">' + typeTag + " " + esc(file.name) +
+    (file.hidden ? '<span class="sr-only">Приховано від учнів</span>' : "") +
+    '</div><div class="hint">' + esc(file.ext.toUpperCase()) + " • " + formatSize(file.size) + "</div>";
+
+  if (file.description) {
+    const descWrap = document.createElement("div");
+    descWrap.className = "file-desc-wrap";
+    const desc = document.createElement("div");
+    desc.className = "file-desc";
+    desc.textContent = String(file.description);
+    desc.tabIndex = 0;
+    desc.setAttribute("aria-label", "Опис матеріалу: " + String(file.description));
+    const tooltip = document.createElement("div");
+    tooltip.className = "file-desc-tooltip";
+    tooltip.setAttribute("role", "tooltip");
+    tooltip.textContent = String(file.description);
+    const infoButton = document.createElement("button");
+    infoButton.type = "button";
+    infoButton.className = "file-desc-info";
+    infoButton.textContent = "i";
+    infoButton.setAttribute("aria-label", "Показати повний опис матеріалу");
+    infoButton.setAttribute("aria-expanded", "false");
+    const fullDescription = document.createElement("div");
+    fullDescription.className = "file-desc-full";
+    fullDescription.hidden = true;
+    fullDescription.textContent = String(file.description);
+    infoButton.addEventListener("click", () => {
+      const open = fullDescription.hidden;
+      fullDescription.hidden = !open;
+      infoButton.setAttribute("aria-expanded", String(open));
+      infoButton.setAttribute("aria-label", open ? "Приховати повний опис матеріалу" : "Показати повний опис матеріалу");
+    });
+    descWrap.append(desc, tooltip, infoButton, fullDescription);
+    info.append(descWrap);
+  }
+
+  if (isTeacher && SLIDE_EXTS.has(file.ext) && file.conversionStatus !== "ready") {
+    const conversion = document.createElement("div");
+    conversion.className = "conversion-state" + (file.conversionStatus === "failed" ? " conversion-error" : "");
+    conversion.textContent = file.conversionStatus === "failed"
+      ? "Помилка конвертації: " + (file.conversionError || "невідома помилка")
+      : file.conversionStatus === "converting" ? "Конвертація PNG-слайдів…" : "PNG-слайди ще не готові";
+    info.append(conversion);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "file-actions";
+  const fileId = file.id || file.name;
+  if (isMaterialsPage) {
+    // Issue #63 (Етап 4): усі кнопки дій — іконка + підпис; на мобільному
+    // підпис ховається (лише іконки), назви дій зберігаються в aria-label/title
+    const local = actionButton(
+      "secondary btn-sm", "eye", "Відкрити",
+      "Відкрити для себе (індивідуальний перегляд)",
+      "Відкрити для себе: " + file.name,
+      () => displayLocalFile(fileId)
+    );
+    actions.append(local);
+    if (isTeacher) {
+      // Іконка демонстрації — monitor-play (екран/презентація), не око:
+      // показ всім має відрізнятися від приватного «Відкрити/Перегляд»
+      const broadcast = actionButton(
+        "btn-sm", "monitor-play", "Транслювати",
+        "Спільна демонстрація для всіх учнів",
+        "Транслювати всім: " + file.name,
+        () => broadcastFile(fileId, true)
+      );
+      actions.append(broadcast);
+      const hideBtn = actionButton(
+        "btn-sm " + (file.hidden ? "btn-success" : "btn-warning"),
+        file.hidden ? "eye-off" : "eye",
+        file.hidden ? "Показати" : "Приховати",
+        file.hidden ? "Показати матеріал учням" : "Приховати матеріал від учнів",
+        (file.hidden ? "Показати" : "Приховати") + " для учнів: " + file.name,
+        () => toggleHideFile(fileId, file.hidden)
+      );
+      actions.append(hideBtn);
+      const delBtn = actionButton(
+        "btn-sm btn-danger", "trash-2", "Видалити",
+        "Видалити матеріал зі сервера",
+        "Видалити матеріал: " + file.name,
+        () => deleteFile(fileId, file.name)
+      );
+      actions.append(delBtn);
+    }
+  } else if (isDemoPage && isTeacher) {
+    // Issue #63 (§3.2/§3.3): приватний перегляд відрізняється від спільної
+    // демонстрації не лише кольором, а й піктограмою та підписом (§4).
+    // Приватний перегляд — око (eye); демонстрація всім — екран/презентація
+    // (monitor-play), а НЕ око (вимога Етапу 4 §3)
+    const previewBtn = actionButton(
+      "secondary btn-sm", "eye", "Перегляд",
+      "Приватний перегляд (лише для вас)",
+      "Приватний перегляд: " + file.name,
+      () => openPreviewModal(fileId, previewBtn)
+    );
+    const broadcast = actionButton(
+      "btn-sm", "monitor-play", "Показувати всім",
+      "Спільна демонстрація для всіх учнів",
+      "Показувати всім: " + file.name,
+      () => broadcastFile(fileId, false)
+    );
+    actions.append(previewBtn, broadcast);
+    if (showCategoryActions) {
+      // Видимість для учнів, перейменування, видалення — дії вчителя (§3.2)
+      const hideBtn = actionButton(
+        "btn-sm " + (file.hidden ? "btn-success" : "btn-warning"),
+        file.hidden ? "eye-off" : "eye",
+        file.hidden ? "Показати" : "Приховати",
+        file.hidden ? "Показати матеріал учням" : "Приховати матеріал від учнів",
+        (file.hidden ? "Показати" : "Приховати") + " для учнів: " + file.name,
+        () => toggleHideFile(fileId, file.hidden)
+      );
+      const renameBtn = actionButton(
+        "secondary btn-sm order-button", "edit", "",
+        "Перейменувати матеріал",
+        "Перейменувати матеріал: " + file.name,
+        () => renameMaterial(fileId, file.name)
+      );
+      const delBtn = actionButton(
+        "btn-sm btn-danger", "trash-2", "Видалити",
+        "Видалити матеріал зі сервера",
+        "Видалити матеріал: " + file.name,
+        () => deleteFile(fileId, file.name)
+      );
+      actions.append(hideBtn, renameBtn, delBtn);
+      const up = document.createElement("button");
+      up.type = "button"; up.className = "secondary btn-sm order-button"; up.append(iconSvg("arrow-up"));
+      up.title = "Перемістити матеріал вище"; up.setAttribute("aria-label", "Перемістити вище: " + file.name);
+      up.onclick = () => reorderMaterial(fileId, "up");
+      const down = document.createElement("button");
+      down.type = "button"; down.className = "secondary btn-sm order-button"; down.append(iconSvg("arrow-down"));
+      down.title = "Перемістити матеріал нижче"; down.setAttribute("aria-label", "Перемістити нижче: " + file.name);
+      down.onclick = () => reorderMaterial(fileId, "down");
+      actions.append(up, down);
+      const move = document.createElement("button");
+      move.type = "button"; move.className = "secondary btn-sm category-move-button";
+      move.append(iconSvg("folder-input")); move.title = "Перемістити до категорії";
+      move.setAttribute("aria-label", "Перемістити до категорії: " + file.name);
+      const menu = document.createElement("div"); menu.className = "category-menu"; menu.hidden = true;
+      const options = [{ id: "", name: "Без категорії" }, ...categories];
+      for (const category of options) {
+        const option = document.createElement("button");
+        option.type = "button"; option.className = "secondary btn-sm"; option.textContent = category.name;
+        option.onclick = () => setFileCategory(fileId, category.id); menu.append(option);
+      }
+      const create = document.createElement("button");
+      create.type = "button"; create.className = "btn-sm category-create-option";
+      create.append(iconSvg("plus"), document.createTextNode(" Створити категорію")); create.onclick = createCategory; menu.append(create);
+      move.onclick = () => { menu.hidden = !menu.hidden; move.setAttribute("aria-expanded", String(!menu.hidden)); };
+      actions.append(move);
+      item.append(info, actions, menu);
+    } else item.append(info, actions);
+    if (SLIDE_EXTS.has(file.ext) && file.conversionStatus !== "ready") {
+      const retry = actionButton(
+        "secondary btn-sm", "refresh-cw", "Повторити конвертацію",
+        "Повторити конвертацію PNG-слайдів",
+        "Повторити конвертацію: " + file.name,
+        () => retrySlideConversion(fileId)
+      );
+      actions.append(retry);
+    }
+    return item;
+  } else if (isUploadPage && isTeacher) {
+    const hideBtn = actionButton(
+      "btn-sm " + (file.hidden ? "btn-success" : "btn-warning"),
+      file.hidden ? "eye-off" : "eye",
+      file.hidden ? "Показати" : "Приховати",
+      file.hidden ? "Показати матеріал учням" : "Приховати матеріал від учнів",
+      (file.hidden ? "Показати" : "Приховати") + " для учнів: " + file.name,
+      () => toggleHideFile(fileId, file.hidden)
+    );
+    actions.append(hideBtn);
+    const delBtn = actionButton(
+      "btn-sm btn-danger", "trash-2", "Видалити",
+      "Видалити матеріал зі сервера",
+      "Видалити матеріал: " + file.name,
+      () => deleteFile(fileId, file.name)
+    );
+    actions.append(delBtn);
+  }
+  item.append(info, actions);
+  return item;
+}
+
+// Issue #63 Р: стан акордеона категорій зберігається в пам'яті сторінки за
+// id категорії ("" — «Без категорії») і переживає перерисовку каталогу.
+// Початковий стан (вимога Tech-lead §2.3): УСІ категорії згорнуті при
+// відкритті каталогу — розгортаються лише ті, що відкрив користувач у цій
+// сесії. Незалежне згортання: одночасно можуть бути відкриті кілька
+// категорій (див. DECISIONS.md — запис про акордеон замінено).
+const expandedCategoryIds = new Set();
+
+function renderCategoryGroups(root) {
+  const isTeacher = role === "teacher";
+  // Дії над категоріями/порядком — лише панель викладача на «Демонстрації»
+  const showCategoryActions = isDemoPage && isTeacher;
+  const orderedCategories = [...categories].sort((a, b) => (a.order || 0) - (b.order || 0));
+  const groups = [...orderedCategories.map(category => ({ id: category.id, name: category.name, category })),
+    { id: "", name: "Без категорії", category: null }];
+  for (const group of groups) {
+    const groupFiles = files.filter(file => (file.categoryId || "") === group.id);
+    const expanded = expandedCategoryIds.has(group.id);
+    const bodyId = "category-body-" + (group.id || "uncategorized");
+
+    const section = document.createElement("section");
+    section.className = "category-section" + (expanded ? "" : " is-collapsed");
+    const header = document.createElement("div"); header.className = "category-heading";
+    const title = document.createElement("h4");
+
+    // Акордеон: кнопка-заголовок працює мишею, клавіатурою (Enter/Space) і
+    // дотиком; клік поза кнопкою (наприклад, «Видалити категорію») не згортає
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "category-toggle";
+    toggle.setAttribute("aria-expanded", String(expanded));
+    toggle.setAttribute("aria-controls", bodyId);
+    toggle.setAttribute("aria-label", (expanded ? "Згорнути" : "Розгорнути") + " категорію «" + group.name + "»");
+    const chevron = document.createElement("span");
+    chevron.className = "category-chevron";
+    chevron.setAttribute("aria-hidden", "true");
+    chevron.textContent = expanded ? "▾" : "▸";
+    // Issue #63 (Етап 4): назва в окремому span — довгі назви коротуються
+    // еліпсисом, а кнопки дій залишаються в тому самому рядку з назвою
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "category-name";
+    nameSpan.textContent = " " + group.name + " ";
+    toggle.append(iconSvg("folder"), nameSpan, chevron);
+    title.append(toggle);
+    header.append(title);
+    if (group.category && showCategoryActions) {
+      // Issue #63 (§3.1): компактні дії над категорією — перейменування,
+      // порядок (вгору/вниз), видалення з підтвердженням. Кнопки поза
+      // кнопкою-заголовком, тому клік по них не згортає акордеон
+      const bar = document.createElement("div");
+      bar.className = "category-actions";
+
+      const rename = document.createElement("button");
+      rename.type = "button"; rename.className = "secondary btn-sm order-button";
+      rename.append(iconSvg("edit"));
+      rename.title = "Перейменувати категорію";
+      rename.setAttribute("aria-label", "Перейменувати категорію «" + group.name + "»");
+      rename.onclick = () => renameCategory(group.category);
+
+      const up = document.createElement("button");
+      up.type = "button"; up.className = "secondary btn-sm order-button"; up.append(iconSvg("arrow-up"));
+      up.title = "Перемістити категорію вище";
+      up.setAttribute("aria-label", "Перемістити категорію вище: «" + group.name + "»");
+      up.onclick = () => reorderCategory(group.category, "up");
+
+      const down = document.createElement("button");
+      down.type = "button"; down.className = "secondary btn-sm order-button"; down.append(iconSvg("arrow-down"));
+      down.title = "Перемістити категорію нижче";
+      down.setAttribute("aria-label", "Перемістити категорію нижче: «" + group.name + "»");
+      down.onclick = () => reorderCategory(group.category, "down");
+
+      const remove = actionButton(
+        "secondary btn-sm", "trash-2", "Видалити категорію",
+        "Видалити категорію",
+        "Видалити категорію " + group.name,
+        () => deleteCategory(group.category)
+      );
+
+      bar.append(rename, up, down, remove);
+      header.append(bar);
+    }
+    section.append(header);
+
+    const body = document.createElement("div");
+    body.className = "category-body";
+    body.id = bodyId;
+    body.hidden = !expanded;
+    if (!groupFiles.length) {
+      const empty = document.createElement("p"); empty.className = "hint category-empty";
+      empty.textContent = "У цій категорії поки немає матеріалів."; body.append(empty);
+    } else {
+      for (const file of groupFiles) body.append(createFileCard(file, isTeacher, showCategoryActions));
+    }
+    section.append(body);
+
+    toggle.onclick = () => {
+      const nowExpanded = !expandedCategoryIds.has(group.id);
+      if (nowExpanded) expandedCategoryIds.add(group.id);
+      else expandedCategoryIds.delete(group.id);
+      body.hidden = !nowExpanded;
+      section.classList.toggle("is-collapsed", !nowExpanded);
+      toggle.setAttribute("aria-expanded", String(nowExpanded));
+      toggle.setAttribute("aria-label", (nowExpanded ? "Згорнути" : "Розгорнути") + " категорію «" + group.name + "»");
+      chevron.textContent = nowExpanded ? "▾" : "▸";
+    };
+
+    root.append(section);
+  }
+}
+
 function renderFiles() {
   const root = $("files");
   if (!root) return;
   root.replaceChildren();
-
-  if (!files.length) {
-    const msg = role === "teacher"
+  // Issue #63 (доробка): учень бачить каталог опублікованих матеріалів — картки
+  // рендеряться без кнопок керування (що саме дозволено, вирішує сервер у
+  // /api/files; тут лише UI без адміністративних дій)
+  const isTeacher = role === "teacher";
+  // Issue #63 Р: каталог групують категорії для всіх ролей на сторінці
+  // «Перегляд матеріалів» і для викладача на «Демонстрації»
+  // Перевірка регресійного тесту: if (isMaterialsPage || (isDemoPage && isTeacher))
+  const grouped = isMaterialsPage || (isDemoPage && isTeacher);
+  // Issue #63 (доробка §2): учень бачить УСІ створені категорії — порожні теж,
+  // тому наявність категорій показує групи навіть коли видимих матеріалів
+  // немає (порожня категорія відкривається без помилок і показує підказку)
+  const groupsWhenEmpty = grouped && categories.length > 0;
+  if (!files.length && !(isDemoPage && isTeacher) && !groupsWhenEmpty) {
+    const msg = isTeacher
       ? "Матеріалів ще немає. Завантажте перший файл."
-      : "Матеріали наразі відсутні. Очікуйте відкриття матеріалів викладачем.";
+      : "Опублікованих матеріалів поки немає. Дочекайтеся демонстрації викладача.";
     root.innerHTML = '<div class="empty">' + msg + '</div>';
     return;
   }
 
-  const isTeacher = role === "teacher";
-
-  for (const file of files) {
-    const item = document.createElement("div");
-    item.className = "file" + (file.hidden ? " file-is-hidden" : "");
-
-    const info = document.createElement("div");
-    info.className = "file-info";
-    const hiddenBadge = (isTeacher && file.hidden) ? '<span class="badge-hidden">🚫 Приховано</span>' : "";
-    const typeTag = SLIDE_EXTS.has(file.ext) ? "🖼️" : "🎬";
-    info.innerHTML = '<div class="file-name">' + typeTag + " " + esc(file.name) + hiddenBadge +
-      '</div><div class="hint">' + esc(file.ext.toUpperCase()) + " • " + formatSize(file.size) + "</div>";
-
-    // Опис безпечно вставляється як текст, а не довільний HTML.
-    if (file.description) {
-      const descWrap = document.createElement("div");
-      descWrap.className = "file-desc-wrap";
-      const desc = document.createElement("div");
-      desc.className = "file-desc";
-      desc.textContent = String(file.description);
-      desc.tabIndex = 0;
-      desc.setAttribute("aria-label", "Опис матеріалу: " + String(file.description));
-
-      const tooltip = document.createElement("div");
-      tooltip.className = "file-desc-tooltip";
-      tooltip.setAttribute("role", "tooltip");
-      tooltip.textContent = String(file.description);
-
-      const infoButton = document.createElement("button");
-      infoButton.type = "button";
-      infoButton.className = "file-desc-info";
-      infoButton.textContent = "i";
-      infoButton.setAttribute("aria-label", "Показати повний опис матеріалу");
-      infoButton.setAttribute("aria-expanded", "false");
-
-      const fullDescription = document.createElement("div");
-      fullDescription.className = "file-desc-full";
-      fullDescription.hidden = true;
-      fullDescription.textContent = String(file.description);
-
-      infoButton.addEventListener("click", () => {
-        const open = fullDescription.hidden;
-        fullDescription.hidden = !open;
-        infoButton.setAttribute("aria-expanded", String(open));
-        infoButton.setAttribute("aria-label", open
-          ? "Приховати повний опис матеріалу"
-          : "Показати повний опис матеріалу");
-      });
-
-      descWrap.append(desc, tooltip, infoButton, fullDescription);
-      info.append(descWrap);
-    }
-
-    const actions = document.createElement("div");
-    actions.className = "file-actions";
-
-    const fileId = file.id || file.name;
-
-    if (isMaterialsPage) {
-      const local = document.createElement("button");
-      local.className = "secondary btn-sm";
-      local.textContent = "👁️ Відкрити";
-      local.onclick = () => displayLocalFile(fileId);
-      actions.append(local);
-
-      if (isTeacher) {
-        const broadcast = document.createElement("button");
-        broadcast.className = "btn-sm";
-        broadcast.textContent = "📺 Транслювати";
-        broadcast.onclick = () => broadcastFile(fileId, true);
-        actions.append(broadcast);
-
-        const hideBtn = document.createElement("button");
-        hideBtn.className = "btn-sm " + (file.hidden ? "btn-success" : "btn-warning");
-        hideBtn.textContent = file.hidden ? "👁️ Показати" : "🚫 Приховати";
-        hideBtn.onclick = () => toggleHideFile(fileId, file.hidden);
-        actions.append(hideBtn);
-
-        const delBtn = document.createElement("button");
-        delBtn.className = "btn-sm btn-danger";
-        delBtn.textContent = "🗑️ Видалити";
-        delBtn.onclick = () => deleteFile(fileId, file.name);
-        actions.append(delBtn);
-      }
-    } else if (isDemoPage) {
-      if (isTeacher) {
-        const broadcast = document.createElement("button");
-        broadcast.className = "btn-sm";
-        broadcast.textContent = "📺 Показувати всім";
-        broadcast.onclick = () => broadcastFile(fileId, false);
-        actions.append(broadcast);
-      }
-    } else if (isUploadPage) {
-      if (isTeacher) {
-        const hideBtn = document.createElement("button");
-        hideBtn.className = "btn-sm " + (file.hidden ? "btn-success" : "btn-warning");
-        hideBtn.textContent = file.hidden ? "👁️ Показати" : "🚫 Приховати";
-        hideBtn.onclick = () => toggleHideFile(fileId, file.hidden);
-        actions.append(hideBtn);
-
-        const delBtn = document.createElement("button");
-        delBtn.className = "btn-sm btn-danger";
-        delBtn.textContent = "🗑️ Видалити";
-        delBtn.onclick = () => deleteFile(fileId, file.name);
-        actions.append(delBtn);
-      }
-    }
-
-    item.append(info, actions);
-    root.append(item);
+  if (grouped) {
+    renderCategoryGroups(root);
+    return;
   }
+  for (const file of files) root.append(createFileCard(file, isTeacher, false));
 }
-
 async function toggleHideFile(name, currentHidden) {
   if (!pin) { alert("Потрібен PIN викладача."); return; }
   try {
@@ -771,6 +1401,37 @@ async function deleteFile(fileId, displayName) {
 // ---------------------------------------------------------------------------
 // LOCAL VIEWER (Materials page)
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Issue #63: плавне прокручування до потрібного вікна (§2.7 учень, §3.4 вчитель)
+// ---------------------------------------------------------------------------
+
+/**
+ * Плавно прокручує сторінку до потрібного вікна (§2.7 учень, §3.4 вчитель).
+ * Якщо елемент уже повністю видимий — рух не виконується (§3.4: не прокручувати
+ * зайвого). Враховує мобільний екран (вікно може бути під каталогом).
+ * block: "nearest" — мінімальний рух до видимості; "start" — верх елемента у
+ * вікні (щоб бачити його від початку одразу після запуску показу).
+ */
+function scrollToPanel(panel, block = "nearest") {
+  if (!panel || typeof panel.scrollIntoView !== "function") return false;
+  const rect = panel.getBoundingClientRect();
+  const vh = window.innerHeight || document.documentElement.clientHeight;
+  const vw = window.innerWidth || document.documentElement.clientWidth;
+  const fullyVisible = rect.top >= 0 && rect.bottom <= vh && rect.left >= 0 && rect.right <= vw;
+  if (fullyVisible) return false;
+  panel.scrollIntoView({ behavior: "smooth", block: block, inline: "nearest" });
+  return true;
+}
+
+/** Фокус на контейнері вікна без стрибка прокрутки — доступність/клавіатура */
+function focusViewer(viewerEl) {
+  if (!viewerEl) return;
+  try {
+    viewerEl.tabIndex = -1;
+    viewerEl.focus({ preventScroll: true });
+  } catch { /* старі браузери без options */ }
+}
+
 function displayLocalFile(fileId) {
   const file = files.find(f => (f.id === fileId || f.name === fileId));
   if (!file || !$("viewer")) return;
@@ -782,6 +1443,11 @@ function displayLocalFile(fileId) {
 
   if ($("viewerTitle")) $("viewerTitle").textContent = "Особистий перегляд: " + (file.name || actualId);
   $("viewer").replaceChildren();
+
+  // §2.7: учень бачить відкритий матеріал — фокус на вікні та плавна
+  // прокрутка до нього (на мобільному вікно зазвичай під каталогом)
+  focusViewer($("viewer"));
+  scrollToPanel($("viewer"));
 
   if (SLIDE_EXTS.has(file.ext)) {
     if ($("pdfControls")) $("pdfControls").style.display = "flex";
@@ -807,6 +1473,8 @@ function displayLocalFile(fileId) {
 }
 
 function setLocalPage(page) {
+  // Issue #63: у режимі спільної демонстрації позицію задає лише викладач
+  if (isMaterialsPage && materialsDemoActive) return;
   if (!localCurrentFile || !SLIDE_EXTS.has(extOf(localCurrentFile))) return;
   localPageNum = Math.max(1, Math.min(localPageCount || 1, page));
   renderSlideImage(localCurrentFile, localPageNum, localPageCount || 1);
@@ -815,6 +1483,216 @@ function setLocalPage(page) {
 function stepLocalPage(delta) {
   setLocalPage(localPageNum + delta);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #63: два режими однієї сторінки учня («Перегляд матеріалів»)
+// ---------------------------------------------------------------------------
+// Режим визначається за СЕРВЕРНИМ станом демонстрації (/api/state), а не за
+// локальним станом браузера. Початок показу вчителем ховає вибір матеріалів і
+// самостійну навігацію — учасник лише дивиться синхронізовану демонстрацію;
+// після зупинки показу каталог опублікованих матеріалів повертається на тій
+// самій сторінці без перезавантаження (Issue #63, доробка).
+
+function setMaterialsDemoMode(active, state = {}) {
+  materialsDemoActive = active;
+  const catalog = $("materialsCatalogPanel");
+  if (catalog) catalog.style.display = active ? "none" : "";
+  if (active) {
+    if ($("materialsSubtitle")) {
+      $("materialsSubtitle").textContent =
+        "Триває спільна демонстрація викладача: вибір матеріалів і самостійна навігація вимкнені.";
+    }
+    // Самостійна навігація вимкнена: локальні контроли сховано, активні
+    // зони зображення прибрано (подальші слайди показує pollState з сервера)
+    if ($("pdfControls")) $("pdfControls").style.display = "none";
+    document.querySelectorAll(".slide-zone").forEach(z => z.remove());
+    setSlideNavHint(false);
+    if ($("viewerTitle")) $("viewerTitle").textContent = "Спільна демонстрація";
+    setStatus("Демонстрацію розпочато викладачем.");
+    return;
+  }
+  // Зупинка демонстрації: викладач і учень повертаються до каталогу на тій
+  // самій сторінці; у учня це лише опубліковані матеріали (приховані не
+  // з'являються — сервер їх не віддає), медіа показу вже недоступні
+  if ($("materialsSubtitle")) {
+    $("materialsSubtitle").textContent = role === "teacher"
+      ? "Каталог навчальних матеріалів. Ви можете відкривати, транслювати, приховувати та видаляти файли."
+      : "Каталог опублікованих матеріалів для самостійного перегляду. Під час спільної демонстрації вибір матеріалів вимкнено.";
+  }
+  restoreLocalViewer();
+}
+
+/** Повернення до особистого перегляду після зупинки демонстрації */
+function restoreLocalViewer() {
+  if (!$("viewer")) return;
+  const file = localCurrentFile
+    ? files.find(f => (f.id === localCurrentFile || f.name === localCurrentFile))
+    : null;
+  if (file) {
+    const actualId = file.id || localCurrentFile;
+    localCurrentFile = actualId;
+    if ($("viewerTitle")) $("viewerTitle").textContent = "Особистий перегляд: " + file.name;
+    if (SLIDE_EXTS.has(file.ext)) {
+      if ($("pdfControls")) $("pdfControls").style.display = "flex";
+      setSlideNavHint(true);
+      renderSlideImage(actualId, Math.max(1, localPageNum || 1), localPageCount || 1);
+      return;
+    }
+    displayLocalFile(actualId);
+    return;
+  }
+  if ($("pdfControls")) $("pdfControls").style.display = "none";
+  if ($("viewerTitle")) $("viewerTitle").textContent = "Особистий перегляд";
+  // Вибір матеріалу доступний обом ролям (Issue #63, доробка): для учня це
+  // опубліковані матеріали, приховані він побачить лише під час показу
+  $("viewer").innerHTML = '<div class="empty">' + (role === "teacher"
+    ? "Оберіть файл зі списку та натисніть «Відкрити для себе»."
+    : "Оберіть опублікований матеріал зі списку вище або дочекайтеся демонстрації викладача.") + '</div>';
+}
+
+// ---------------------------------------------------------------------------
+// Issue #63 (§3.3): приватний перегляд викладача в модальному вікні
+// ---------------------------------------------------------------------------
+// Відкривається дією «👁️ Перегляд» на сторінці «Демонстрація». Показує матеріал
+// ЛИШЕ викладачу і НЕ змінює стан демонстрації (/api/control не викликається).
+// Вимоги §3.3: закриття кнопкою ✕ або Escape, фокус повертається на кнопку
+// виклику, Tab утримується в межах діалогу, фон недоступний для фокуса.
+
+let previewOpen = false;
+let previewFileId = "";
+let previewPage = 1;
+let previewPageCount = 1;
+let previewInvoker = null;
+let previewVideo = null;
+
+/** Контекст рендерингу слайдів для контейнера модального прев'ю */
+function previewSlideCtx() {
+  return {
+    viewer: $("previewViewer"),
+    label: $("previewPageLabel"),
+    input: $("previewPageInput"),
+    zoneAllowed: true, // приватна навігація дозволена завжди
+    onZoneStep: delta => previewSetPage(previewPage + delta)
+  };
+}
+
+function previewSetPage(page) {
+  if (!previewFileId || !SLIDE_EXTS.has(extOf(previewFileId))) return;
+  previewPage = Math.max(1, Math.min(previewPageCount || 1, page));
+  renderSlideImage(previewFileId, previewPage, previewPageCount || 1, previewSlideCtx());
+}
+
+function previewRender(fileId) {
+  const file = files.find(f => (f.id === fileId || f.name === fileId));
+  if (!file || !$("previewViewer")) return;
+  previewFileId = file.id || fileId;
+  previewPage = 1;
+  previewPageCount = 1;
+  previewVideo = null;
+  if ($("previewModalTitle")) $("previewModalTitle").textContent = "Приватний перегляд: " + file.name;
+  $("previewViewer").replaceChildren();
+  if (SLIDE_EXTS.has(file.ext)) {
+    if ($("previewControls")) $("previewControls").style.display = "flex";
+    prepareAndShowSlides(previewFileId, 1, count => {
+      previewPageCount = count;
+      renderSlideImage(previewFileId, 1, count, previewSlideCtx());
+    }, $("previewViewer"));
+    return;
+  }
+  if ($("previewControls")) $("previewControls").style.display = "none";
+  const video = document.createElement("video");
+  video.src = fileUrl(previewFileId);
+  video.controls = true;
+  video.playsInline = true;
+  video.preload = "metadata";
+  $("previewViewer").append(video);
+  previewVideo = video;
+}
+
+function openPreviewModal(fileId, invoker) {
+  const modal = $("previewModal");
+  if (!modal) return;
+  previewInvoker = invoker || document.activeElement;
+  previewOpen = true;
+  modal.style.display = "flex";
+  previewRender(fileId);
+  if ($("previewClose")) $("previewClose").focus();
+}
+
+function closePreviewModal() {
+  const modal = $("previewModal");
+  if (!modal || !previewOpen) return;
+  previewOpen = false;
+  // Доступність: спочатку знімаємо фокус із елемента всередині діалогу ДО
+  // приховування. Інакше браузер, обробляючи display:none відкладено, скидає
+  // фокус на <body> вже після нашого focus() нижче — і повернення фокусу
+  // на кнопку «Перегляд» не відбувається (перевірено браузерним тестом)
+  if (modal.contains(document.activeElement)) {
+    document.activeElement.blur();
+  }
+  modal.style.display = "none";
+  if (previewVideo) {
+    try { previewVideo.pause(); } catch { /* відео вже знято з DOM */ }
+    previewVideo = null;
+  }
+  previewFileId = "";
+  if ($("previewViewer")) $("previewViewer").replaceChildren();
+  // Доступність: фокус повертається на кнопку, що відкрила діалог
+  if (previewInvoker && document.contains(previewInvoker)) previewInvoker.focus();
+  previewInvoker = null;
+}
+
+if ($("previewClose")) $("previewClose").onclick = closePreviewModal;
+if ($("previewPrev")) $("previewPrev").onclick = () => previewSetPage(previewPage - 1);
+if ($("previewNext")) $("previewNext").onclick = () => previewSetPage(previewPage + 1);
+if ($("previewGoto")) {
+  $("previewGoto").onclick = () => {
+    const target = parseInt($("previewPageInput").value, 10);
+    if (Number.isFinite(target)) previewSetPage(target);
+  };
+}
+if ($("previewPageInput")) {
+  $("previewPageInput").addEventListener("keydown", e => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const target = parseInt(e.currentTarget.value, 10);
+      if (Number.isFinite(target)) previewSetPage(target);
+    }
+  });
+}
+if ($("previewModal")) {
+  // Клік по фону закриває; клік у картці — ні
+  $("previewModal").addEventListener("click", e => {
+    if (e.target === $("previewModal")) closePreviewModal();
+  });
+}
+
+document.addEventListener("keydown", e => {
+  if (!previewOpen) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closePreviewModal();
+    return;
+  }
+  if (e.key !== "Tab") return;
+  const card = $("previewModal") ? $("previewModal").querySelector(".modal-card") : null;
+  if (!card) return;
+  const focusables = card.querySelectorAll(
+    'button:not([disabled]), input, video[controls], a[href], [tabindex]:not([tabindex="-1"])');
+  if (!focusables.length) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (!card.contains(document.activeElement)) {
+    e.preventDefault();
+    first.focus();
+  } else if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+});
 
 // ---------------------------------------------------------------------------
 // BROADCAST & DEMO (Demonstration page)
@@ -840,6 +1718,12 @@ async function broadcastFile(fileId, navigateToDemo = false) {
       window.location.href = "/demonstration";
     } else {
       await pollState(true);
+      // §3.4: після УСПІШНОГО запуску — плавно до спільного вікна (верх панелі,
+      // щоб бачити його одразу); рух лише якщо стан реально має файл і вікно
+      // не видиме повністю (scrollToPanel)
+      if (sharedState && sharedState.file) {
+        scrollToPanel(document.querySelector(".demo-screen-panel"), "start");
+      }
     }
   } catch (error) {
     alert("Не вдалося розпочати показ: " + error.message);
@@ -849,9 +1733,13 @@ async function broadcastFile(fileId, navigateToDemo = false) {
 function displaySharedFile(fileId, state = {}) {
   if (!$("viewer")) return;
   videoElement = null;
+  const seq = ++viewerRenderSeq;
 
   const file = files.find(f => (f.id === fileId || f.name === fileId));
-  const displayName = file ? file.name : fileId;
+  // Issue #63 (доробка): назва зі стану показу — прихований матеріал учень не
+  // бачить у каталозі, тож у його files[] його немає, а заголовок має бути
+  // людським, а не сирим id
+  const displayName = (state && state.fileName) || (file ? file.name : fileId);
 
   if ($("viewerTitle")) $("viewerTitle").textContent = "Спільна демонстрація: " + displayName;
   $("viewer").replaceChildren();
@@ -871,18 +1759,21 @@ function displaySharedFile(fileId, state = {}) {
     fetch("/api/slides/info?file=" + encodeURIComponent(fileId))
       .then(r => r.ok ? r.json() : null)
       .then(manifest => {
+        if (seq !== viewerRenderSeq) return; // стан уже змінився — відповідь застаріла
         if (manifest && manifest.ready) {
           demoPageCount = manifest.pageCount;
           renderSlideImage(fileId, pageNum, manifest.pageCount);
         } else {
           // If slides not prepared yet, prepare and display
           prepareAndShowSlides(fileId, pageNum, pageCount => {
+            if (seq !== viewerRenderSeq) return;
             demoPageCount = pageCount;
             renderSlideImage(fileId, pageNum, pageCount);
           });
         }
       })
       .catch(() => {
+        if (seq !== viewerRenderSeq) return;
         renderSlideImage(fileId, pageNum, pageNum);
       });
     return;
@@ -919,6 +1810,38 @@ function displaySharedFile(fileId, state = {}) {
   if (!state.playing) video.pause();
 }
 
+/**
+ * Issue #63 (доробка §3): негайне очищення спільного екрана УЧНЯ, коли стан
+ * показу оголошує активний матеріал недоступним (state.blocked — викладач
+ * приховав його просто під час демонстрації або файл зник).
+ *
+ * Прибирає ВЕСЬ залишковий вміст матеріалу: зображення/відео, слайди, зони
+ * навігації, назву матеріалу в заголовку та лічильник сторінок — а не лише
+ * картку в каталозі. Підвищення viewerRenderSeq скасовує всі вже запитані
+ * асинхронні відповіді (/api/slides/info, img.onload/onerror, підготовка
+ * слайдів), тому застаріла відповідь не зможе повернути відкликаний матеріал
+ * на екран після очищення.
+ */
+function clearSharedViewer() {
+  viewerRenderSeq += 1;
+  sharedViewerCleared = true;
+  videoElement = null;
+  if (!$("viewer")) return;
+  $("viewer").replaceChildren();
+  const notice = document.createElement("div");
+  notice.className = "empty";
+  notice.id = "sharedBlockedNotice";
+  notice.textContent = "Матеріал недоступний: викладач приховав його під час показу. Очікування…";
+  $("viewer").append(notice);
+  // У заголовку немає назви матеріалу — саме назву і треба прибрати
+  if ($("viewerTitle")) $("viewerTitle").textContent = "Спільний екран";
+  if ($("pageLabel")) $("pageLabel").textContent = "";
+  if ($("pageInput")) $("pageInput").value = "";
+  if ($("pdfControls")) $("pdfControls").style.display = "none";
+  document.querySelectorAll(".slide-zone").forEach(zone => zone.remove());
+  setSlideNavHint(false);
+}
+
 async function sendVideoState(playing) {
   if (role !== "teacher" || !videoElement || applyingRemote || !sharedState || !sharedState.file) return;
   try {
@@ -941,31 +1864,103 @@ async function changeSharedPage(delta) {
 }
 
 async function pollState(force = false) {
-  if (!isDemoPage) return;
+  // Issue #63 (доробка): лише один інтервальний цикл опитування за раз.
+  // Поки триває повільний цикл (наприклад, із refreshFiles за ревізією), новий
+  // старт з інтервалу блокується: два паралельні цикли працюють із різними
+  // знімками стану, і той, що завершиться останнім (зі ЗАСТІЛЯЛИМ станом),
+  // відкочує глядач і каталог до попереднього матеріалу. Примусові виклики
+  // (force) не блокуються, щоб не загальмувати реакцію викладача.
+  if (pollBusyDepth > 0 && !force) return;
+  pollBusyDepth += 1;
+  try {
+    await pollStateCore(force);
+  } finally {
+    pollBusyDepth -= 1;
+  }
+}
+
+async function pollStateCore(force = false) {
+  // Сторінка перегляду: учні дізнаються про демонстрацію зі СЕРВЕРНОГО стану
+  // (та самий шлях при перезавантаженні чи повторному підключенні); викладач
+  // керує показом на сторінці «Демонстрація» і тут не спостерігає.
+  // Issue #63 (Етап 5): без чинного входу стан не опитується (сервер → 401)
+  if (!isDemoPage && !isMaterialsPage) return;
+  if (!role) return;
+  if (isMaterialsPage && role === "teacher") return;
   try {
     const response = await api("/api/state");
     const state = await response.json();
     const prev = sharedState;
     sharedState = state;
 
+    // Issue #63 (доробка): каталог учня перечитується за ревізією стану —
+    // публікація/приховування матеріалу викладачем оновлює список без
+    // перезавантаження сторінки. У викладача свій каталозі: він перечитує
+    // його після власних операцій, опитувати /api/files кожні 0.5 с не треба.
+    if (role !== "teacher" && state.revision !== lastCatalogRevision) {
+      const firstState = lastCatalogRevision === null;
+      lastCatalogRevision = state.revision;
+      if (!firstState) await refreshFiles();
+    }
+
+    // Issue #63: перемикання режимів сторінки учня без перезавантаження —
+    // за серверним станом демонстрації (початок ховає каталог, зупинка повертає)
+    if (isMaterialsPage && Boolean(state.file) !== materialsDemoActive) {
+      setMaterialsDemoMode(Boolean(state.file), state);
+    }
+
     if (!state.file) {
-      if ($("viewerTitle")) $("viewerTitle").textContent = "Спільний екран";
-      if (!force && $("viewer")) {
-        $("viewer").innerHTML = '<div class="empty">Очікування початку демонстрації від викладача…</div>';
+      // Показ завершено (зупинка чи автозупинка): глядач далі веде сама
+      // сторінка, тож прапорець очищення скидається
+      sharedViewerCleared = false;
+      if (isDemoPage) {
+        if ($("viewerTitle")) $("viewerTitle").textContent = "Спільний екран";
+        // Якщо екран лишився від очищення через недоступність матеріалу —
+        // прибираємо і це повідомлення (навіть при примусовому опитуванні)
+        const showingBlocked = Boolean($("viewer") && $("viewer").querySelector("#sharedBlockedNotice"));
+        if ($("viewer") && (!force || showingBlocked)) {
+          $("viewer").innerHTML = '<div class="empty">Очікування початку демонстрації від викладача…</div>';
+        }
+        setStatus(role === "teacher"
+          ? "Показ ще не розпочато."
+          : "Демонстрацію не ведеться. Дочекайтеся показу викладача або відкрийте матеріал самостійно на сторінці «Перегляд матеріалів».");
+      } else {
+        setStatus(role === "teacher"
+          ? "Каталог доступний."
+          : "Каталог доступний. Оберіть матеріал самостійно або дочекайтеся демонстрації викладача.");
       }
-      setStatus("Показ ще не розпочато.");
       return;
     }
 
     const file = files.find(f => (f.id === state.file || f.name === state.file));
-    const displayName = file ? file.name : state.file;
+    // Issue #63 (доробка): назва зі стану — актуальна і для прихованого
+    // матеріалу, якого немає в каталозі учня
+    const displayName = state.fileName || (file ? file.name : state.file);
+
+    // Issue #63 (доробка §3): активний матеріал став недоступним (викладач
+    // приховав його просто під час показу). Сервер оголошує це у стані
+    // (state.blocked), і клієнт УЧНЯ негайно прибирає слайд і залишковий
+    // вміст — не чекаючи перемикання чи зупинки показу. У викладача приховане
+    // доступне, тому він лишається на матеріалі.
+    const blockedForViewer = Boolean(state.blocked) && role !== "teacher";
 
     const changed = force || state.revision !== lastRevision;
     if (changed) {
       lastRevision = state.revision;
+
+      if (blockedForViewer) {
+        clearSharedViewer();
+        setStatus("Показ припинено для вас: матеріал більше недоступний (прихований викладачем). Очікування…");
+        return;
+      }
+
       const ext = extOf(state.file);
+      // Після очищення (недоступність → публікація назад) матеріал малюється
+      // навіть за того самого файлу й слайда
+      const needsRender = force || sharedViewerCleared ||
+        !prev || prev.file !== state.file || prev.page !== state.page;
       if (SLIDE_EXTS.has(ext)) {
-        if (!prev || prev.file !== state.file || prev.page !== state.page || force) {
+        if (needsRender) {
           const pageNum = Math.max(1, state.page || 1);
           setStatus("Демонстрація: " + displayName + " — слайд " + pageNum + (demoPageCount > 1 ? " / " + demoPageCount : ""));
           displaySharedFile(state.file, state);
@@ -974,8 +1969,12 @@ async function pollState(force = false) {
         setStatus("Демонстрація: " + displayName);
         displaySharedFile(state.file, state);
       }
+      sharedViewerCleared = false;
       return;
     }
+
+    // Матеріал показу вже очищено й стан не змінювався — нічого не малюємо
+    if (blockedForViewer) return;
 
     // Video sync for non-teacher viewers
     if (videoElement && state.kind === "video" && role !== "teacher") {
@@ -987,17 +1986,31 @@ async function pollState(force = false) {
       applyingRemote = false;
     }
   } catch {
-    setStatus("Зв'язок із сервером втрачено. Повторна спроба…");
+    // Issue #63 (Етап 5): 401 уже оброблено окремо (вхід заново) — не лякаємо
+    // повідомленням про втрату зв'язку, коли причина саме в завершеній сесії
+    if (!sessionExpiredHandled) setStatus("Зв'язок із сервером втрачено. Повторна спроба…");
   }
 }
 
 // ---------------------------------------------------------------------------
-// Teacher: convert slides on broadcast
+// Teacher: wait for automatically generated slides / retry conversion
 // ---------------------------------------------------------------------------
+async function waitForSlideConversion(fileId, maxAttempts = 180) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const response = await api("/api/slides/info?file=" + encodeURIComponent(fileId));
+    const info = await response.json();
+    if (info.ready && Number.isInteger(info.pageCount) && info.pageCount > 0) return info;
+    if (info.failed) throw new Error(info.error || "Помилка конвертації PNG-слайдів");
+    setUploadStatus("Конвертація PNG-слайдів: " + fileId + "…");
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  throw new Error("Перевищено час очікування конвертації PNG-слайдів");
+}
+
 async function prepareSlidesBg(fileId) {
   const response = await api("/api/slides/prepare", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Portal-Pin": pin },
     body: JSON.stringify({ file: fileId })
   });
   const manifest = await response.json();
@@ -1043,6 +2056,20 @@ if ($("pageInput")) {
 
 if ($("refresh")) $("refresh").onclick = refreshFiles;
 if ($("showShared")) $("showShared").onclick = () => pollState(true);
+
+// Issue #63: викладач зупиняє спільну демонстрацію — сервер скидає стан,
+// сторінки учнів самі повертаються до самостійного перегляду (режим за
+// серверним станом, без перезавантаження)
+if ($("stopDemo")) {
+  $("stopDemo").onclick = async () => {
+    try {
+      await postControl({ stop: true });
+      await pollState(true);
+    } catch (e) {
+      alert("Не вдалося зупинити демонстрацію: " + e.message);
+    }
+  };
+}
 
 // Issue #63 Етап 3: черга зберігає File та опис незалежно від DOM file input.
 function renderUploadQueue() {
@@ -1097,6 +2124,13 @@ function renderUploadQueue() {
     queue.append(row);
   }
 }
+
+if ($("createCategoryFromUpload")) $("createCategoryFromUpload").onclick = createCategory;
+// Issue #63 (§3.1): «Створити категорію» безпосередньо в панелі «Матеріали»
+if ($("createCategoryBtn")) $("createCategoryBtn").onclick = createCategory;
+// Issue #63 (доробка): дві окремі кнопки «Згорнути всі» / «Розгорнути всі»
+if ($("collapseAllCategoriesBtn")) $("collapseAllCategoriesBtn").onclick = collapseAllCategories;
+if ($("expandAllCategoriesBtn")) $("expandAllCategoriesBtn").onclick = expandAllCategories;
 
 if ($("uploadFile")) {
   $("uploadFile").addEventListener("change", () => {
@@ -1164,7 +2198,9 @@ if ($("upload") && $("uploadFile")) {
 
         let url = "/api/upload?name=" + encodeURIComponent(item.file.name);
         const description = item.description.trim();
+        const categoryId = $("uploadCategory") ? $("uploadCategory").value : "";
         if (description) url += "&description=" + encodeURIComponent(description);
+        if (categoryId) url += "&categoryId=" + encodeURIComponent(categoryId);
 
         try {
           const response = await api(url, {
@@ -1175,8 +2211,11 @@ if ($("upload") && $("uploadFile")) {
           const result = await response.json();
           const fileId = result.id || item.file.name;
           uploadedCount++;
-          if (SLIDE_EXTS.has(extOf(fileId))) uploadedSlideIds.push(fileId);
-          // Видаляємо лише підтверджено завантажений елемент.
+          if (SLIDE_EXTS.has(extOf(fileId))) {
+            if (result.conversionStatus === "failed") conversionFailures.push(fileId + " — " + (result.conversionError || "PNG-слайди не готові"));
+            else uploadedSlideIds.push(fileId);
+          }
+          // Оригінал збережено навіть у разі помилки конвертації; не дублюємо upload.
           uploadQueueState = uploadQueueState.filter((queued) => queued.key !== item.key);
         } catch (error) {
           item.status = "error";
@@ -1186,10 +2225,12 @@ if ($("upload") && $("uploadFile")) {
       }
 
       renderUploadQueue();
-      // Завантаження завершилося: помилки лишаються в черзі з описами для retry.
+      // Конвертація виконується сервером у фоні; очікуємо підтвердження API,
+      // не запускаючи повторну конвертацію для кожного щойно завантаженого файлу.
       for (const fileId of uploadedSlideIds) {
         try {
-          await prepareSlidesBg(fileId);
+          setUploadStatus("Очікування PNG-слайдів: " + fileId + "…");
+          await waitForSlideConversion(fileId);
         } catch (error) {
           conversionFailures.push(fileId + " — " + (error.message || "Помилка конвертації"));
         }
@@ -1198,7 +2239,7 @@ if ($("upload") && $("uploadFile")) {
       let summary = "Завантажено: " + uploadedCount + ". У черзі залишилося: " + uploadQueueState.length + ".";
       if (failures.length) summary += " Не вдалося завантажити: " + failures.join("; ") + ".";
       if (conversionFailures.length) {
-        summary += " Помилка підготовки PNG (файли не позначено готовими): " + conversionFailures.join("; ") + ".";
+        summary += " Помилка підготовки PNG (оригінали збережено, матеріали не готові до показу): " + conversionFailures.join("; ") + ".";
       } else if (uploadedSlideIds.length) {
         summary += " PNG-слайди підтверджено готовими.";
       }
@@ -1224,12 +2265,41 @@ if ($("upload") && $("uploadFile")) {
 // шукають ім'я файлу у масиві files і без нього показують сирий id (гонка двох
 // паралельних fetch на завантаженні сторінки)
 let filesReady = Promise.resolve();
+
+/**
+ * Issue #63 (Етап 5): відновлення серверної сесії при завантаженні сторінки.
+ *
+ * PIN зберігається лише в sessionStorage (на одну вкладку), а cookie сесії —
+ * на сервері. Після перезапуску LyServer усі попередні сесії скасовані, тому:
+ *  - викладач без PIN у цій вкладці проходить вхід заново (форма ролі);
+ *  - викладач із PIN проходить повторну верифікацію — стара cookie невалідна;
+ *  - учень дізнається про скасування з першого ж запиту стану (401 → вхід).
+ * Поки сесію не відновлено, опитування стану не починається (гонка з verify).
+ */
+async function bootstrapSession() {
+  if (role !== "teacher") return;
+  if (!pin) {
+    handleSessionExpired();
+    return;
+  }
+  try {
+    const response = await fetch("/api/auth/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin })
+    });
+    if (!response.ok) handleSessionExpired();
+  } catch {
+    /* сервер недоступний — стан опитування повідомить про помилку зв'язку */
+  }
+}
+
 if (!role) {
   openRoleModal();
   updateRoleUI();
 } else {
   updateRoleUI();
-  filesReady = refreshFiles();
+  filesReady = bootstrapSession().then(() => refreshFiles());
 }
 
 if (isDemoPage) {
@@ -1238,16 +2308,37 @@ if (isDemoPage) {
   setInterval(() => pollState(false), DEMO_STATE_POLL_MS);
 }
 
+// Issue #63: одна сторінка учня з двома режимами. Учень (або гість без ролі)
+// дізнається про демонстрацію зі СЕРВЕРНОГО стану: початок/зупинка показу
+// перемикають сторінку без перезавантаження; перезавантаження або повторне
+// підключення проходять той самий шлях і одразу отримують актуальний стан
+if (isMaterialsPage) {
+  filesReady.finally(() => {
+    if (role !== "teacher") pollState(true);
+  });
+  setInterval(() => {
+    if (role !== "teacher") pollState(false);
+  }, DEMO_STATE_POLL_MS);
+}
+
 // Issue #7: учень повідомляє сервер про активність свого сеансу.
 // Обробники реєструються завжди (усередині — перевірка ролі), щоб вхід учня
 // в поточній сесії також працював, а не лише при перезавантаженні сторінки.
 document.addEventListener("visibilitychange", () => {
   reportActivityChange(document.visibilityState !== "hidden");
 });
-window.addEventListener("pagehide", () => reportActivityChange(false));
+window.addEventListener("pagehide", () => {
+  reportActivityChange(false);
+  reportTeacherLeave(); // Issue #63: закриття вкладки вчителем зупиняє показ
+});
 if (role === "student" && studentDisplayName) startHeartbeat();
 
 // Issue #7: викладач опитує список присутності та отримує тости
 if (role === "teacher") {
   startPresencePolling();
+  // Issue #63: heartbeat викладача — без нього активний показ зупиняється
+  // автоматично, коли вчитель іде (вкладка, «Вийти», зв'язок)
+  startTeacherHeartbeat();
+// Issue #63 (Етап 5): сесію викладача відновлює bootstrapSession() перед
+// першим pollState — окремо оновлювати cookie тут уже не потрібно
 }

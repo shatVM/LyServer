@@ -5,7 +5,8 @@
   "description": "Автономний локальний вебсервер навчальних матеріалів для роботи в укритті.",
   "scripts": {
     "start": "node server.js",
-    "test": "node test.js"
+    "test": "node test.js",
+    "test:browser": "node browser-test.js"
   },
   "dependencies": {
     "canvas": "^3.2.3",

@@ -1,0 +1,66 @@
+name: LyServer tests
+
+on:
+  pull_request:
+    branches: [clean-main]
+  push:
+    branches: [clean-main, "feature/issue-63-stage4-categories-order-conversion"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lyserver-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Install, test and smoke-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install system libraries for canvas and PDF conversion
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y             pkg-config             libcairo2-dev             libpango1.0-dev             libjpeg-dev             libgif-dev             librsvg2-dev             poppler-utils
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Run automated regression tests
+        env:
+          CI: "true"
+        run: npm test
+
+      - name: Verify server starts and responds to health check
+        shell: bash
+        run: |
+          set -euo pipefail
+          PORT=3000 PORTAL_PIN=2468 node server.js > /tmp/lyserver.log 2>&1 &
+          server_pid=$!
+          cleanup() {
+            kill "$server_pid" 2>/dev/null || true
+            wait "$server_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3000/health > /tmp/lyserver-health.json; then
+              cat /tmp/lyserver-health.json
+              grep -q '"status":"ok"' /tmp/lyserver-health.json
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/lyserver.log
+          echo "LyServer did not become healthy within 30 seconds"
+          exit 1

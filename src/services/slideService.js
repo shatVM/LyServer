@@ -12,11 +12,18 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const config = require("../config");
 
 const execFileAsync = promisify(execFile);
+
+// pdf-poppler містить лише бінарники для win32/darwin; на інших платформах
+// його require() друкує «<platform> is NOT supported.» і завершує процес
+// через process.exit(1) — сервер падав під час фонової конвертації першого PDF.
+// На Linux використовуємо існуючий fallback на pdfjs-dist + canvas.
+const POPPLER_SUPPORTED = ["darwin", "win32"].includes(os.platform());
 
 // Ensure base slides directory exists
 fs.mkdirSync(config.slidesDir, { recursive: true });
@@ -61,10 +68,80 @@ function writeManifest(name, data) {
 
 /** Delete all cached slides for a given file */
 function clearSlides(name) {
+  // Issue #63: очищення набору PNG — явна інвалідація кешу перевірки
+  manifestValidationCache.delete(name);
   const folder = slideFolder(name);
   if (fs.existsSync(folder)) {
     fs.rmSync(folder, { recursive: true, force: true });
   }
+}
+
+function validateManifest(name, manifest) {
+  if (!manifest || !Number.isInteger(manifest.pageCount) || manifest.pageCount < 1) {
+    throw new Error("Маніфест не підтверджує наявність PNG-слайдів");
+  }
+  for (let page = 1; page <= manifest.pageCount; page++) {
+    const pngPath = pagePngPath(name, page);
+    if (!fs.existsSync(pngPath) || fs.statSync(pngPath).size <= 8) {
+      throw new Error("Не знайдено готовий PNG-слайд №" + page);
+    }
+    const fd = fs.openSync(pngPath, "r");
+    const header = Buffer.alloc(8);
+    let bytesRead;
+    try { bytesRead = fs.readSync(fd, header, 0, 8, 0); }
+    finally { fs.closeSync(fd); }
+    if (bytesRead !== 8 || !header.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+      throw new Error("Некоректний PNG-слайд №" + page);
+    }
+  }
+  return manifest;
+}
+
+// Issue #63 (відгук рев'ю): кеш результатів повної перевірки PNG-набору.
+// Без кешу кожне перемикання слайда (запит /slides/<file>/<page> → ensureSlides)
+// сканувало ВСІ сторінки (stat + open + read кожного PNG). Тепер повна перевірка
+// виконується лише один раз на зміну набору файлів або стану конвертації.
+//
+// Спотовий ключ (fingerprint) — mtime трьох джерел правди:
+//   1) вихідного файлу (перезапис/заміна джерела),
+//   2) теки .slides/<file>/ (створення/видалення/перейменування PNG міняє mtime теки),
+//   3) manifest.json (написання нового маніфесту після конвертації).
+// Конвертація та очищення завжди створюють або видаляють файли в теці, тому
+// зміна стану конвертації та зміни набору змушують повну перевірку повторитися.
+// Навмисне зміщення вмісту наявного PNG без зміни набору файлів кешем
+// не відстежується — такі файли пише лише сервер, і зробити це можна лише
+// через очищення/повторну конвертацію (зміна mtime теки або маніфесту).
+const manifestValidationCache = new Map();
+
+/** fingerprint стану джерела/набору PNG для file, або null якщо стан невідомий */
+function validationFingerprint(name) {
+  try {
+    const src = fs.statSync(path.join(config.dataDir, name));
+    const folder = fs.statSync(slideFolder(name));
+    const manifest = fs.statSync(manifestPath(name));
+    return src.mtimeMs + "|" + folder.mtimeMs + "|" + manifest.mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Повна перевірка PNG з кешем: той самий набір файлів перевіряється один раз,
+ * повторні запити (навігація слайдами, /api/slides/info, /api/files) обмежуються
+ * трьома stat-викликами. Інвалідація — за зміною mtime джерела/теки/маніфесту
+ * або явним викликом clearSlides().
+ */
+function validateManifestCached(name, manifest) {
+  const fingerprint = validationFingerprint(name);
+  if (fingerprint !== null) {
+    const cached = manifestValidationCache.get(name);
+    if (cached && cached.fingerprint === fingerprint) return cached.manifest;
+  }
+  const validated = validateManifest(name, manifest);
+  if (fingerprint !== null) {
+    manifestValidationCache.set(name, { fingerprint, manifest: validated });
+  }
+  return validated;
 }
 
 /** Return the absolute path to page PNG (1-indexed). Does NOT check existence. */
@@ -83,6 +160,9 @@ async function convertPdf(name) {
   const srcPath = path.join(config.dataDir, name);
 
   try {
+    if (!POPPLER_SUPPORTED) {
+      throw new Error("pdf-poppler не підтримує платформу " + os.platform());
+    }
     const poppler = require("pdf-poppler");
     const info = await poppler.info(srcPath);
     const totalPages = parseInt(info.pages, 10) || 1;
@@ -216,28 +296,35 @@ async function ensureSlides(name) {
     throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
   }
 
+  // Спершу поважаємо lock: не перевіряємо/видаляємо кеш паралельно з конвертацією.
+  const pending = inFlight.get(name);
+  if (pending) return pending;
+
   const existing = readManifest(name);
   if (existing) {
     const srcMtime = fs.statSync(srcPath).mtimeMs;
     if (existing.generatedAt >= srcMtime) {
-      return existing; // up-to-date
+      try {
+        return validateManifestCached(name, existing);
+      } catch {
+        // Старий або неповний кеш не є доказом готовності — перебудуємо його.
+        clearSlides(name);
+      }
     }
   }
-
-  // Конвертація цього файлу вже виконується — чекаємо на неї
-  const pending = inFlight.get(name);
-  if (pending) return pending;
 
   const ext = path.extname(name).toLowerCase();
   const run = () => {
     if (ext === ".pdf") return convertPdf(name);
-    if (ext === ".pptx") return convertPptx(name);
+    if (ext === ".ppt" || ext === ".pptx") return convertPptx(name);
     return Promise.reject(
       Object.assign(new Error("Конвертація не підтримується для цього типу файлу"), { status: 400 })
     );
   };
 
-  const task = run().finally(() => inFlight.delete(name));
+  const task = run()
+    .then(manifest => validateManifestCached(name, manifest))
+    .finally(() => inFlight.delete(name));
   inFlight.set(name, task);
   return task;
 }
@@ -248,8 +335,12 @@ async function ensureSlides(name) {
  * Якщо конвертація зараз виконується — { converting: true }.
  */
 function getManifest(name) {
+  if (inFlight.has(name)) return { converting: true };
   const manifest = readManifest(name);
-  if (manifest) return manifest;
+  if (manifest) {
+    try { return validateManifestCached(name, manifest); }
+    catch { return inFlight.has(name) ? { converting: true } : null; }
+  }
   return inFlight.has(name) ? { converting: true } : null;
 }
 
