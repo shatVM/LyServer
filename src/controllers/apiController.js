@@ -167,6 +167,10 @@ class ApiController {
 
     try {
       const result = fileService.toggleHide(file, Boolean(hidden));
+      // Issue #63 (Етап 4): ревізія /api/state зростає — усі учнівські клієнти
+      // на черговому опитуванні перечитують каталог і бачать прихований матеріал
+      // зниклим (а опублікований — знову доступним) без перезавантаження
+      stateService.touch();
       res.json(result);
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Помилка зміни видимості");

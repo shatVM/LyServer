@@ -142,12 +142,31 @@ async function main() {
       check("Issue #2: prepare з PIN → 200", r.status === 200, `status=${r.status}`);
 
       // 6. Issue #4: прихований файл недоступний учням
+      // Issue #63 Етап 4 §2: ревізія /api/state ДО зміни видимості — порівняємо
+      // після, щоб показати миттєву синхронізацію через наявний механізм стану
+      const s4RevBeforeHide = (await (await fetch(base + "/api/state")).json()).revision;
       r = await fetch(`${base}/api/files/toggle-hide`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pin: PIN, file: fileId, hidden: true })
       });
       check("Викладач: приховування файлу", r.status === 200, `status=${r.status}`);
+
+      // Issue #63 Етап 4 §2: ДВА незалежні учнівські клієнти опитують /api/state
+      // і каталог: обидва бачать нову ревізію (сигнал перечитати каталог) та
+      // актуальний список матеріалів — без перезавантаження сторінки
+      const s4StateA = await (await fetch(base + "/api/state")).json();
+      const s4StateB = await (await fetch(base + "/api/state")).json();
+      const s4StudentListA = await (await fetch(base + "/api/files")).json();
+      const s4StudentListB = await (await fetch(base + "/api/files")).json();
+      check(
+        "Issue #63 Е4: два учнівські клієнти бачать нову ревізію та актуальний каталог",
+        s4StateA.revision > s4RevBeforeHide &&
+          s4StateB.revision === s4StateA.revision &&
+          !s4StudentListA.some((f) => f.id === fileId) &&
+          !s4StudentListB.some((f) => f.id === fileId),
+        JSON.stringify({ before: s4RevBeforeHide, a: s4StateA.revision, b: s4StateB.revision })
+      );
 
       const studentList = await (await fetch(base + "/api/files")).json();
       check(
@@ -164,6 +183,14 @@ async function main() {
       r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1?pin=${PIN}`);
       check("Викладач: приховані слайди доступні", r.status === 200, `status=${r.status}`);
 
+      // Issue #63 Етап 4 §1: приватне прев'ю та спільна демонстрація прихованих
+      // матеріалів — <img>/<video> не шлють заголовків, тому вчитель отримує
+      // доступ через query-pin (той самий extractPin, що й заголовок X-Portal-Pin)
+      r = await fetch(`${base}/files/${encodeURIComponent(fileId)}?pin=${PIN}`);
+      check("Issue #63 Е4: викладач відкриває прихований файл через query-pin", r.status === 200, `status=${r.status}`);
+      r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`);
+      check("Issue #63 Е4: той самий файл без PIN лишається закритим", r.status === 404, `status=${r.status}`);
+
       // Issue #63 Р: публічне /api/slides/info теж не розкриває прихований файл
       r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`);
       check("Issue #63 Р: прихований файл закритий у /api/slides/info (учень)", r.status === 404, `status=${r.status}`);
@@ -175,6 +202,19 @@ async function main() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pin: PIN, file: fileId, hidden: false })
       });
+
+      // Issue #63 Етап 4 §2: публікація матеріалу — ревізія зростає знову, і
+      // обидва клієнти отримують файл у каталозі на наступному опитуванні
+      const s4StateShow = await (await fetch(base + "/api/state")).json();
+      const s4ListShowA = await (await fetch(base + "/api/files")).json();
+      const s4ListShowB = await (await fetch(base + "/api/files")).json();
+      check(
+        "Issue #63 Е4: після публікації ревізія зросла і файл повернувся в каталог учнів",
+        s4StateShow.revision > s4StateA.revision &&
+          s4ListShowA.some((f) => f.id === fileId) &&
+          s4ListShowB.some((f) => f.id === fileId),
+        JSON.stringify({ hiddenRev: s4StateA.revision, showRev: s4StateShow.revision })
+      );
 
       // 7. Issue #7: присутність і активність сесії
       r = await fetch(`${base}/api/presence/heartbeat`, {
@@ -829,6 +869,52 @@ async function main() {
       check("Issue #63 Е4: іконки категорій локальні та працюють офлайн", iconSprite.includes('id="folder-input"') && iconSprite.includes('id="arrow-up"') && appSource.includes('use.setAttribute("href", "/icons.svg#" + name)'));
 
       // ---------------------------------------------------------------------
+      // Issue #63 Етап 4: приховані матеріали, керування та адаптивний інтерфейс
+      // (джерельні маркери поряд із браузерною перевіркою — див. звіт)
+      // ---------------------------------------------------------------------
+      const s4CssSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "public", "css", "style.css"), "utf-8");
+      check(
+        "Issue #63 Е4: іконки дій — eye / monitor-play (демонстрація не око) / eye-off / trash-2",
+        iconSprite.includes('id="eye"') && iconSprite.includes('id="eye-off"') &&
+          iconSprite.includes('id="monitor-play"') && iconSprite.includes('id="trash-2"') &&
+          appSource.includes('"monitor-play"') && appSource.includes('"eye"') &&
+          appSource.includes('"eye-off"') && appSource.includes('"trash-2"')
+      );
+      check(
+        "Issue #63 Е4: мітку «Приховано» прибрано, кнопки окремим рядком, мобільні — лише іконки",
+        !appSource.includes("badge-hidden") &&
+          appSource.includes('"btn-label"') &&
+          s4CssSource.includes("flex-direction: column") &&
+          s4CssSource.includes(".file-actions .btn-label") &&
+          s4CssSource.includes("linear-gradient(90deg, rgba(220, 38, 38")
+      );
+      check(
+        "Issue #63 Е4: категорії — один рядок з назвою та еліпсис; модальне прев'ю вписує зображення",
+        s4CssSource.includes("flex-wrap:nowrap") &&
+          s4CssSource.includes(".category-name") &&
+          s4CssSource.includes("text-overflow:ellipsis") &&
+          s4CssSource.includes("object-fit: contain")
+      );
+      check(
+        "Issue #63 Е4: клієнт перечитує каталог на новій ревізії та закриває перегляд прихованого",
+        appSource.includes("lastCatalogRevision = state.revision") &&
+          appSource.includes("function closeLocalViewIfHidden()") &&
+          appSource.includes("await refreshFiles();")
+      );
+      const s4StateServiceSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "services", "stateService.js"), "utf-8");
+      check(
+        "Issue #63 Е4: сервер піднімає ревізію при зміні видимості (stateService.touch)",
+        s4StateServiceSource.includes("touch()") &&
+          apiControllerSource.includes("stateService.touch();")
+      );
+      check(
+        "Issue #63 Е4: URL медіа викладача будується через let (без TypeError const +=)",
+        appSource.includes('let url = "/files/" + encodeURIComponent(name);') &&
+          appSource.includes('let url = "/slides/" + encodeURIComponent(name) + "/" + page;') &&
+          appSource.includes('url += "?pin=" + encodeURIComponent(pin);')
+      );
+
+      // ---------------------------------------------------------------------
       // Issue #63 (відгук рев'ю): кеш повної перевірки PNG, без витоку
       // діагностики в публічні відповіді та двохрежимна сторінка учня.
       // ---------------------------------------------------------------------
@@ -997,7 +1083,8 @@ async function main() {
           jsSrc.includes("function reorderCategory(category, direction)") &&
           jsSrc.includes("function renameMaterial(fileId, currentName)") &&
           jsSrc.includes("bar.className = \"category-actions\"") &&
-          jsSrc.includes("onclick = () => deleteCategory(group.category)") &&
+          // Етап 4: обробник тепер передається через спільний хелпер кнопок
+          jsSrc.includes("() => deleteCategory(group.category)") &&
           demoHtml.includes('id="createCategoryBtn"')
       );
       check(

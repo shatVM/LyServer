@@ -22,6 +22,11 @@ let localPageCount = 1;
 
 // Shared demo state
 let lastRevision = -1;
+// Issue #63 (Етап 4): окремий лічильник ревізії для оновлення КАТАЛОГУ.
+// lastRevision не оновлюється, коли демо не активне (там pollState завершується
+// раніше), тож використовувати його для каталогу означало б перечитування
+// /api/files що 0.5 с. Тут фіксуємо лише ревізії, які уже обробили.
+let lastCatalogRevision = -1;
 let sharedState = null;
 let lastVideoUpdate = 0;
 let videoElement = null;
@@ -327,17 +332,48 @@ function iconSvg(name) {
   return svg;
 }
 
+/**
+ * Issue #63 (Етап 4): кнопка дії над матеріалом — іконка + підпис (.btn-label).
+ * На мобільному підпис ховається CSS-ом (лише іконки), тому НАЗВА дії завжди
+ * продубльована в aria-label/title: кнопка лишається зрозумілою для клавіатури
+ * та скринрідера і має достатній розмір натискання (див. .file-actions у CSS).
+ */
+function actionButton(className, iconName, labelText, title, ariaLabel, onclick) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = className;
+  if (iconName) btn.append(iconSvg(iconName));
+  if (labelText) {
+    const label = document.createElement("span");
+    label.className = "btn-label";
+    label.textContent = labelText;
+    btn.append(label);
+  }
+  if (title) btn.title = title;
+  if (ariaLabel) btn.setAttribute("aria-label", ariaLabel);
+  btn.onclick = onclick;
+  return btn;
+}
+
 function formatSize(bytes) {
   if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + " КБ";
   return (bytes / (1024 * 1024)).toFixed(1) + " МБ";
 }
 
 function fileUrl(name) {
-  return "/files/" + encodeURIComponent(name);
+  // Issue #63 (Етап 4): <img>/<video> не вміють додавати заголовки, тому вчитель
+  // відкриває приховані матеріали (приватний перегляд і спільна демонстрація)
+  // через query-параметр pin — extractPin шукає його після заголовка і тіла.
+  // Учень ніколи не додає pin: для нього URL лишається публічним.
+  let url = "/files/" + encodeURIComponent(name);
+  if (role === "teacher" && pin) url += "?pin=" + encodeURIComponent(pin);
+  return url;
 }
 
 function slideUrl(name, page) {
-  return "/slides/" + encodeURIComponent(name) + "/" + page;
+  let url = "/slides/" + encodeURIComponent(name) + "/" + page;
+  if (role === "teacher" && pin) url += "?pin=" + encodeURIComponent(pin);
+  return url;
 }
 
 function extOf(name) {
@@ -381,7 +417,10 @@ function renderSlideImage(name, page, totalPages, ctx) {
   }
 
   img.alt = "Слайд " + page;
-  img.src = slideUrl(name, page) + "?t=" + Date.now(); // cache-bust during prepare
+  // Cache-bust під час конвертації: pin учителя вже може міститися в query,
+  // тому параметр t додаємо через ? або & залежно від наявності query
+  const slideSrc = slideUrl(name, page);
+  img.src = slideSrc + (slideSrc.includes("?") ? "&" : "?") + "t=" + Date.now();
 
   // Show loading overlay only when first loaded
   img.onload = () => {};
@@ -879,9 +918,13 @@ function createFileCard(file, isTeacher, showCategoryActions) {
   item.className = "file" + (file.hidden ? " file-is-hidden" : "");
   const info = document.createElement("div");
   info.className = "file-info";
-  const hiddenBadge = (isTeacher && file.hidden) ? '<span class="badge-hidden">🚫 Приховано</span>' : "";
+  // Issue #63 (Етап 4): видима текстова мітка «Приховано» прибрана — прихований
+  // стан позначається насиченим червоним оформленням картки (.file-is-hidden).
+  // Для скринрідера стан дублюється службовим текстом, щоб не покладатися лише
+  // на колір; видимий індикатор дії «Приховати/Показати» — іконка eye/eye-off.
   const typeTag = SLIDE_EXTS.has(file.ext) ? "🖼️" : "🎬";
-  info.innerHTML = '<div class="file-name">' + typeTag + " " + esc(file.name) + hiddenBadge +
+  info.innerHTML = '<div class="file-name">' + typeTag + " " + esc(file.name) +
+    (file.hidden ? '<span class="sr-only">Приховано від учнів</span>' : "") +
     '</div><div class="hint">' + esc(file.ext.toUpperCase()) + " • " + formatSize(file.size) + "</div>";
 
   if (file.description) {
@@ -929,55 +972,82 @@ function createFileCard(file, isTeacher, showCategoryActions) {
   actions.className = "file-actions";
   const fileId = file.id || file.name;
   if (isMaterialsPage) {
-    const local = document.createElement("button");
-    local.className = "secondary btn-sm"; local.textContent = "👁️ Відкрити";
-    local.onclick = () => displayLocalFile(fileId); actions.append(local);
+    // Issue #63 (Етап 4): усі кнопки дій — іконка + підпис; на мобільному
+    // підпис ховається (лише іконки), назви дій зберігаються в aria-label/title
+    const local = actionButton(
+      "secondary btn-sm", "eye", "Відкрити",
+      "Відкрити для себе (індивідуальний перегляд)",
+      "Відкрити для себе: " + file.name,
+      () => displayLocalFile(fileId)
+    );
+    actions.append(local);
     if (isTeacher) {
-      const broadcast = document.createElement("button");
-      broadcast.className = "btn-sm"; broadcast.textContent = "📺 Транслювати";
-      broadcast.onclick = () => broadcastFile(fileId, true); actions.append(broadcast);
-      const hideBtn = document.createElement("button");
-      hideBtn.className = "btn-sm " + (file.hidden ? "btn-success" : "btn-warning");
-      hideBtn.textContent = file.hidden ? "👁️ Показати" : "🚫 Приховати";
-      hideBtn.onclick = () => toggleHideFile(fileId, file.hidden); actions.append(hideBtn);
-      const delBtn = document.createElement("button");
-      delBtn.className = "btn-sm btn-danger"; delBtn.textContent = "🗑️ Видалити";
-      delBtn.onclick = () => deleteFile(fileId, file.name); actions.append(delBtn);
+      // Іконка демонстрації — monitor-play (екран/презентація), не око:
+      // показ всім має відрізнятися від приватного «Відкрити/Перегляд»
+      const broadcast = actionButton(
+        "btn-sm", "monitor-play", "Транслювати",
+        "Спільна демонстрація для всіх учнів",
+        "Транслювати всім: " + file.name,
+        () => broadcastFile(fileId, true)
+      );
+      actions.append(broadcast);
+      const hideBtn = actionButton(
+        "btn-sm " + (file.hidden ? "btn-success" : "btn-warning"),
+        file.hidden ? "eye-off" : "eye",
+        file.hidden ? "Показати" : "Приховати",
+        file.hidden ? "Показати матеріал учням" : "Приховати матеріал від учнів",
+        (file.hidden ? "Показати" : "Приховати") + " для учнів: " + file.name,
+        () => toggleHideFile(fileId, file.hidden)
+      );
+      actions.append(hideBtn);
+      const delBtn = actionButton(
+        "btn-sm btn-danger", "trash-2", "Видалити",
+        "Видалити матеріал зі сервера",
+        "Видалити матеріал: " + file.name,
+        () => deleteFile(fileId, file.name)
+      );
+      actions.append(delBtn);
     }
   } else if (isDemoPage && isTeacher) {
     // Issue #63 (§3.2/§3.3): приватний перегляд відрізняється від спільної
-    // демонстрації не лише кольором, а й піктограмою та підписом (§4)
-    const previewBtn = document.createElement("button");
-    previewBtn.type = "button"; previewBtn.className = "secondary btn-sm";
-    previewBtn.textContent = "👁️ Перегляд";
-    previewBtn.title = "Приватний перегляд (лише для вас)";
-    previewBtn.setAttribute("aria-label", "Приватний перегляд: " + file.name);
-    previewBtn.onclick = () => openPreviewModal(fileId, previewBtn);
-    const broadcast = document.createElement("button");
-    broadcast.className = "btn-sm"; broadcast.textContent = "📺 Показувати всім";
-    broadcast.title = "Спільна демонстрація для всіх учнів";
-    broadcast.setAttribute("aria-label", "Показувати всім: " + file.name);
-    broadcast.onclick = () => broadcastFile(fileId, false);
+    // демонстрації не лише кольором, а й піктограмою та підписом (§4).
+    // Приватний перегляд — око (eye); демонстрація всім — екран/презентація
+    // (monitor-play), а НЕ око (вимога Етапу 4 §3)
+    const previewBtn = actionButton(
+      "secondary btn-sm", "eye", "Перегляд",
+      "Приватний перегляд (лише для вас)",
+      "Приватний перегляд: " + file.name,
+      () => openPreviewModal(fileId, previewBtn)
+    );
+    const broadcast = actionButton(
+      "btn-sm", "monitor-play", "Показувати всім",
+      "Спільна демонстрація для всіх учнів",
+      "Показувати всім: " + file.name,
+      () => broadcastFile(fileId, false)
+    );
     actions.append(previewBtn, broadcast);
     if (showCategoryActions) {
       // Видимість для учнів, перейменування, видалення — дії вчителя (§3.2)
-      const hideBtn = document.createElement("button");
-      hideBtn.type = "button";
-      hideBtn.className = "btn-sm " + (file.hidden ? "btn-success" : "btn-warning");
-      hideBtn.textContent = file.hidden ? "👁️ Показати" : "🚫 Приховати";
-      hideBtn.setAttribute("aria-label", (file.hidden ? "Показати" : "Приховати") + " для учнів: " + file.name);
-      hideBtn.onclick = () => toggleHideFile(fileId, file.hidden);
-      const renameBtn = document.createElement("button");
-      renameBtn.type = "button"; renameBtn.className = "secondary btn-sm order-button";
-      renameBtn.append(iconSvg("edit"));
-      renameBtn.title = "Перейменувати матеріал";
-      renameBtn.setAttribute("aria-label", "Перейменувати матеріал: " + file.name);
-      renameBtn.onclick = () => renameMaterial(fileId, file.name);
-      const delBtn = document.createElement("button");
-      delBtn.type = "button"; delBtn.className = "btn-sm btn-danger";
-      delBtn.textContent = "🗑️ Видалити";
-      delBtn.setAttribute("aria-label", "Видалити матеріал: " + file.name);
-      delBtn.onclick = () => deleteFile(fileId, file.name);
+      const hideBtn = actionButton(
+        "btn-sm " + (file.hidden ? "btn-success" : "btn-warning"),
+        file.hidden ? "eye-off" : "eye",
+        file.hidden ? "Показати" : "Приховати",
+        file.hidden ? "Показати матеріал учням" : "Приховати матеріал від учнів",
+        (file.hidden ? "Показати" : "Приховати") + " для учнів: " + file.name,
+        () => toggleHideFile(fileId, file.hidden)
+      );
+      const renameBtn = actionButton(
+        "secondary btn-sm order-button", "edit", "",
+        "Перейменувати матеріал",
+        "Перейменувати матеріал: " + file.name,
+        () => renameMaterial(fileId, file.name)
+      );
+      const delBtn = actionButton(
+        "btn-sm btn-danger", "trash-2", "Видалити",
+        "Видалити матеріал зі сервера",
+        "Видалити матеріал: " + file.name,
+        () => deleteFile(fileId, file.name)
+      );
       actions.append(hideBtn, renameBtn, delBtn);
       const up = document.createElement("button");
       up.type = "button"; up.className = "secondary btn-sm order-button"; up.append(iconSvg("arrow-up"));
@@ -1007,20 +1077,32 @@ function createFileCard(file, isTeacher, showCategoryActions) {
       item.append(info, actions, menu);
     } else item.append(info, actions);
     if (SLIDE_EXTS.has(file.ext) && file.conversionStatus !== "ready") {
-      const retry = document.createElement("button");
-      retry.type = "button"; retry.className = "secondary btn-sm";
-      retry.textContent = "Повторити конвертацію"; retry.onclick = () => retrySlideConversion(fileId);
+      const retry = actionButton(
+        "secondary btn-sm", "refresh-cw", "Повторити конвертацію",
+        "Повторити конвертацію PNG-слайдів",
+        "Повторити конвертацію: " + file.name,
+        () => retrySlideConversion(fileId)
+      );
       actions.append(retry);
     }
     return item;
   } else if (isUploadPage && isTeacher) {
-    const hideBtn = document.createElement("button");
-    hideBtn.className = "btn-sm " + (file.hidden ? "btn-success" : "btn-warning");
-    hideBtn.textContent = file.hidden ? "👁️ Показати" : "🚫 Приховати";
-    hideBtn.onclick = () => toggleHideFile(fileId, file.hidden); actions.append(hideBtn);
-    const delBtn = document.createElement("button");
-    delBtn.className = "btn-sm btn-danger"; delBtn.textContent = "🗑️ Видалити";
-    delBtn.onclick = () => deleteFile(fileId, file.name); actions.append(delBtn);
+    const hideBtn = actionButton(
+      "btn-sm " + (file.hidden ? "btn-success" : "btn-warning"),
+      file.hidden ? "eye-off" : "eye",
+      file.hidden ? "Показати" : "Приховати",
+      file.hidden ? "Показати матеріал учням" : "Приховати матеріал від учнів",
+      (file.hidden ? "Показати" : "Приховати") + " для учнів: " + file.name,
+      () => toggleHideFile(fileId, file.hidden)
+    );
+    actions.append(hideBtn);
+    const delBtn = actionButton(
+      "btn-sm btn-danger", "trash-2", "Видалити",
+      "Видалити матеріал зі сервера",
+      "Видалити матеріал: " + file.name,
+      () => deleteFile(fileId, file.name)
+    );
+    actions.append(delBtn);
   }
   item.append(info, actions);
   return item;
@@ -1063,7 +1145,12 @@ function renderCategoryGroups(root) {
     chevron.className = "category-chevron";
     chevron.setAttribute("aria-hidden", "true");
     chevron.textContent = expanded ? "▾" : "▸";
-    toggle.append(iconSvg("folder"), document.createTextNode(" " + group.name + " "), chevron);
+    // Issue #63 (Етап 4): назва в окремому span — довгі назви коротуються
+    // еліпсисом, а кнопки дій залишаються в тому самому рядку з назвою
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "category-name";
+    nameSpan.textContent = " " + group.name + " ";
+    toggle.append(iconSvg("folder"), nameSpan, chevron);
     title.append(toggle);
     header.append(title);
     if (group.category && showCategoryActions) {
@@ -1092,11 +1179,12 @@ function renderCategoryGroups(root) {
       down.setAttribute("aria-label", "Перемістити категорію нижче: «" + group.name + "»");
       down.onclick = () => reorderCategory(group.category, "down");
 
-      const remove = document.createElement("button");
-      remove.type = "button"; remove.className = "secondary btn-sm";
-      remove.textContent = "Видалити категорію";
-      remove.setAttribute("aria-label", "Видалити категорію " + group.name);
-      remove.onclick = () => deleteCategory(group.category);
+      const remove = actionButton(
+        "secondary btn-sm", "trash-2", "Видалити категорію",
+        "Видалити категорію",
+        "Видалити категорію " + group.name,
+        () => deleteCategory(group.category)
+      );
 
       bar.append(rename, up, down, remove);
       header.append(bar);
@@ -1327,6 +1415,24 @@ function restoreLocalViewer() {
   if ($("pdfControls")) $("pdfControls").style.display = "none";
   if ($("viewerTitle")) $("viewerTitle").textContent = "Особистий перегляд";
   $("viewer").innerHTML = '<div class="empty">Оберіть файл зі списку та натисніть «Відкрити для себе».</div>';
+}
+
+/**
+ * Issue #63 (Етап 4): якщо учень саме переглядав матеріал, який учитель зробив
+ * прихованим (або видалив), — коректно завершити цей перегляд і повернути його
+ * до актуального каталогу. Викликається після перечитування каталогу в pollState:
+ * для учня прихований матеріал зникає з files, отже, локальний перегляд не може
+ * тривати. Спільна демонстрація НЕ переривається (учитель має право показувати
+ * приховані матеріали) — режим демонстрації перевіряється окремо.
+ */
+function closeLocalViewIfHidden() {
+  if (!isMaterialsPage || materialsDemoActive || role === "teacher" || !localCurrentFile) return;
+  const viewing = files.find(f => (f.id === localCurrentFile || f.name === localCurrentFile));
+  if (viewing) return;
+  localCurrentFile = "";
+  localPageNum = 1;
+  localPageCount = 1;
+  restoreLocalViewer();
 }
 
 // ---------------------------------------------------------------------------
@@ -1614,6 +1720,22 @@ async function pollState(force = false) {
     const state = await response.json();
     const prev = sharedState;
     sharedState = state;
+
+    // Issue #63 (Етап 4): нова ревізія — сигнал, що вчитель оновив щось спільне
+    // (зокрема приховав або опублікував матеріал; toggle-hide теж піднімає ревізію
+    // через stateService.touch()). Учень перечитує каталог із сервера: прихований
+    // матеріал зникає, опублікований з'являється — без перезавантаження сторінки,
+    // через НАЯВНИЙ механізм /api/state (без окремого каналу сповіщень).
+    // Лічильник тут окремий від lastRevision (див. коментар біля його оголошення).
+    if (role !== "teacher") {
+      if (force) {
+        lastCatalogRevision = state.revision;
+      } else if (state.revision !== lastCatalogRevision) {
+        lastCatalogRevision = state.revision;
+        await refreshFiles();
+        closeLocalViewIfHidden();
+      }
+    }
 
     // Issue #63: перемикання режимів сторінки учня без перезавантаження —
     // за серверним станом демонстрації (початок ховає каталог, зупинка повертає)
