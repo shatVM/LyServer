@@ -66,7 +66,13 @@ class SlideController {
         dotfiles: "allow",
         headers: {
           "Content-Type": "image/png",
-          "Cache-Control": "public, max-age=3600"
+          // Issue #63 (аудит кешування): приватний ресурс. Раніше тут було
+          // "public, max-age=3600" — через це учень міг бачити PNG прихованого
+          // матеріалу з локального кешу до години ПІСЛЯ завершення показу.
+          // no-store забороняє зберігати слайд у кеші браузера/спільних кешах,
+          // тому повторний запит після зупинки/перемикання завжди йде на сервер.
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff"
         }
       });
     } catch (error) {

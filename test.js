@@ -176,24 +176,44 @@ async function main() {
         manifest ? `pageCount=${manifest.pageCount}` : "не готово за 60 с"
       );
 
-      // 4. Медіа: без входу — 401; учень поза активним показом — 404;
-      //    викладач бачить і PNG-слайди, і сирий PDF
+      // 4. Медіа: без входу — 401; опубліковане відкрите учневі для самостійного
+      //    перегляду (через PNG-слайди), сирий PDF/PPTX для не-викладача — 403;
+      //    викладач бачить усе, PIN передається заголовком (не URL)
       r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`);
       check("Issue #63 (Етап 5): медіа без входу → 401", r.status === 401, `status=${r.status}`);
 
       r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`, { headers: sess() });
-      check("Issue #63 (Етап 5): слайди поза показом для учня → 404", r.status === 404, `status=${r.status}`);
+      check(
+        "Issue #63 (доробка): опубліковані слайди відкриті учневі (самостійний перегляд) → 200",
+        r.status === 200 && (r.headers.get("cache-control") || "").includes("no-store"),
+        `status=${r.status}, cache-control=${r.headers.get("cache-control")}`
+      );
 
       r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`, { headers: sess() });
-      check("Issue #63 (Етап 5): сирий PDF поза показом для учня → 404", r.status === 404, `status=${r.status}`);
+      check(
+        "Issue #8: сирий PDF недоступний учневі поза показом (лише PNG-слайди) → 403",
+        r.status === 403,
+        `status=${r.status}`
+      );
 
-      r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1?pin=${PIN}`);
+      r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`, { headers: { "X-Portal-Pin": PIN } });
       const img = Buffer.from(await r.arrayBuffer());
       const isPng = img.length > 8 && img.slice(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-      check("Issue #8: викладач отримує PNG-слайд", r.status === 200 && isPng, `status=${r.status}`);
+      check("Issue #8: викладач отримує PNG-слайд (PIN у заголовку)", r.status === 200 && isPng, `status=${r.status}`);
 
-      r = await fetch(`${base}/files/${encodeURIComponent(fileId)}?pin=${PIN}`);
-      check("Викладач: сирий PDF доступний", r.status === 200, `status=${r.status}`);
+      // Issue #63 (аудит PIN): query-параметр ?pin= більше НЕ авторизує нічого —
+      // PIN приймається лише з заголовка X-Portal-Pin або з тіла запиту
+      r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1?pin=${PIN}`);
+      check("Issue #63 (аудит PIN): ?pin= у URL не авторизує медіа → 401", r.status === 401, `status=${r.status}`);
+      r = await fetch(`${base}/api/state?pin=${PIN}`);
+      check("Issue #63 (аудит PIN): ?pin= у URL не авторизує /api/state → 401", r.status === 401, `status=${r.status}`);
+
+      r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`, { headers: { "X-Portal-Pin": PIN } });
+      check(
+        "Викладач: сирий PDF доступний (PIN у заголовку) → 200, Cache-Control: no-store",
+        r.status === 200 && (r.headers.get("cache-control") || "").includes("no-store"),
+        `status=${r.status}, cache-control=${r.headers.get("cache-control")}`
+      );
 
       // 5. Issue #2: prepare лише для викладача
       r = await fetch(`${base}/api/slides/prepare`, {
@@ -221,20 +241,24 @@ async function main() {
       });
       check("Викладач: приховування файлу", r.status === 200, `status=${r.status}`);
 
-      // Issue #63 Етап 4 §2 + Етап 5: ДВА незалежні клієнти учнів опитують
-      // /api/state — обидва бачать нову ревізію; а от каталог і його metadata
-      // для них ЗАКРИТІ на сервері (не приховуванням кнопок, а відповіддю 403)
+      // Issue #63 Етап 4 §2 + Етап 5 + доробка: ДВА незалежні клієнти учнів
+      // опитують /api/state — обидва бачать нову ревізію. Каталог учня у цей
+      // момент ВІДКРИТИЙ, але лише з опублікованим: щойно прихований файл у
+      // відповіді не з'являється (сервер фільтрує, а не приховує кнопки в UI)
       const s4StateA = await (await fetch(base + "/api/state", { headers: sess() })).json();
       const s4StateB = await (await fetch(base + "/api/state", { headers: sess() })).json();
       const s4StudentFilesRes = await fetch(base + "/api/files", { headers: sess() });
       const s4StudentCatsRes = await fetch(base + "/api/categories", { headers: sess() });
+      const s4StudentFiles = s4StudentFilesRes.status === 200 ? await s4StudentFilesRes.json() : [];
+      const s4HiddenLeak = s4StudentFiles.some((f) => f.id === fileId);
       check(
-        "Issue #63 Е4: два клієнти учнів бачать нову ревізію, каталог для них закритий",
+        "Issue #63 Е4/доробка: ревізія росте у двох клієнтів, каталог учня відкритий, але без прихованого",
         s4StateA.revision > s4RevBeforeHide &&
           s4StateB.revision === s4StateA.revision &&
-          s4StudentFilesRes.status === 403 &&
-          s4StudentCatsRes.status === 403,
-        JSON.stringify({ before: s4RevBeforeHide, a: s4StateA.revision, b: s4StateB.revision, files: s4StudentFilesRes.status, cat: s4StudentCatsRes.status })
+          s4StudentFilesRes.status === 200 &&
+          s4StudentCatsRes.status === 200 &&
+          !s4HiddenLeak,
+        JSON.stringify({ before: s4RevBeforeHide, a: s4StateA.revision, b: s4StateB.revision, files: s4StudentFilesRes.status, cat: s4StudentCatsRes.status, leak: s4HiddenLeak })
       );
 
       // Issue #63 (Етап 5): загальний каталог недоступний і взагалі без входу
@@ -255,22 +279,27 @@ async function main() {
       r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`, { headers: sess() });
       check("Issue #4: приховані слайди закриті для учня (/slides)", r.status === 404, `status=${r.status}`);
 
-      r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1?pin=${PIN}`);
-      check("Викладач: приховані слайди доступні", r.status === 200, `status=${r.status}`);
+      r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`, { headers: { "X-Portal-Pin": PIN } });
+      check("Викладач: приховані слайди доступні (PIN у заголовку)", r.status === 200, `status=${r.status}`);
 
       // Issue #63 Етап 4 §1: приватне прев'ю та спільна демонстрація прихованих
-      // матеріалів — <img>/<video> не шлють заголовків, тому вчитель отримує
-      // доступ через query-pin (той самий extractPin, що й заголовок X-Portal-Pin)
-      r = await fetch(`${base}/files/${encodeURIComponent(fileId)}?pin=${PIN}`);
-      check("Issue #63 Е4: викладач відкриває прихований файл через query-pin", r.status === 200, `status=${r.status}`);
+      // матеріалів. У клієнта <img>/<video> авторизуються HttpOnly cookie
+      // сесії; у тестах те саме робить заголовок X-Portal-Pin (?pin= у URL
+      // більше не підтримується — див. аудит PIN вище)
+      r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`, { headers: { "X-Portal-Pin": PIN } });
+      check("Issue #63 Е4: викладач відкриває прихований файл (PIN у заголовку)", r.status === 200, `status=${r.status}`);
       r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`, { headers: sess() });
       check("Issue #63 Е4: той самий файл для учня лишається закритим (404)", r.status === 404, `status=${r.status}`);
 
       // Issue #63 Р + Етап 5: /api/slides/info теж не розкриває прихований файл
       r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`, { headers: sess() });
       check("Issue #63 Р: прихований файл закритий у /api/slides/info (учень)", r.status === 404, `status=${r.status}`);
-      r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}&pin=${PIN}`);
-      check("Issue #63 Р: /api/slides/info прихованого файлу з PIN (викладач)", r.status === 200, `status=${r.status}`);
+      r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`, { headers: { "X-Portal-Pin": PIN } });
+      check(
+        "Issue #63 Р: /api/slides/info прихованого файлу з PIN (викладач), no-store",
+        r.status === 200 && (r.headers.get("cache-control") || "").includes("no-store"),
+        `status=${r.status}, cache-control=${r.headers.get("cache-control")}`
+      );
 
       // Issue #63 (Етап 5): чинна СЕСІЯ учня не авторизує жодної операції
       // керування — сервер вимагає PIN (403), а не прихований кнопку в UI
@@ -310,20 +339,25 @@ async function main() {
         body: JSON.stringify({ pin: PIN, file: fileId, hidden: false })
       });
 
-      // Issue #63 Етап 4 §2 + Етап 5: публікація матеріалу піднімає ревізію —
-      // обидва клієнти учнів це бачать; а от каталог і надалі для них закритий
-      // (загального каталогу в ролі «учень» не існує), тож метадані недоступні
+      // Issue #63 Етап 4 §2 + доробка: публікація матеріалу піднімає ревізію —
+      // обидва клієнти учнів це бачать, і їхній каталог ОНОВЛЮЄТЬСЯ без
+      // перезавантаження: опублікований файл з'являється, прихований — ні
       const s4StateShow = await (await fetch(base + "/api/state", { headers: sess() })).json();
       const s4CatShowA = await fetch(base + "/api/files", { headers: sess() });
       const s4CatShowB = await fetch(base + "/api/categories", { headers: sess() });
+      const s4ShowListA = s4CatShowA.status === 200 ? await s4CatShowA.json() : [];
+      const s4ShowListB = s4CatShowB.status === 200 ? await s4CatShowB.json() : [];
       const s4TeacherList = await (await fetch(base + "/api/files", { headers: { "X-Portal-Pin": PIN } })).json();
+      const s4HiddenOnly = s4TeacherList.filter((f) => f.hidden).map((f) => f.id);
       check(
-        "Issue #63 Е4: після публікації ревізія зросла, а каталог учнів лишається закритим",
+        "Issue #63 Е4/доробка: після публікації ревізія зросла і каталог учня містить файл, а приховані — ні",
         s4StateShow.revision > s4StateA.revision &&
-          s4CatShowA.status === 403 &&
-          s4CatShowB.status === 403 &&
-          s4TeacherList.some((f) => f.id === fileId),
-        JSON.stringify({ hiddenRev: s4StateA.revision, showRev: s4StateShow.revision, studentFiles: s4CatShowA.status })
+          s4CatShowA.status === 200 &&
+          s4ShowListA.some((f) => f.id === fileId) &&
+          Array.isArray(s4ShowListB) &&
+          s4ShowListB.every((c) => c && c.id && c.name) &&
+          !s4ShowListA.some((f) => s4HiddenOnly.includes(f.id)),
+        JSON.stringify({ hiddenRev: s4StateA.revision, showRev: s4StateShow.revision, studentFiles: s4CatShowA.status, hasFile: s4ShowListA.some((f) => f.id === fileId), hidden: s4HiddenOnly })
       );
 
       // ---------------------------------------------------------------------
@@ -410,11 +444,16 @@ async function main() {
         `status=${r.status}, ready=${dInfo.ready}`
       );
 
-      const dCatStatus = (await fetch(base + "/api/files", { headers: sess() })).status;
+      // Демонстрація НЕ розкриває каталог: навіть під час показу прихованого
+      // матеріалу він не потрапляє у відповідь /api/files учня (лише медіа
+      // активного показу, див. mediaAccess)
+      const dStudentCatalog = await fetch(base + "/api/files", { headers: sess() });
+      const dStudentList = dStudentCatalog.status === 200 ? await dStudentCatalog.json() : [];
+      const dStudentLeak = dStudentList.some((f) => f.id === fileId);
       check(
-        "Issue #63 (Етап 5): під час показу каталог для учня лишається закритим (403)",
-        dCatStatus === 403,
-        `status=${dCatStatus}`
+        "Issue #63 (доробка): під час показу каталог учня відкритий, але прихованого матеріалу в ньому немає",
+        dStudentCatalog.status === 200 && !dStudentLeak,
+        `status=${dStudentCatalog.status}, leak=${dStudentLeak}`
       );
 
       const dState = await (await fetch(base + "/api/state", { headers: sess() })).json();
@@ -537,7 +576,7 @@ async function main() {
       r = await fetch(`${base}/api/presence/students`);
       check("Присутність: список без PIN → 403", r.status === 403, `status=${r.status}`);
 
-      let list = await (await fetch(`${base}/api/presence/students?pin=${PIN}`)).json();
+      let list = await (await fetch(base + "/api/presence/students", { headers: { "X-Portal-Pin": PIN } })).json();
       const active = list.find((s) => s.id === "s_test_1");
       check("Присутність: викладач бачить активного учня", Boolean(active && active.online), JSON.stringify(active));
 
@@ -547,7 +586,7 @@ async function main() {
         headers: { "Content-Type": "application/x-www-form-urlencoded", ...sess() },
         body: new URLSearchParams({ studentId: "s_test_1", name: "Тестовий Учень", active: "false" })
       });
-      list = await (await fetch(`${base}/api/presence/students?pin=${PIN}`)).json();
+      list = await (await fetch(base + "/api/presence/students", { headers: { "X-Portal-Pin": PIN } })).json();
       const inactive = list.find((s) => s.id === "s_test_1");
       check(
         "Issue #7: неактивна сесія (beacon) → не онлайн",
@@ -848,15 +887,21 @@ async function main() {
         Boolean(e3F1 && e3F2) && e3F1.description === e3Desc && e3F2.description === "",
         JSON.stringify({ withDesc: e3F1 && e3F1.description, noDesc: e3F2 && e3F2.description })
       );
-      // Issue #63 (Етап 5): учень не отримує загального каталогу — разом із
-      // описами та іншими метаданими (серверна відповідь 403, не приховування
-      // кнопок в інтерфейсі); приховані матеріали в ньому не фільтруються,
-      // бо каталогу для ролі «учень» просто не існує
+      // Issue #63 (доробка): учень бачить ОПУБЛІКОВАНІ матеріали разом з їхніми
+      // описами, а приховані не потрапляють у відповідь ніколи (сервер фільтрує);
+      // поля order і conversionStatus йому не передаються (див. fileService)
       const e3StudentCat = await fetch(base + "/api/files", { headers: sess() });
+      const e3StudentList = e3StudentCat.status === 200 ? await e3StudentCat.json() : [];
+      const e3TeacherHiddenIds = e3List.filter((f) => f.hidden).map((f) => f.id);
       check(
-        "Issue #63 (Етап 5): описи й метадані каталогу недоступні учневі (403)",
-        e3StudentCat.status === 403,
-        `status=${e3StudentCat.status}`
+        "Issue #63 (доробка): каталог учня відкритий — опубліковані описи є, прихованих немає, полів керування немає",
+        e3StudentCat.status === 200 &&
+          Boolean(e3F1) && Boolean(e3F2) &&
+          e3StudentList.some((f) => f.id === e3F1.id && f.description === e3Desc) &&
+          e3StudentList.some((f) => f.id === e3F2.id && f.description === "") &&
+          e3StudentList.every((f) => !e3TeacherHiddenIds.includes(f.id)) &&
+          e3StudentList.every((f) => !("order" in f) && !("conversionStatus" in f)),
+        JSON.stringify({ status: e3StudentCat.status, count: e3StudentList.length, hidden: e3TeacherHiddenIds.length })
       );
 
       // Наддовгий опис обрізається до config.maxDescriptionLength (500)
@@ -879,13 +924,19 @@ async function main() {
       // Issue #63 Етап 4: категорії, сумісність метаданих, порядок і права доступу.
       r = await fetch(base + "/api/categories", { headers: { "X-Portal-Pin": PIN } });
       check("Issue #63 Е4: категорії доступні викладачу з PIN", r.status === 200, "status=" + r.status);
-      // Issue #63 (Етап 5): читання категорій — теж лише викладачем
+      // Issue #63 (Етап 5 + доробка): читання категорій відкрите для чинної
+      // сесії (учень отримує лише категорії з видимими йому матеріалами, і лише
+      // id/name/order/createdAt); без входу — 403
       r = await fetch(base + "/api/categories", { headers: sess() });
+      const e4StudentCats = r.status === 200 ? await r.json() : [];
       check(
-        "Issue #63 (Етап 5): читання категорій закрито для учня (403)",
-        r.status === 403,
-        `status=${r.status}`
+        "Issue #63 (доробка): читання категорій відкрите для учня (200, лише видимі категорії)",
+        r.status === 200 && Array.isArray(e4StudentCats) &&
+          e4StudentCats.every((c) => c && c.id && c.name && !("files" in c) && !("hidden" in c)),
+        `status=${r.status}, count=${e4StudentCats.length}`
       );
+      r = await fetch(base + "/api/categories");
+      check("Issue #63 (Етап 5): читання категорій без входу → 403", r.status === 403, `status=${r.status}`);
       // Зміна категорій залишається за викладачем
       r = await fetch(base + "/api/categories", {
         method: "POST",
@@ -933,20 +984,36 @@ async function main() {
         check("Issue #63 Е4: категорія присутня у списку викладача", Boolean(teacherCategorized && teacherCategorized.categoryId === e4Category.id));
 
         r = await fetch(base + "/api/files", { headers: sess() });
-        // Issue #63 (Етап 5): у ролі «учень» немає ні каталогу, ні його
-        // метаданих (categoryId, order, conversionStatus) — відповідь 403
+        const e4StudentList = r.status === 200 ? await r.json() : [];
+        const e4StudentCategorized = e4StudentList.find(item => item.id === e3WithDesc.id);
+        // Issue #63 (доробка): учень отримує ОПУБЛІКОВАНИЙ каталог разом із
+        // categoryId (потрібен для групування), але без order і conversionStatus
         check(
-          "Issue #63 (Етап 5): учень не отримує каталог із категоріями (403)",
-          r.status === 403,
-          `status=${r.status}`
+          "Issue #63 (доробка): каталог учня містить опубліковане з categoryId, але без полів керування",
+          r.status === 200 &&
+            Boolean(e4StudentCategorized) && e4StudentCategorized.categoryId === e4Category.id &&
+            !("order" in e4StudentCategorized) && !("conversionStatus" in e4StudentCategorized),
+          `status=${r.status}, categoryId=${e4StudentCategorized && e4StudentCategorized.categoryId}`
         );
         // Матеріали без категорії мають порожній categoryId → «Без категорії»
-        // (перевіряємо по списку викладача — учнівського списку більше немає)
+        // (перевіряємо по обох списках: викладача та опублікованому учня)
         check(
           "Issue #63 Р: у каталозі викладача є й без категорії, й із категорією",
           teacherCategoryList.some(item => item.categoryId === "") &&
             teacherCategoryList.some(item => item.categoryId === e4Category.id),
           `total=${teacherCategoryList.length}`
+        );
+        // Точний склад каталогу учня = опубліковані + готові матеріали:
+        // приховані та неготові слайди виключені сервером
+        const e4ExpectedStudentIds = teacherCategoryList
+          .filter(item => !item.hidden && (![".pdf", ".ppt", ".pptx"].includes(item.ext) || item.conversionStatus === "ready"))
+          .map(item => item.id)
+          .sort();
+        const e4ActualStudentIds = e4StudentList.map(item => item.id).sort();
+        check(
+          "Issue #63 (доробка): каталог учня = рівно опубліковані готові матеріали (без прихованих і неготових)",
+          JSON.stringify(e4ActualStudentIds) === JSON.stringify(e4ExpectedStudentIds),
+          `student=${e4ActualStudentIds.length}, expected=${e4ExpectedStudentIds.length}`
         );
 
         r = await fetch(base + "/api/files/category", {
@@ -966,17 +1033,19 @@ async function main() {
         const parsedOrderMeta = JSON.parse(require("node:fs").readFileSync(metaPath, "utf-8"));
         check("Issue #63 Е4: порядок матеріалів записується на диск", r.status === 200 && Array.isArray(parsedOrderMeta.order) && parsedOrderMeta.order.indexOf(e3NoDesc.id) < parsedOrderMeta.order.indexOf(e3WithDesc.id), JSON.stringify(reordered.order || []));
 
-        // Issue #63 Р + Етап 5: порядок викладача зберігається в його каталозі,
-        // а в каталог учня запит узагалі не проходить (403)
+        // Issue #63 Р + доробка: порядок викладача зберігається в його каталозі;
+        // учень бачить ті самі опубліковані матеріали, але БЕЗ поля order
+        // (поле потрібне лише для керування каталогом викладача)
         const teacherOrderList = await (await fetch(base + "/api/files", { headers: { "X-Portal-Pin": PIN } })).json();
         const teacherPosNoDesc = teacherOrderList.findIndex(item => item.id === e3NoDesc.id);
         const teacherPosWithDesc = teacherOrderList.findIndex(item => item.id === e3WithDesc.id);
-        const studentOrderStatus = (await fetch(base + "/api/files", { headers: sess() })).status;
+        const studentOrderList = await (await fetch(base + "/api/files", { headers: sess() })).json();
         check(
-          "Issue #63 (Етап 5): порядок викладача в його каталозі, каталог учня закритий",
+          "Issue #63 (доробка): порядок — у каталозі викладача; у каталозі учня полів порядку немає",
           teacherPosNoDesc >= 0 && teacherPosWithDesc >= 0 && teacherPosNoDesc < teacherPosWithDesc &&
-            studentOrderStatus === 403,
-          JSON.stringify({ order: teacherOrderList.map(item => item.id).slice(0, 6), studentStatus: studentOrderStatus })
+            studentOrderList.some(item => item.id === e3NoDesc.id) &&
+            studentOrderList.every(item => !("order" in item) && !("conversionStatus" in item)),
+          JSON.stringify({ order: teacherOrderList.map(item => item.id).slice(0, 6), studentCount: studentOrderList.length })
         );
 
         const originalPath = require("node:path").join(__dirname, "materials", e3WithDesc.id);
@@ -1123,15 +1192,16 @@ async function main() {
         });
         const s4RenFile = r.status === 200 ? await r.json() : {};
         const s4TeacherList = await (await fetch(base + "/api/files", { headers: { "X-Portal-Pin": PIN } })).json();
-        const s4StudentListStatus = (await fetch(base + "/api/files", { headers: sess() })).status;
+        const s4StudentList = await (await fetch(base + "/api/files", { headers: sess() })).json();
         const s4TeacherOne = s4TeacherList.find(item => item.id === e3NoDesc.id);
+        const s4StudentOne = s4StudentList.find(item => item.id === e3NoDesc.id);
         check(
-          "Issue #63 §3.2 + Етап 5: назву бачить викладач, id та вміст не змінені, каталог учня закритий",
+          "Issue #63 §3.2 + доробка: назву бачать і викладач, і учень; id та вміст не змінені",
           r.status === 200 && s4RenFile.file === e3NoDesc.id && s4RenFile.name === "Етап4 перейменований" &&
             Boolean(s4TeacherOne) && s4TeacherOne.name === "Етап4 перейменований" &&
-            s4StudentListStatus === 403 &&
+            Boolean(s4StudentOne) && s4StudentOne.name === "Етап4 перейменований" &&
             require("node:fs").existsSync(require("node:path").join(__dirname, "materials", e3NoDesc.id)),
-          JSON.stringify({ teacher: s4TeacherOne && s4TeacherOne.name, studentStatus: s4StudentListStatus })
+          JSON.stringify({ teacher: s4TeacherOne && s4TeacherOne.name, student: s4StudentOne && s4StudentOne.name })
         );
 
         r = await fetch(base + "/api/files/rename", {
@@ -1204,11 +1274,13 @@ async function main() {
           s4CssSource.includes("object-fit: contain")
       );
       check(
-        "Issue #63 (Етап 5): клієнт читає каталог лише в ролі викладача, опитування — лише з входом",
-        appSource.includes('if (role !== "teacher") {') &&
-          appSource.includes("if (!role) return;") &&
+        "Issue #63 (доробка): клієнт опитує каталог лише з чинним входом і перечитує його за ревізією",
+        appSource.includes("if (!role) return;") &&
           appSource.includes("createStudentSession") &&
-          !appSource.includes("lastCatalogRevision")
+          appSource.includes("let lastCatalogRevision = null;") &&
+          appSource.includes("if (role !== \"teacher\" && state.revision !== lastCatalogRevision) {") &&
+          appSource.includes("if (!firstState) await refreshFiles();") &&
+          !appSource.includes("Каталог недоступний. Учні бачать")
       );
       const s4StateServiceSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "services", "stateService.js"), "utf-8");
       check(
@@ -1348,7 +1420,7 @@ async function main() {
       let e5TeacherInfo = null;
       if (e5Id) {
         for (let i = 0; i < 30; i++) {
-          r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(e5Id)}&pin=${PIN}`);
+          r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(e5Id)}`, { headers: { "X-Portal-Pin": PIN } });
           e5TeacherInfo = await r.json();
           if (e5TeacherInfo.failed) {
             e5Failed = true;
@@ -1364,13 +1436,21 @@ async function main() {
       }
 
       if (e5Failed) {
-        // Учень поза активним показом: файл для нього не існує (404), отже
-        // ні conversionError, ні жодних подробиць конвертації не буває
+        // Опублікований, але неготовий матеріал: учень дізнається ЛИШЕ факт
+        // неготовності — без conversionError, локальних шляхів і подробиць
         r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(e5Id)}`, { headers: sess() });
         const e5StudentRaw = await r.text();
+        let e5StudentInfo = {};
+        try {
+          e5StudentInfo = JSON.parse(e5StudentRaw);
+        } catch {
+          e5StudentInfo = {};
+        }
         check(
-          "Issue #63 (Етап 5): /api/slides/info для учня поза показом → 404 без подробиць",
-          r.status === 404 && !e5StudentRaw.includes("error") && !e5StudentRaw.includes(e5TeacherInfo.error),
+          "Issue #63 (доробка): /api/slides/info неготового опублікованого → 200 лише з фактом, без подробиць",
+          r.status === 200 && e5StudentInfo.ready === false && e5StudentInfo.failed === true &&
+            !("error" in e5StudentInfo) && !("conversionError" in e5StudentInfo) &&
+            !e5StudentRaw.includes(e5TeacherInfo.error),
           `status=${r.status}, body=${e5StudentRaw}`
         );
         check(
@@ -1387,12 +1467,14 @@ async function main() {
           e5TeacherInfo.error
         );
 
-        // Неготовий матеріал недоступний учневі узагалі (каталог закритий)
+        // Неготовий матеріал не потрапляє у ВІДКРИТИЙ каталог учня
         r = await fetch(base + "/api/files", { headers: sess() });
+        const e5StudentList = r.status === 200 ? await r.json() : [];
+        const e5StudentLeak = e5StudentList.some((f) => f.id === e5Id);
         check(
-          "Issue #63 (Етап 5): неготовий матеріал недоступний учневі — каталог закритий (403)",
-          r.status === 403,
-          `status=${r.status}`
+          "Issue #63 (доробка): неготовий матеріал відсутній у відкритому каталозі учня (200 без нього)",
+          r.status === 200 && !e5StudentLeak,
+          `status=${r.status}, leak=${e5StudentLeak}`
         );
         // Захищений шлях: викладач бачить стан і причину помилки
         r = await fetch(base + "/api/files", { headers: { "X-Portal-Pin": PIN } });

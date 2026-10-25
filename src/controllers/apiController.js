@@ -46,16 +46,21 @@ class ApiController {
 
   /**
    * GET /api/files — каталог матеріалів.
-   * Issue #63 (Етап 5): ЛИШЕ викладач (PIN або його сесія). Учень не отримує
-   * загального каталогу (ні прихованого, ні опублікованого): його сторінка
-   * показує лише активну демонстрацію. Без входу — 403 без запису в лімітатор.
+   * Issue #63 (аудит endpoint-ів, доробка): викладач (PIN або його сесія)
+   * отримує ПОВНИЙ каталог (приховані, порядок, стани конвертації); учасник із
+   * чинною сесією — лише ОПУБЛІКОВАНІ та готові матеріали (фільтрація в
+   * fileService.getFilesList(false), без поля order і conversionStatus).
+   * Приховані матеріали не потрапляють у відповідь учню ніколи, навіть коли
+   * їх саме демонструють. Без входу — 403 без запису в лімітатор.
    */
   getFiles(req, res) {
-    if (!auth.isTeacherReader(req)) {
-      return res.status(403).send("Каталог доступний лише викладачу");
+    const identity = auth.catalogIdentity(req);
+    if (!identity) {
+      return res.status(403).send("Каталог недоступний — увійдіть на портал");
     }
+    res.set("Cache-Control", "no-store");
     try {
-      const files = fileService.getFilesList(true);
+      const files = fileService.getFilesList(identity.role === "teacher");
       res.json(files);
     } catch (error) {
       res.status(500).send("Не вдалося отримати список файлів: " + error.message);
@@ -69,6 +74,9 @@ class ApiController {
    */
   getState(req, res) {
     if (!auth.requireViewer(req, res)) return;
+    // Issue #63 (аудит кешування): стан показу — приватні дані сесії,
+    // кешувати його не можна (інакше клієнт міг би бачити застарілий стан)
+    res.set("Cache-Control", "no-store");
     res.json(stateService.getState());
   }
 
@@ -127,17 +135,27 @@ class ApiController {
   }
   /**
    * GET /api/categories
-   * Issue #63 (Етап 5): читання ЛИШЕ для викладача (PIN або сесія; 403 без
-   * входу). Категорії описують структуру загального каталогу, а учневі каталог
-   * у цілому недоступний — разом із /api/files він закривається серверно, а не
-   * приховуванням кнопок в інтерфейсі. Створення, видалення та зміна складу
-   * категорій, як і раніше, потребують PIN (див. createCategory/...).
+   * Issue #63 (аудит endpoint-ів, доробка): читання для викладача (PIN або
+   * сесія) і для учасника з чинною сесією; без входу — 403. Відповідь містить
+   * лише id/name/order/createdAt — жодних даних про матеріали.
+   * Учень отримує ЛИШЕ категорії, у яких є хоча б один видимий йому матеріал:
+   * структура каталогу прихованих матеріалів (порожні або «прихований»
+   * вміст) йому не розкривається.
+   * Створення, видалення та зміна складу категорій, як і раніше, потребують
+   * PIN (див. createCategory/...).
    */
   getCategories(req, res) {
-    if (!auth.isTeacherReader(req)) {
-      return res.status(403).send("Категорії доступні лише викладачу");
+    const identity = auth.catalogIdentity(req);
+    if (!identity) {
+      return res.status(403).send("Категорії недоступні — увійдіть на портал");
     }
-    res.json(fileService.getCategories());
+    res.set("Cache-Control", "no-store");
+    const categories = fileService.getCategories();
+    if (identity.role === "teacher") return res.json(categories);
+    const visibleCategoryIds = new Set(
+      fileService.getFilesList(false).map(file => file.categoryId)
+    );
+    res.json(categories.filter(category => visibleCategoryIds.has(category.id)));
   }
 
   createCategory(req, res) {
@@ -267,7 +285,8 @@ class ApiController {
    * Returns cached manifest (pageCount) without conversion.
    *
    * Issue #63 (Етап 5): без чинної сесії або PIN відповідь — 401; для учня
-   * файл не існує поза активною демонстрацією.
+   * файл не існує поза активною демонстрацією (опублікований — навпаки,
+   * доступний для самостійного перегляду, див. mediaAccess).
    *
    * Issue #63 (відгук рев'ю): публічна відповідь для учня містить лише факт
    * готовності/помилки/конвертації — без conversionError, локальних шляхів,
@@ -282,6 +301,8 @@ class ApiController {
     if (!file) return res.status(400).send("Не вказано file");
     const identity = auth.mediaIdentity(req, res);
     if (!identity) return;
+    // Issue #63 (аудит кешування): відповідь про приватний ресурс не кешується
+    res.set("Cache-Control", "no-store");
     const isTeacher = identity.isTeacher;
     if (!canViewMedia(file, isTeacher)) {
       return res.status(404).json({ ready: false });

@@ -3,24 +3,29 @@
  *
  * Запуск:  npm run test:browser      (або: node browser-test.js)
  *
- * Що перевіряє (6 обов'язкових сценаріїв + перевірка передачі PIN), Issue #63,
- * Етап 5 — серверні сесії та обмежений доступ ролей:
- *   Сценарій 0 — у ролі «учень» немає загального каталогу: ні карток у
- *     розмітці, ні /api/files та /api/categories (403 сервером), медіа поза
- *     показом — 404, а без входу взагалі — 401;
+ * Що перевіряє (7 обов'язкових сценаріїв + перевірка передачі PIN), Issue #63
+ * (Етап 5 і доробка — доступ учнів, PIN і кеш медіа):
+ *   Сценарій 0 — самостійний перегляд: у ролі «учень» каталог відкритий, але
+ *     ЛИШЕ опублікованими матеріалами (картки в розмітці та /api/files 200;
+ *     прихованих немає ні в одному з них), опублікований матеріал відкривається
+ *     без показу викладача, медіа прихованого — 404, без входу — 401/403,
+ *     медіа й стан віддаються з Cache-Control: no-store, а ?pin= у URL не
+ *     авторизує нічого;
  *   Сценарій 1 — викладач демонструє ОПУБЛІКОВАНИЙ матеріал → обидва учні
  *     бачать його медіа (відео) без перезавантаження;
  *   Сценарій 2 — викладач демонструє ПРИХОВАНИЙ матеріал → обидва учні бачать
- *     медіа, але каталог для них і надалі закритий (403), самостійний
- *     перегляд і сирий файл недоступні;
+ *     медіа активного показу, але самого матеріалу немає в їхньому каталозі
+ *     (ні в API, ні в розмітці), сирий файл недоступний (лише PNG-слайди);
  *   Сценарій 3 — після завершення показу доступ учня до прихованого медіа
- *     припиняється (/files, /slides, /api/slides/info → 404);
+ *     припиняється (/files, /slides, /api/slides/info → 404), а каталог
+ *     опублікованих матеріалів повертається на тій самій сторінці;
  *   Сценарій 4 — довільні прямі URL прихованого матеріалу недоступні учневі
- *     без активного показу;
+ *     без активного показу; каталог при цьому лишається відкритим (без
+ *     прихованого);
  *   Сценарій 5 — ДВА незалежні клієнти учнів одночасно отримують медіа показу;
- *   Сценарій 6 — приховування/публікація/перемикання показу: активна
- *     демонстрація для учнів не переривається, медіа попереднього матеріалу
- *     після перемикання закривається;
+ *   Сценарій 6 — приховування/публікація оновлюють каталог учня БЕЗ
+ *     перезавантаження; після перемикання показу медіа прихованого матеріалу
+ *     закривається, активна демонстрація для учнів не переривається;
  *   PIN/URL  — медіа-запити викладача не містять ?pin= (HttpOnly cookie),
  *     cookie не авторизує API керування, скасовується при виході викладача,
  *     підроблена cookie не дає доступу.
@@ -311,11 +316,15 @@ async function teacherAction(sess, namePart, btnText) {
 // HTTP-запити ВСЕРЕДИНІ сторінки (без заголовків і параметрів авторизації):
 // саме так працюють <img>/<video> та «прямі посилання» з адресного рядка.
 // Авторизація — лише HttpOnly cookie сесії (Issue #63, Етап 5).
-// cache: "no-store" — обов'язково: слайди віддаються з Cache-Control: max-age=3600,
-// і без вимкнення кешу браузер відповів би 200 з кешу замість нового запиту на
-// сервер (перевіряємо саме СЕРВЕРНУ політику доступу, а не локальний кеш)
+// cache: "no-store" — обов'язково: саме політику кешування СЕРВЕРА ми й
+// перевіряємо (Cache-Control приватних медіа), а локальний кеш браузера міг би
+// відповісти замість сервера
 const httpStatus = (sess, url) =>
   evaluate(sess, `fetch(${JSON.stringify(url)}, { cache: "no-store" }).then(r => r.status)`);
+// Заголовок відповіді сервера (перевірка Cache-Control приватних медіа)
+const httpHeader = (sess, url, header) =>
+  evaluate(sess, `fetch(${JSON.stringify(url)}, { cache: "no-store" })` +
+    `.then(r => r.headers.get(${JSON.stringify(header)}))`);
 // Той самий запит, але БЕЗ cookie (credentials: "omit") — перевірка вимоги
 // повторного входу для медіа та стану демонстрації
 const httpStatusNoCreds = (sess, url) =>
@@ -415,38 +424,61 @@ async function main() {
 
   await gotoS(T, "/demonstration");
   const tIn = await loginTeacher(T);
-  // Етап 5: робоче місце учня — сторінка демонстрації; загального каталогу
-  // в ролі «учень» більше немає ні в API, ні в розмітці
-  await gotoS(S1, "/demonstration");
+  // Робоче місце учня — сторінка «Перегляд матеріалів»: тут він бачить каталог
+  // опублікованих матеріалів і самостійно відкриває їх, а під час показу
+  // викладача — синхронізовану демонстрацію
+  await gotoS(S1, "/materials");
   const s1In = await loginStudent(S1, "Браузер Учень А");
-  await gotoS(S2, "/demonstration");
+  await gotoS(S2, "/materials");
   const s2In = await loginStudent(S2, "Браузер Учень Б");
   check("Входи викладача та двох учнів виконано", tIn && s1In && s2In,
     JSON.stringify({ tIn, s1In, s2In }));
 
   await waitFor(T, "document.querySelectorAll('#files .file').length > 0", 20000);
   for (const sess of [S1, S2]) {
-    // у учнів немає каталогу — чекаємо лише глядач демонстрації
-    await waitFor(sess, "!!document.getElementById('viewer') && window.__mark === 42", 15000);
+    // каталог учня завантажується після входу без перезавантаження сторінки
+    await waitFor(sess,
+      "document.querySelectorAll('#files .file').length > 0 && window.__mark === 42", 15000);
   }
 
-  // ---------------- Сценарій 0: у учнів немає загального каталогу ----------
+  // ---------------- Сценарій 0: самостійний перегляд опублікованого --------
   const s0 = {};
   s0.cardsS1 = await evaluate(S1, "document.querySelectorAll('#files .file').length");
   s0.cardsS2 = await evaluate(S2, "document.querySelectorAll('#files .file').length");
+  s0.hiddenCardS1 = await evaluate(S1, `!!(${cardExpr(TEST_HIDDEN)})`);
   s0.files = await httpStatus(S1, "/api/files");
   s0.cats = await httpStatus(S1, "/api/categories");
   s0.state = await httpStatus(S1, "/api/state");
+  const s0List = await httpJson(S1, "/api/files");
+  s0.listHasWav = Array.isArray(s0List) && s0List.some((f) => f.id === wavId);
+  s0.listHasPdf = Array.isArray(s0List) && s0List.some((f) => f.id === pdfId);
   s0.pubMedia = await httpStatus(S1, "/files/" + encodeURIComponent(wavId));
   s0.hiddenMedia = await httpStatus(S1, "/files/" + encodeURIComponent(pdfId));
   s0.stateNoCreds = await httpStatusNoCreds(S1, "/api/state");
   s0.mediaNoCreds = await httpStatusNoCreds(S1, "/files/" + encodeURIComponent(wavId));
-  check("Сценарій 0: у каталозі учнів порожньо, а API каталогу закритий сервером (403), стан показу — 200",
-    s0.cardsS1 === 0 && s0.cardsS2 === 0 && s0.files === 403 && s0.cats === 403 && s0.state === 200,
+  // ?pin= у URL не авторизує нічого: без cookie такий запит має відхилятися
+  s0.statePinInQuery = await httpStatusNoCreds(S1, "/api/state?pin=" + PIN);
+  s0.mediaPinInQuery = await httpStatusNoCreds(S1, "/files/" + encodeURIComponent(wavId) + "?pin=" + PIN);
+  // Політика кешування приватних відповідей
+  s0.mediaCache = await httpHeader(S1, "/files/" + encodeURIComponent(wavId), "cache-control");
+  s0.stateCache = await httpHeader(S1, "/api/state", "cache-control");
+  s0.filesCache = await httpHeader(S1, "/api/files", "cache-control");
+  check("Сценарій 0: каталог учня відкритий лише опублікованим (картки й API 200), прихованих немає",
+    s0.cardsS1 > 0 && s0.cardsS2 > 0 && !s0.hiddenCardS1 &&
+      s0.files === 200 && s0.cats === 200 && s0.state === 200 &&
+      s0.listHasWav && !s0.listHasPdf,
     JSON.stringify(s0));
-  check("Сценарій 0: медіа поза активним показом недоступні (404), без входу — 401",
-    s0.pubMedia === 404 && s0.hiddenMedia === 404 && s0.stateNoCreds === 401 && s0.mediaNoCreds === 401,
+  check("Сценарій 0: медіа опублікованого відкриті, прихованого — 404, без входу — 401",
+    s0.pubMedia === 200 && s0.hiddenMedia === 404 &&
+      s0.stateNoCreds === 401 && s0.mediaNoCreds === 401,
     JSON.stringify(s0));
+  check("Сценарій 0: приватні відповіді не кешуються (Cache-Control: no-store)",
+    /no-store/i.test(s0.mediaCache || "") && /no-store/i.test(s0.stateCache || "") &&
+      /no-store/i.test(s0.filesCache || ""),
+    JSON.stringify({ media: s0.mediaCache, state: s0.stateCache, files: s0.filesCache }));
+  check("Сценарій 0: ?pin= у URL не авторизує ні стан, ні медіа (401)",
+    s0.statePinInQuery === 401 && s0.mediaPinInQuery === 401,
+    JSON.stringify({ state: s0.statePinInQuery, media: s0.mediaPinInQuery }));
 
   // ---------------- Сценарій 1: показ опублікованого ------------------------
   const demo1Clicked = await teacherAction(T, TEST_MEDIA, "Показувати всім");
@@ -481,12 +513,18 @@ async function main() {
     s1HiddenCardGone && s2HiddenCardGone, JSON.stringify({ s1HiddenCardGone, s2HiddenCardGone }));
 
   const listDuring = await httpStatus(S1, "/api/files");
+  const listDuringJson = await httpJson(S1, "/api/files");
   const slideDuring = await httpStatus(S1, "/slides/" + encodeURIComponent(pdfId) + "/1");
+  const slideDuringCache = await httpHeader(S1, "/slides/" + encodeURIComponent(pdfId) + "/1", "cache-control");
   const infoDuring = await httpJson(S1, "/api/slides/info?file=" + encodeURIComponent(pdfId));
   const rawDuring = await httpStatus(S1, "/files/" + encodeURIComponent(pdfId));
-  check("Сценарій 2: медіа активної демонстрації відкриті учневі (слайди 200, info ready), каталог закритий (403)",
-    slideDuring === 200 && infoDuring && infoDuring.ready === true && listDuring === 403,
-    JSON.stringify({ slideDuring, ready: infoDuring && infoDuring.ready, catalog: listDuring }));
+  const listDuringLeak = Array.isArray(listDuringJson) && listDuringJson.some((f) => f.id === pdfId);
+  check("Сценарій 2: медіа активної демонстрації відкриті учневі (слайди 200, info ready), а в каталозі матеріалу немає (200)",
+    slideDuring === 200 && infoDuring && infoDuring.ready === true &&
+      listDuring === 200 && !listDuringLeak,
+    JSON.stringify({ slideDuring, ready: infoDuring && infoDuring.ready, catalog: listDuring, leak: listDuringLeak }));
+  check("Сценарій 2: слайди приватного показу не кешуються (Cache-Control: no-store)",
+    /no-store/i.test(slideDuringCache || ""), "cache-control=" + slideDuringCache);
   check("Сценарій 2: сирий файл прихованого PDF недоступний учневі (лише PNG-слайди)",
     rawDuring === 403, "status=" + rawDuring);
 
@@ -511,9 +549,16 @@ async function main() {
     `!document.getElementById('viewerTitle').textContent.startsWith('Спільна демонстрація') && window.__mark === 42`, 15000);
   const s2BackToCatalog = await waitFor(S2,
     `!document.getElementById('viewerTitle').textContent.startsWith('Спільна демонстрація') && window.__mark === 42`, 15000);
-  check("Сценарій 3: показ завершено, обидва учні вийшли з режиму показу без перезавантаження",
-    demoStopped && s1BackToCatalog && s2BackToCatalog,
-    JSON.stringify({ demoStopped, s1BackToCatalog, s2BackToCatalog }));
+  // Каталог опублікованих матеріалів повертається на тій самій сторінці
+  const s1CatalogVisible = await waitFor(S1,
+    `document.getElementById('materialsCatalogPanel').style.display !== 'none' && ` +
+    `document.querySelectorAll('#files .file').length > 0 && window.__mark === 42`, 15000);
+  const s2CatalogVisible = await waitFor(S2,
+    `document.getElementById('materialsCatalogPanel').style.display !== 'none' && ` +
+    `document.querySelectorAll('#files .file').length > 0 && window.__mark === 42`, 15000);
+  check("Сценарій 3: показ завершено, обидва учні вийшли з режиму показу, каталог повернувся без перезавантаження",
+    demoStopped && s1BackToCatalog && s2BackToCatalog && s1CatalogVisible && s2CatalogVisible,
+    JSON.stringify({ demoStopped, s1BackToCatalog, s2BackToCatalog, s1CatalogVisible, s2CatalogVisible }));
 
   const slideAfter = await httpStatus(S1, "/slides/" + encodeURIComponent(pdfId) + "/1");
   const filesAfter = await httpStatus(S1, "/files/" + encodeURIComponent(pdfId));
@@ -532,62 +577,112 @@ async function main() {
     s4.files === 404 && s4.slides === 404 && s4.info === 404, JSON.stringify(s4));
 
   const listNoDemo = await httpStatus(S1, "/api/files");
-  check("Сценарій 4: API каталогу для учня закритий взагалі (403) — ні прихований, ні опублікований",
-    listNoDemo === 403, "status=" + listNoDemo);
+  const listNoDemoJson = await httpJson(S1, "/api/files");
+  const listNoDemoLeak = Array.isArray(listNoDemoJson) && listNoDemoJson.some((f) => f.id === pdfId);
+  const listNoDemoHasWav = Array.isArray(listNoDemoJson) && listNoDemoJson.some((f) => f.id === wavId);
+  check("Сценарій 4: каталог учня без активного показу відкритий (200), прихованого матеріалу в ньому немає",
+    listNoDemo === 200 && listNoDemoHasWav && !listNoDemoLeak,
+    JSON.stringify({ status: listNoDemo, hasWav: listNoDemoHasWav, leak: listNoDemoLeak }));
+
+  // Самостійний перегляд: опублікований матеріал відкривається учнем БЕЗ
+  // показу викладача, каталог на той самий момент лишається видимим
+  await expandAllCategories(S1);
+  const s1SelfOpened = await clickFileButton(S1, TEST_MEDIA, "Відкрити");
+  const s1SelfMedia = await waitFor(S1,
+    `document.getElementById('viewerTitle').textContent.startsWith('Особистий перегляд') && ` +
+    mediaExpr("video") + ` && window.__mark === 42`, 15000);
+  const s1SelfCatalog = await evaluate(S1,
+    `document.getElementById('materialsCatalogPanel').style.display !== 'none' && ` +
+    `document.querySelectorAll('#files .file').length > 0 && window.__mark === 42`);
+  check("Сценарій 4: учень відкриває опублікований матеріал самостійно, каталог лишається видимим",
+    s1SelfOpened && s1SelfMedia && s1SelfCatalog,
+    JSON.stringify({ s1SelfOpened, s1SelfMedia, s1SelfCatalog }));
 
   // ---------------- Сценарій 6: приховати / показати / перемкнути ----------
-  // Етап 5: у учнів немає каталогу, тому їхній канал перевіряємо через медіа
-  // АКТИВНОЇ демонстрації та API стану; карткам — лише сторона викладача.
+  // Каталог учня — повноцінний канал перевірки: публікація/приховування
+  // оновлюють його БЕЗ перезавантаження, а медіа активного показу лишаються
+  // відкритими рівно до моменту перемикання чи зупинки.
 
   // 6.1 показ опублікованого WAV, потім приховування його ПІД ЧАС показу
   const demoWavClicked = await teacherAction(T, TEST_MEDIA, "Показувати всім");
   const demoWavStarted = await waitDemoFile(wavId, true);
   const wavDuringDemo = await httpStatus(S1, "/files/" + encodeURIComponent(wavId));
-  const s1VideoDuring = await waitFor(S1, mediaExpr("video") + " && window.__mark === 42", 15000);
+  const s1VideoDuring = await waitFor(S1,
+    mediaExpr("video") +
+    " && document.getElementById('viewerTitle').textContent.startsWith('Спільна демонстрація')" +
+    " && window.__mark === 42", 15000);
   const hideClicked = await teacherAction(T, TEST_MEDIA, "Приховати");
   const teacherStillSees = await waitFor(T,
     `!!(${cardExpr(TEST_MEDIA)}) && (${cardExpr(TEST_MEDIA)}).className.includes('file-is-hidden')`, 8000);
   const wavHiddenDuringDemo = await httpStatus(S1, "/files/" + encodeURIComponent(wavId));
-  const s1VideoAfterHide = await waitFor(S1, mediaExpr("video") + " && window.__mark === 42", 15000);
-  check("Сценарій 6: приховування не обриває активну демонстрацію для учнів, у викладача — закритий стан",
+  const s1VideoAfterHide = await waitFor(S1,
+    mediaExpr("video") +
+    " && document.getElementById('viewerTitle').textContent.startsWith('Спільна демонстрація')" +
+    " && window.__mark === 42", 15000);
+  // Прихований матеріал зникає з каталогу ОБОХ учнів без перезавантаження
+  // (сервер піднімає ревізію стану → клієнт перечитує /api/files)
+  const s1CardGoneAfterHide = await waitFor(S1, `!(${cardExpr(TEST_MEDIA)}) && window.__mark === 42`, 12000);
+  const s2CardGoneAfterHide = await waitFor(S2, `!(${cardExpr(TEST_MEDIA)}) && window.__mark === 42`, 12000);
+  check("Сценарій 6: приховування не обриває демонстрацію (медіа показу 200) і прибирає картку з каталогу учнів без перезавантаження",
     demoWavClicked && demoWavStarted && wavDuringDemo === 200 && s1VideoDuring &&
-      hideClicked && teacherStillSees && wavHiddenDuringDemo === 200 && s1VideoAfterHide,
-    JSON.stringify({ demoWavStarted, wavDuringDemo, hideClicked, teacherStillSees, wavHiddenDuringDemo }));
+      hideClicked && teacherStillSees && wavHiddenDuringDemo === 200 && s1VideoAfterHide &&
+      s1CardGoneAfterHide && s2CardGoneAfterHide,
+    JSON.stringify({ demoWavStarted, wavDuringDemo, hideClicked, teacherStillSees, wavHiddenDuringDemo, s1CardGoneAfterHide, s2CardGoneAfterHide }));
 
-  // 6.2 публікація повертає матеріал у КАТАЛОГ ВИКЛАДАЧА; каталог учня — 403,
-  //     а медіа того самого показу для учня лишаються відкритими (200): доступ
-  //     визначає активна демонстрація, а не прапорець «приховано»
+  // 6.2 публікація повертає матеріал у КАТАЛОГИ викладача й обох учнів
+  //     (без перезавантаження); медіа того самого показу для учня лишаються
+  //     відкритими (200): доступ визначає активна демонстрація
   const showClicked = await teacherAction(T, TEST_MEDIA, "Показати");
   const teacherCardBack = await waitFor(T,
     `!!(${cardExpr(TEST_MEDIA)}) && !(${cardExpr(TEST_MEDIA)}).className.includes('file-is-hidden')`, 8000);
+  const s1CardBack = await waitFor(S1, `!!(${cardExpr(TEST_MEDIA)}) && window.__mark === 42`, 12000);
+  const s2CardBack = await waitFor(S2, `!!(${cardExpr(TEST_MEDIA)}) && window.__mark === 42`, 12000);
   const filesAfterShow = await httpStatus(S1, "/api/files");
   const wavShownToStudent = await httpStatus(S1, "/files/" + encodeURIComponent(wavId));
-  check("Сценарій 6: публікація — картка повернулася у викладача, каталог учня (403), медіа показу лишається (200)",
-    showClicked && teacherCardBack && filesAfterShow === 403 && wavShownToStudent === 200,
-    JSON.stringify({ showClicked, teacherCardBack, filesAfterShow, wavShownToStudent }));
+  check("Сценарій 6: публікація повертає картку в каталоги обох учнів без перезавантаження, медіа показу лишається (200)",
+    showClicked && teacherCardBack && s1CardBack && s2CardBack &&
+      filesAfterShow === 200 && wavShownToStudent === 200,
+    JSON.stringify({ showClicked, teacherCardBack, s1CardBack, s2CardBack, filesAfterShow, wavShownToStudent }));
 
   // 6.3 перемикання показу: активний WAV → прихований PDF
-  // (сирий /files для PDF учню і надалі 403 — лише PNG-слайди, тому що саме
-  // слайди і є контентом показу для учня)
+  // (сирий /files для PDF учню — 403: лише PNG-слайди, бо саме слайди і є
+  // контентом показу для учня; опублікований WAV лишається доступним для
+  // самостійного перегляду)
   await teacherAction(T, TEST_HIDDEN, "Показувати всім");
   const demoPdfAgain = await waitDemoFile(pdfId, true);
   const s1FollowedSwitch = await waitFor(S1, mediaExpr("slide") + " && window.__mark === 42", 20000);
   const s2FollowedSwitch = await waitFor(S2, mediaExpr("slide") + " && window.__mark === 42", 20000);
   const pdfSlidesDuringSwitch = await httpStatus(S1, "/slides/" + encodeURIComponent(pdfId) + "/1");
   const pdfRawDuringSwitch = await httpStatus(S1, "/files/" + encodeURIComponent(pdfId));
-  const wavAfterSwitch = await httpStatus(S1, "/files/" + encodeURIComponent(wavId));
-  check("Сценарій 6: перемикання показу — обидва учні на новому матеріалі, медіа попереднього закрилося",
+  const wavDuringSwitch = await httpStatus(S1, "/files/" + encodeURIComponent(wavId));
+  check("Сценарій 6: перемикання показу — обидва учні на новому матеріалі, його слайди відкриті, сирий файл закритий (403)",
     demoPdfAgain && s1FollowedSwitch && s2FollowedSwitch &&
-      pdfSlidesDuringSwitch === 200 && pdfRawDuringSwitch === 403 && wavAfterSwitch === 404,
-    JSON.stringify({ demoPdfAgain, s1FollowedSwitch, s2FollowedSwitch, pdfSlidesDuringSwitch, pdfRawDuringSwitch, wavAfterSwitch }));
+      pdfSlidesDuringSwitch === 200 && pdfRawDuringSwitch === 403 && wavDuringSwitch === 200,
+    JSON.stringify({ demoPdfAgain, s1FollowedSwitch, s2FollowedSwitch, pdfSlidesDuringSwitch, pdfRawDuringSwitch, wavDuringSwitch }));
 
-  // 6.4 зупинка показу: медіа показу недоступні, стан порожній
+  // 6.3b друге перемикання (PDF прихований → WAV): доступ до ПРИХОВАНОГО
+  //     матеріалу припиняється в момент перемикання, хоча ще мить тому він був
+  //     активним показом
+  await teacherAction(T, TEST_MEDIA, "Показувати всім");
+  const demoWavAgain = await waitDemoFile(wavId, true);
+  const pdfSlidesAfterSwitchAway = await httpStatus(S1, "/slides/" + encodeURIComponent(pdfId) + "/1");
+  const pdfInfoAfterSwitchAway = await httpStatus(S1, "/api/slides/info?file=" + encodeURIComponent(pdfId));
+  const s1FollowedBack = await waitFor(S1,
+    mediaExpr("video") +
+    " && document.getElementById('viewerTitle').textContent.startsWith('Спільна демонстрація')" +
+    " && window.__mark === 42", 20000);
+  check("Сценарій 6: після перемикання показу медіа прихованого матеріалу закриті (404), нового — відкриті",
+    demoWavAgain && pdfSlidesAfterSwitchAway === 404 && pdfInfoAfterSwitchAway === 404 && s1FollowedBack,
+    JSON.stringify({ demoWavAgain, pdfSlidesAfterSwitchAway, pdfInfoAfterSwitchAway, s1FollowedBack }));
+
+  // 6.4 зупинка показу: медіа прихованого показу недоступні, стан порожній
   await evaluate(T, "document.getElementById('stopDemo').click(); true;");
-  const finalStop = await waitDemoFile(pdfId, false);
+  const finalStop = await waitDemoFile(wavId, false);
   const pdfAfterStop = await httpStatus(S1, "/files/" + encodeURIComponent(pdfId));
-  check("Сценарій 6: показ зупинено, стан сервера порожній, медіа закриті",
-    finalStop && pdfAfterStop === 404,
-    JSON.stringify({ finalStop, pdfAfterStop }));
+  const slidesAfterStop = await httpStatus(S1, "/slides/" + encodeURIComponent(pdfId) + "/1");
+  check("Сценарій 6: показ зупинено, стан сервера порожній, медіа прихованого закриті",
+    finalStop && pdfAfterStop === 404 && slidesAfterStop === 404,
+    JSON.stringify({ finalStop, pdfAfterStop, slidesAfterStop }));
 
   // сесія викладача скасовується при виході
   await evaluate(T, "document.getElementById('btnSwitchRole').click(); true;");

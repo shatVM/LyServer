@@ -3,7 +3,10 @@
  *
  * - Порівняння через crypto.timingSafeEqual (стійке до timing-атак);
  * - Ліміт спроб (див. pinLimiter.js);
- * - extractPin шукає PIN у заголовку X-Portal-Pin, тілі JSON та query;
+ * - extractPin шукає PIN лише у заголовку X-Portal-Pin і в тілі запиту
+ *   (JSON або form-data); query-параметр `?pin=` НЕ приймається, щоб PIN не
+ *   потрапляв в адресний рядок, історію браузера, Referer і журнали запитів
+ *   (Issue #63, аудит PIN);
  * - Issue #63 (Етап 5): вхід обох ролей фіксується серверною сесією
  *   (sessionService) і передається HttpOnly cookie `ly_session`. Сесії
  *   зберігаються лише в пам'яті процесу, тому ПЕРЕРЕЗАПУСК сервера скасовує
@@ -32,16 +35,22 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(sha256(a ?? ""), sha256(b ?? ""));
 }
 
-/** Отримання PIN з запиту (заголовок > тіло JSON > query) */
+/**
+ * Отримання PIN з запиту: заголовок X-Portal-Pin > тіло (JSON/form-data).
+ *
+ * Issue #63 (аудит PIN): query-параметр `?pin=` свідомо НЕ читається.
+ * Запити з PIN у URL потрапляють у журнал сервера, історію браузера, заголовок
+ * Referer при переході на зовнішній ресурс і в адресний рядок, який можна
+ * скопіювати/передати учням. Жоден клієнтський код PIN у URL не додає: медіа
+ * авторизується HttpOnly cookie сесії, API — заголовком X-Portal-Pin або
+ * полем `pin` у тілі, тому можливість сумісності з `?pin=` не потрібна.
+ */
 function extractPin(req) {
   if (req.headers && req.headers["x-portal-pin"] !== undefined) {
     return String(req.headers["x-portal-pin"]);
   }
   if (req.body && req.body.pin !== undefined) {
     return String(req.body.pin);
-  }
-  if (req.query && req.query.pin !== undefined) {
-    return String(req.query.pin);
   }
   return "";
 }
@@ -105,14 +114,23 @@ function clearSession(req, res) {
 }
 
 /**
- * Роль «викладач» для ЧИТАННЯ (каталог /api/files, категорії /api/categories):
- * PIN у запиті або чинна сесія викладача (її неможливо отримати без PIN).
- * Без входу — false; викликав відповідає сам (403), лімітатор не чіпає.
+ * Issue #63 (аудит endpoint-ів): ІДЕНТИЧНІСТЬ читача каталогу
+ * (/api/files, /api/categories).
+ *
+ * - викладач (PIN у запиті або чинна сесія викладача) → { role: "teacher" }
+ *   і повний каталог, включно з прихованими матеріалами та станом конвертації;
+ * - учасник із чинною сесією → { role: session.role } і лише опубліковані
+ *   матеріали (сесію викладача неможливо отримати без PIN, сесія учня — без
+ *   вказання показного імені);
+ * - без входу → null; відповідає сам викликав (403). Відсутність PIN не
+ *   зараховується як спроба введення, тому анонімні GET не вичерпують
+ *   лімітатор і не блокують роботу вчителя з того самого IP.
  */
-function isTeacherReader(req) {
-  if (extractPin(req) && isTeacher(req)) return true;
+function catalogIdentity(req) {
+  if (extractPin(req) && isTeacher(req)) return { role: "teacher" };
   const session = readSession(req);
-  return Boolean(session && session.role === "teacher");
+  if (session) return { role: session.role };
+  return null;
 }
 
 /**
@@ -217,7 +235,7 @@ module.exports = {
   safeEqual,
   extractPin,
   isTeacher,
-  isTeacherReader,
+  catalogIdentity,
   requirePin,
   requirePinJson,
   issueSession,

@@ -4,7 +4,6 @@
  */
 
 const presenceService = require("../services/presenceService");
-const config = require("../config");
 const auth = require("../utils/auth");
 
 class PresenceController {
@@ -52,8 +51,11 @@ class PresenceController {
    * Teacher-only. Returns all students with online status.
    */
   getStudents(req, res) {
-    const clientPin = req.headers["x-portal-pin"] || req.query.pin;
-    if (clientPin !== config.portalPin) {
+    // Issue #63 (аудит PIN): приймається лише заголовок X-Portal-Pin або тіло
+    // запиту (query `?pin=` більше не читається — він потрапив би в журнал
+    // сервера, історію браузера та Referer). Порівняння — timing-safe з
+    // урахуванням лімітатора спроб; відсутність PIN не зараховується як спроба.
+    if (!auth.isTeacher(req)) {
       return res.status(403).json({ ok: false, message: "Тільки для викладача" });
     }
     const list = presenceService.getStudents();
