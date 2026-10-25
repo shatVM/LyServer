@@ -1,6 +1,7 @@
 const config = require("../config");
 const path = require("node:path");
 const auth = require("../utils/auth");
+const { canViewMedia } = require("../utils/mediaAccess");
 const fileService = require("../services/fileService");
 const stateService = require("../services/stateService");
 const presenceService = require("../services/presenceService");
@@ -11,7 +12,20 @@ class ApiController {
     if (!auth.requirePinJson(req, res)) return;
     // Вхід учителя = присутність на зв'язку (автозупинка показу при виході)
     presenceService.markTeacherSeen();
+    // Issue #63 (доробка): медіа-cookie замість ?pin= у URL <img>/<video>/слайдів —
+    // HttpOnly, значення — похідний токен (не сам PIN), діє лише для медіазапитів
+    auth.issueMediaCookie(req, res);
     res.json({ ok: true, role: "teacher" });
+  }
+
+  /**
+   * POST /api/auth/logout — скасування медіа-cookie (вихід викладача або
+   * перехід на роль учня). Ендпоінт навмисно не вимагає PIN: він лише видаляє
+   * cookie самого клієнта, прав він не надає.
+   */
+  logoutMedia(req, res) {
+    auth.clearMediaCookie(res);
+    res.json({ ok: true });
   }
 
   getFiles(req, res) {
@@ -223,13 +237,14 @@ class ApiController {
    * stdout/stderr, stack trace чи команд. Діагностика помилки конвертації
    * доступна лише викладачу з PIN (захищений діагностичний шлях); повні
    * подробиці також пишуться у приватний серверний лог (console.error).
-   * Приховані файли для учня не існують (навіть за відомим id, як і у /slides).
+   * Приховані файли для учня не існують (навіть за відомим id, як і у /slides),
+   * окримо матеріалу, який викладач демонструє зараз (див. mediaAccess).
    */
   getSlideInfo(req, res) {
     const { file } = req.query;
     if (!file) return res.status(400).send("Не вказано file");
-    const isTeacher = auth.isTeacher(req);
-    if (!fileService.canAccess(file, isTeacher)) {
+    const isTeacher = auth.isTeacherMedia(req);
+    if (!canViewMedia(file, isTeacher)) {
       return res.status(404).json({ ready: false });
     }
     const manifest = slideService.getManifest(file);

@@ -2,12 +2,17 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { getFilePath } = require("../utils/fileHelpers");
 const presenceService = require("./presenceService");
+// Issue #63 (доробка): назва матеріалу для заголовка демонстрації. Учні не
+// отримують прихований матеріал у каталозі, тому клієнт не може сам знайти
+// назву в /api/files — сервер віддає її у стані (лише назва, без доступу).
+const fileService = require("./fileService");
 
 class StateService {
   constructor() {
     this.revision = 0;
     this.shared = {
       file: "",
+      fileName: "",
       kind: "",
       page: 1,
       time: 0,
@@ -49,6 +54,7 @@ class StateService {
   stopShared() {
     this.shared = {
       file: "",
+      fileName: "",
       kind: "",
       page: 1,
       time: 0,
@@ -76,6 +82,9 @@ class StateService {
         throw error;
       }
       this.shared.file = data.file;
+      // Issue #63 (доробка): оригінальна назва матеріалу для заголовка показу
+      // (учні не бачать прихований файл у каталозі, тож шукають назву тут)
+      this.shared.fileName = fileService.getOriginalName(data.file);
       const fileExt = path.extname(data.file).toLowerCase();
       this.shared.kind = (fileExt === ".pdf" || fileExt === ".pptx")
         ? "slides"
@@ -111,6 +120,7 @@ class StateService {
     if (this.shared.file === filename) {
       this.shared = {
         file: "",
+        fileName: "",
         kind: "",
         page: 1,
         time: 0,
@@ -119,6 +129,27 @@ class StateService {
       };
       this.revision++;
     }
+  }
+
+  /**
+   * Issue #63 (доробка): чи є файл зараз АКТИВНО демонстрованим матеріалом.
+   *
+   * Використовується сервером для надання учням доступу ЛИШЕ до медіа того
+   * матеріалу, який викладач демонструє в поточному сеансі. Перевірка виконується
+   * при кожному запиті, тому:
+   *  - після завершення показу (stopShared) або автозупинки при виході викладача
+   *    доступ одразу зникає;
+   *  - після перемикання показу на інший матеріал доступ до попереднього
+   *    прихованого матеріалу теж припиняється.
+   *
+   * Читає стан через getState(), тому враховує автозупинку показу.
+   * На КАТАЛОГ впливу немає: прихований матеріал не з'являється в /api/files
+   * для учня і залишається недоступним для самостійного перегляду.
+   */
+  isCurrentlyDemonstrated(name) {
+    if (!name || !this.shared.file) return false;
+    const state = this.getState();
+    return Boolean(state.file) && state.file === name;
   }
 }
 

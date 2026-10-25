@@ -11,6 +11,7 @@ const fs = require("node:fs");
 const slideService = require("../services/slideService");
 const fileService = require("../services/fileService");
 const auth = require("../utils/auth");
+const { canViewMedia } = require("../utils/mediaAccess");
 const config = require("../config");
 const path = require("node:path");
 
@@ -39,8 +40,10 @@ class SlideController {
     }
 
     // Issue #4: приховані файли недоступні учням (навіть за відомим id),
-    // включаючи запуск конвертації
-    if (!fileService.canAccess(name, auth.isTeacher(req))) {
+    // включаючи запуск конвертації.
+    // Issue #63 (доробка): виняток — матеріал, який викладач демонструє
+    // зараз (медіа-cookie викладача або активний показ), див. mediaAccess
+    if (!canViewMedia(name, auth.isTeacherMedia(req))) {
       return res.status(404).send("Файл не знайдено");
     }
 

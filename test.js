@@ -216,6 +216,186 @@ async function main() {
         JSON.stringify({ hiddenRev: s4StateA.revision, showRev: s4StateShow.revision })
       );
 
+      // ---------------------------------------------------------------------
+      // Issue #63 (доробка): 1) медіа активної демонстрації прихованого
+      // матеріалу для учня (серверна перевірка на кожен запит); 2) медіа-cookie
+      // викладача замість ?pin= у URL (PIN не потрапляє в історію/журнали).
+      // ---------------------------------------------------------------------
+
+      // (а) приховуємо PDF-тестофайл для перевірок доступу
+      r = await fetch(`${base}/api/files/toggle-hide`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, file: fileId, hidden: true })
+      });
+      check("Issue #63 Д: приховування файлу перед перевірками медіа", r.status === 200, `status=${r.status}`);
+
+      // (б) вхід викладача видає HttpOnly медіа-cookie з похідним токеном
+      r = await fetch(base + "/api/auth/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN })
+      });
+      const dSetCookie = r.headers.get("set-cookie") || "";
+      const dCookieMatch = dSetCookie.match(/ly_media_auth=([^;]+)/);
+      const dCookie = dCookieMatch ? dCookieMatch[1] : "";
+      check(
+        "Issue #63 Д: вхід викладача видає HttpOnly SameSite=Strict медіа-cookie",
+        r.status === 200 && Boolean(dCookie) && /HttpOnly/i.test(dSetCookie) && /SameSite=Strict/i.test(dSetCookie),
+        dSetCookie.slice(0, 160) || `status=${r.status}`
+      );
+      check(
+        "Issue #63 Д: у cookie похідний токен, а не сам PIN",
+        Boolean(dCookie) && dCookie !== PIN && dCookie.length >= 32,
+        dCookie ? `length=${dCookie.length}` : "cookie відсутня"
+      );
+
+      if (dCookie) {
+        // (в) медіа-cookie відкриває медіа прихованого файлу — без ?pin= у URL
+        const dHdr = { Cookie: `ly_media_auth=${dCookie}` };
+        r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`, { headers: dHdr });
+        check("Issue #63 Д: медіа-cookie відкриває прихований файл викладачу (/files)", r.status === 200, `status=${r.status}`);
+        r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`, { headers: dHdr });
+        check("Issue #63 Д: медіа-cookie відкриває приховані слайди викладачу (/slides)", r.status === 200, `status=${r.status}`);
+        r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`, { headers: dHdr });
+        check("Issue #63 Д: медіа-cookie працює в /api/slides/info", r.status === 200, `status=${r.status}`);
+        // (г) підроблена cookie та cookie без прав керування
+        r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`, { headers: { Cookie: "ly_media_auth=" + "ab".repeat(32) } });
+        check("Issue #63 Д: підроблена медіа-cookie не дає доступу", r.status === 404, `status=${r.status}`);
+        r = await fetch(base + "/api/control", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: `ly_media_auth=${dCookie}` },
+          body: JSON.stringify({ page: 1 })
+        });
+        check("Issue #63 Д: медіа-cookie НЕ авторизує операції керування", r.status === 403, `status=${r.status}`);
+      }
+
+      // (д) ПОКАЗ прихованого PDF: учень бачить медіа, але не каталог
+      r = await fetch(base + "/api/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, file: fileId, kind: "slides", page: 1 })
+      });
+      check("Issue #63 Д: показ прихованого матеріалу запущено", r.status === 200, `status=${r.status}`);
+
+      r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`);
+      check("Issue #63 Д: учень отримує слайди прихованого матеріалу під час показу", r.status === 200, `status=${r.status}`);
+
+      r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`);
+      const dInfo = r.status === 200 ? await r.json() : {};
+      check(
+        "Issue #63 Д: /api/slides/info готовий для учня під час показу прихованого",
+        r.status === 200 && dInfo.ready === true,
+        `status=${r.status}, ready=${dInfo.ready}`
+      );
+
+      const dStudentList = await (await fetch(base + "/api/files")).json();
+      check(
+        "Issue #63 Д: у каталозі учня прихований матеріал НЕ з'являється під час показу",
+        !dStudentList.some((f) => f.id === fileId)
+      );
+
+      const dState = await (await fetch(base + "/api/state")).json();
+      check(
+        "Issue #63 Д: стан показу містить оригінальну назву для заголовка учня",
+        dState.file === fileId && typeof dState.fileName === "string" && dState.fileName.length > 0,
+        JSON.stringify({ file: dState.file, fileName: dState.fileName })
+      );
+
+      r = await fetch(`${base}/files/${encodeURIComponent(fileId)}`);
+      check(
+        "Issue #63 Д: сирий PDF для учня закритий і під час показу (лише слайди)",
+        r.status === 403,
+        `status=${r.status}`
+      );
+
+      // (е) відео-матеріал: прихований mp4 відкривається учневі ЛИШЕ під час показу
+      const dVideoBytes = Buffer.concat([
+        Buffer.from([0x00, 0x00, 0x00, 0x20]),
+        Buffer.from("ftypisom"),
+        Buffer.alloc(24, 1)
+      ]);
+      const dVideoBody = new ArrayBuffer(dVideoBytes.length);
+      new Uint8Array(dVideoBody).set(dVideoBytes);
+      r = await fetch(`${base}/api/upload?name=${encodeURIComponent("Тестове демо-відео.mp4")}`, {
+        method: "POST",
+        headers: { "X-Portal-Pin": PIN, "Content-Type": "application/octet-stream" },
+        body: dVideoBody
+      });
+      const dVideo = await r.json();
+      const dVideoId = dVideo.id || "";
+      check("Issue #63 Д: завантаження тестового відео для показу", r.status === 201 && Boolean(dVideoId), `status=${r.status}`);
+      if (dVideoId) {
+        e3Ids.push(dVideoId);
+        await fetch(`${base}/api/files/toggle-hide`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, file: dVideoId, hidden: true })
+        });
+
+        // Показ відео-матеріалу замість PDF
+        r = await fetch(base + "/api/control", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, file: dVideoId, kind: "video", page: 1 })
+        });
+        check("Issue #63 Д: показ прихованого відео-матеріалу запущено", r.status === 200, `status=${r.status}`);
+
+        r = await fetch(`${base}/files/${encodeURIComponent(dVideoId)}`);
+        const dVideoBack = Buffer.from(await r.arrayBuffer());
+        check(
+          "Issue #63 Д: учень отримує медіа відео під час його показу",
+          r.status === 200 && dVideoBack.length === dVideoBytes.length,
+          `status=${r.status}, len=${dVideoBack.length}`
+        );
+        r = await fetch(`${base}/files/${encodeURIComponent(dVideoId)}`);
+        const dVideoAfterSwitch0 = r.status;
+        // Перемикання показу на інший матеріал
+        await fetch(base + "/api/control", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, file: fileId, kind: "slides", page: 1 })
+        });
+        r = await fetch(`${base}/files/${encodeURIComponent(dVideoId)}`);
+        check(
+          "Issue #63 Д: після перемикання показу доступ до попереднього прихованого зникає",
+          dVideoAfterSwitch0 === 200 && r.status === 404,
+          `before=${dVideoAfterSwitch0}, after=${r.status}`
+        );
+
+        // (ж) завершення показу — прихований матеріал знову закритий
+        await fetch(base + "/api/control", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: PIN, stop: true })
+        });
+        r = await fetch(`${base}/slides/${encodeURIComponent(fileId)}/1`);
+        check(
+          "Issue #63 Д: після завершення показу прихований PDF знову закритий",
+          r.status === 404,
+          `status=${r.status}`
+        );
+        r = await fetch(`${base}/files/${encodeURIComponent(dVideoId)}`);
+        check(
+          "Issue #63 Д: після завершення показу приховане відео знову закрите",
+          r.status === 404,
+          `status=${r.status}`
+        );
+        r = await fetch(`${base}/api/slides/info?file=${encodeURIComponent(fileId)}`);
+        check(
+          "Issue #63 Д: після завершення показу /api/slides/info теж закритий",
+          r.status === 404,
+          `status=${r.status}`
+        );
+      }
+
+      // (з) повертаємо PDF у публікацію для подальших тестів
+      await fetch(`${base}/api/files/toggle-hide`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, file: fileId, hidden: false })
+      });
+
       // 7. Issue #7: присутність і активність сесії
       r = await fetch(`${base}/api/presence/heartbeat`, {
         method: "POST",
@@ -907,11 +1087,54 @@ async function main() {
         s4StateServiceSource.includes("touch()") &&
           apiControllerSource.includes("stateService.touch();")
       );
+      // ---------------------------------------------------------------------
+      // Issue #63 (доробка): медіа-доступ через HttpOnly cookie замість ?pin=
+      // у URL і серверний дозвіл медіа АКТИВНОЇ демонстрації прихованого.
+      // ---------------------------------------------------------------------
+      const s4AuthSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "utils", "auth.js"), "utf-8");
+      const s4MediaSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "utils", "mediaAccess.js"), "utf-8");
+      const s4FileCtlSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "controllers", "fileController.js"), "utf-8");
+      const s4SlideCtlSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "controllers", "slideController.js"), "utf-8");
+      const s4RoutesSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "src", "routes", "apiRoutes.js"), "utf-8");
+      // Тіло функцій fileUrl/slideUrl (без коментарів вище — шукаємо сам код)
+      const s4UrlSlice = appSource.slice(appSource.indexOf("function fileUrl"), appSource.indexOf("function extOf"));
       check(
-        "Issue #63 Е4: URL медіа викладача будується через let (без TypeError const +=)",
-        appSource.includes('let url = "/files/" + encodeURIComponent(name);') &&
-          appSource.includes('let url = "/slides/" + encodeURIComponent(name) + "/" + page;') &&
-          appSource.includes('url += "?pin=" + encodeURIComponent(pin);')
+        "Issue #63 Д: медіа-URL клієнта без ?pin= (PIN не потрапляє в історію та журнали)",
+        s4UrlSlice !== "" &&
+          !s4UrlSlice.includes('url += "?pin="') &&
+          !s4UrlSlice.includes("encodeURIComponent(pin)") &&
+          s4UrlSlice.includes('return "/files/" + encodeURIComponent(name);') &&
+          s4UrlSlice.includes('return "/slides/" + encodeURIComponent(name) + "/" + page;')
+      );
+      check(
+        "Issue #63 Д: HttpOnly медіа-cookie — видача, скасування, isTeacherMedia",
+        s4AuthSource.includes("function issueMediaCookie") &&
+          s4AuthSource.includes("function clearMediaCookie") &&
+          s4AuthSource.includes("function isTeacherMedia") &&
+          s4AuthSource.includes("httpOnly: true") &&
+          s4AuthSource.includes("sameSite: \"strict\"") &&
+          s4AuthSource.includes("function mediaAuthToken") &&
+          apiControllerSource.includes("auth.issueMediaCookie(req, res)") &&
+          s4RoutesSource.includes('"/auth/logout"')
+      );
+      check(
+        "Issue #63 Д: серверний дозвіл медіа активної демонстрації (mediaAccess)",
+        s4MediaSource.includes("stateService.isCurrentlyDemonstrated(name)") &&
+          s4FileCtlSource.includes("canViewMedia(name, isTeacher)") &&
+          s4SlideCtlSource.includes("canViewMedia(name, auth.isTeacherMedia(req))") &&
+          apiControllerSource.includes("canViewMedia(file, isTeacher)")
+      );
+      check(
+        "Issue #63 Д: клієнт оновлює cookie при завантаженні викладача і скасовує при виході",
+        appSource.includes('fetch("/api/auth/verify"') &&
+          appSource.includes('fetch("/api/auth/logout"') &&
+          appSource.includes('prevRole === "teacher" && newRole !== "teacher"')
+      );
+      check(
+        "Issue #63 Д: стан показу має назву та isCurrentlyDemonstrated (автозупинку)",
+        s4StateServiceSource.includes("isCurrentlyDemonstrated(name)") &&
+          s4StateServiceSource.includes('fileName: ""') &&
+          s4StateServiceSource.includes("fileService.getOriginalName(")
       );
 
       // ---------------------------------------------------------------------

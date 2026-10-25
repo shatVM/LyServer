@@ -17,6 +17,8 @@ router.get("/state", (req, res) => apiController.getState(req, res));
 router.post("/control", (req, res) => apiController.updateControl(req, res));
 router.post("/upload", (req, res) => apiController.uploadFile(req, res));
 router.post("/auth/verify", (req, res) => apiController.verifyAuth(req, res));
+// Issue #63 (доробка): скасування медіа-cookie при виході викладача
+router.post("/auth/logout", (req, res) => apiController.logoutMedia(req, res));
 router.post("/files/toggle-hide", (req, res) => apiController.toggleHide(req, res));
 router.post("/files/delete", (req, res) => apiController.deleteFile(req, res));
 router.post("/slides/prepare", (req, res) => apiController.prepareSlides(req, res));

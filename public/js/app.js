@@ -361,19 +361,18 @@ function formatSize(bytes) {
 }
 
 function fileUrl(name) {
-  // Issue #63 (Етап 4): <img>/<video> не вміють додавати заголовки, тому вчитель
-  // відкриває приховані матеріали (приватний перегляд і спільна демонстрація)
-  // через query-параметр pin — extractPin шукає його після заголовка і тіла.
-  // Учень ніколи не додає pin: для нього URL лишається публічним.
-  let url = "/files/" + encodeURIComponent(name);
-  if (role === "teacher" && pin) url += "?pin=" + encodeURIComponent(pin);
-  return url;
+  // Issue #63 (доробка): PIN більше НЕ передається у URL медіа (?pin= потрапляв
+  // в історію браузера при відкритті зображення в новій вкладці, у журнали
+  // звернень і в адресний рядок). Замість цього викладач отримує HttpOnly
+  // медіа-cookie при вході (POST /api/auth/verify), і браузер сам додає її до
+  // <img>/<video>/слайдів — у мережевих запитах URL лишається чистим.
+  // API-запити, як і раніше, авторизуються заголовком X-Portal-Pin.
+  return "/files/" + encodeURIComponent(name);
 }
 
 function slideUrl(name, page) {
-  let url = "/slides/" + encodeURIComponent(name) + "/" + page;
-  if (role === "teacher" && pin) url += "?pin=" + encodeURIComponent(pin);
-  return url;
+  // Issue #63 (доробка): див. fileUrl — медіа-доступ через cookie, без ?pin= у URL
+  return "/slides/" + encodeURIComponent(name) + "/" + page;
 }
 
 function extOf(name) {
@@ -417,8 +416,8 @@ function renderSlideImage(name, page, totalPages, ctx) {
   }
 
   img.alt = "Слайд " + page;
-  // Cache-bust під час конвертації: pin учителя вже може міститися в query,
-  // тому параметр t додаємо через ? або & залежно від наявності query
+  // Cache-bust під час конвертації: параметр t додаємо через ? або & залежно
+  // від наявності query (медіа-доступ тепер через cookie, а не через pin у URL)
   const slideSrc = slideUrl(name, page);
   img.src = slideSrc + (slideSrc.includes("?") ? "&" : "?") + "t=" + Date.now();
 
@@ -641,6 +640,12 @@ function setRole(newRole, newPin = "", newName = "") {
   const prevRole = role;
   role = newRole;
   localStorage.setItem("portalRole", newRole);
+  // Issue #63 (доробка): вихід викладача або перехід на роль учня скасовує
+  // HttpOnly медіа-cookie — інакше в цьому браузері лишився б доступ до
+  // прихованих медіафайлів після завершення сеансу викладача
+  if (prevRole === "teacher" && newRole !== "teacher") {
+    fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+  }
   if (newRole === "teacher") {
     pin = newPin;
     sessionStorage.setItem("portalPin", newPin);
@@ -1620,7 +1625,10 @@ function displaySharedFile(fileId, state = {}) {
   videoElement = null;
 
   const file = files.find(f => (f.id === fileId || f.name === fileId));
-  const displayName = file ? file.name : fileId;
+  // Issue #63 (доробка): назва зі стану показу — прихований матеріал учень не
+  // бачить у каталозі, тож у його files[] його немає, а заголовок має бути
+  // людським, а не сирим id
+  const displayName = (state && state.fileName) || (file ? file.name : fileId);
 
   if ($("viewerTitle")) $("viewerTitle").textContent = "Спільна демонстрація: " + displayName;
   $("viewer").replaceChildren();
@@ -1757,7 +1765,9 @@ async function pollState(force = false) {
     }
 
     const file = files.find(f => (f.id === state.file || f.name === state.file));
-    const displayName = file ? file.name : state.file;
+    // Issue #63 (доробка): назва зі стану — актуальна і для прихованого
+    // матеріалу, якого немає в каталозі учня
+    const displayName = state.fileName || (file ? file.name : state.file);
 
     const changed = force || state.revision !== lastRevision;
     if (changed) {
@@ -2105,4 +2115,15 @@ if (role === "teacher") {
   // Issue #63: heartbeat викладача — без нього активний показ зупиняється
   // автоматично, коли вчитель іде (вкладка, «Вийти», зв'язок)
   startTeacherHeartbeat();
+  // Issue #63 (доробка): оновлюємо HttpOnly медіа-cookie. При перезавантаженні
+  // сторінки PIN береться з sessionStorage, але cookie видавався лише при
+  // вході — без оновлення <img>/<video> викладача втратили б доступ після
+  // вичерпання терміну дії; запит нічого не змінює, якщо PIN невірний
+  if (pin) {
+    fetch("/api/auth/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin })
+    }).catch(() => {});
+  }
 }
