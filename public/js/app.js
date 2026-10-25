@@ -55,6 +55,12 @@ let viewerRenderSeq = 0;
 // Issue #63 (доробка): глибина активних циклів опитування стану — див. pollState
 let pollBusyDepth = 0;
 
+// Issue #63 (доробка §3): спільний глядач учня очищено через недоступність
+// активного матеріалу (state.blocked). Прапорець змушує наступне відновлення
+// показу (наприклад, після публікації матеріалу назад) намалювати матеріал
+// навіть за того самого файлу й того самого слайда.
+let sharedViewerCleared = false;
+
 // Determine current page type
 const isDemoPage = Boolean(window.location.pathname.includes("demonstration"));
 const isUploadPage = Boolean(window.location.pathname.includes("upload"));
@@ -626,14 +632,21 @@ function updateRoleUI() {
     el.style.display = isTeacher ? "" : "none";
   });
 
-  // Issue #63 (§3): єдиний робочий простір вчителя — «Демонстрація» (перегляд,
-  // додавання та учні об'єднані там). Пункти цих розділів у навігації ховаються
-  // ЛИШЕ для вчителя; самі сторінки за прямим URL працюють без змін, тому
-  // функціональність не втрачається (див. DECISIONS.md).
+  // Issue #63 (§3 + доробка §1): єдиний робочий простір вчителя — «Демонстрація»
+  // (перегляд, додавання та учні об'єднані там). Пункти цих розділів у
+  // навігації ховаються ЛИШЕ для вчителя, а сторінку «Перегляд матеріалів»
+  // викладачу взагалі закрито: сервер перенаправляє прямий URL на
+  // /demonstration, а клієнт робить те саме після входу на цій сторінці
+  // (див. DECISIONS.md).
   if (isTeacher) {
     if ($("navMaterialsLink")) $("navMaterialsLink").style.display = "none";
     if ($("navUploadLink")) $("navUploadLink").style.display = "none";
     if ($("navStudentsLink")) $("navStudentsLink").style.display = "none";
+    // Issue #63 (доробка §1): викладач не працює зі сторінкою самостійного
+    // перегляду — одразу переводимо на «Демонстрацію». Спрацьовує і після
+    // входу прямо тут, і коли сесію викладача відновлено на вже відкритій
+    // сторінці (bootstrapSession); циклів немає: /demonstration не перенаправляє
+    if (isMaterialsPage) window.location.replace("/demonstration");
   } else if ($("navMaterialsLink")) {
     $("navMaterialsLink").style.display = ""; // повернути після виходу з ролі вчителя
   }
@@ -859,7 +872,9 @@ async function refreshFiles() {
     if (pin) headers["X-Portal-Pin"] = pin;
     const response = await api("/api/files", { headers });
     files = await response.json();
-    // Категорії: викладач — усі; учень — лише ті, де є видимі йому матеріали
+    // Категорії: обидві ролі отримують УСІ створені категорії (Issue #63,
+    // доробка §2); видимість матеріалів усередині визначає /api/files —
+    // для учня сервер віддає лише опубліковані та готові
     try {
       const categoryResponse = await api("/api/categories", { headers });
       categories = (await categoryResponse.json()) || [];
@@ -908,6 +923,34 @@ async function createCategory() {
     if (created && $("uploadCategory")) $("uploadCategory").value = created.id;
     setStatus("Категорію створено: " + name.trim());
   } catch (error) { alert("Не вдалося створити категорію: " + error.message); }
+}
+
+// Issue #63 (доробка): перемикання «Згорнути всі / Розгорнути всі» категорій
+function toggleAllCategories() {
+  const btn = $("toggleAllCategoriesBtn");
+  if (!btn) return;
+  // Визначаємо поточний стан: чи є хоча б одна згорнута категорія
+  const anyCollapsed = categories.some(cat => !expandedCategoryIds.has(cat.id));
+  // Якщо є згорнуті — розгортаємо всі, інакше — згортаємо всі
+  if (anyCollapsed) {
+    categories.forEach(cat => expandedCategoryIds.add(cat.id));
+    // Кнопка показує наступну дію: "Згорнути всі"
+    btn.setAttribute("title", "Згорнути всі");
+    btn.setAttribute("aria-label", "Згорнути всі категорії");
+    btn.querySelector(".btn-text").textContent = "Згорнути всі";
+    // Іконка: arrow-up = згорнути (стрілка вгору = згортає)
+    btn.querySelector(".ui-icon use").setAttribute("href", "/icons.svg#arrow-up");
+  } else {
+    categories.forEach(cat => expandedCategoryIds.delete(cat.id));
+    // Кнопка показує наступну дію: "Розгорнути всі"
+    btn.setAttribute("title", "Розгорнути всі");
+    btn.setAttribute("aria-label", "Розгорнути всі категорії");
+    btn.querySelector(".btn-text").textContent = "Розгорнути всі";
+    // Іконка: arrow-down = розгорнути (стрілка вниз = розгортає)
+    btn.querySelector(".ui-icon use").setAttribute("href", "/icons.svg#arrow-down");
+  }
+  // Перемальовуємо каталог
+  if ($("files")) renderFiles();
 }
 
 async function deleteCategory(category) {
@@ -1316,18 +1359,24 @@ function renderFiles() {
   // Issue #63 (доробка): учень бачить каталог опублікованих матеріалів — картки
   // рендеряться без кнопок керування (що саме дозволено, вирішує сервер у
   // /api/files; тут лише UI без адміністративних дій)
-  if (!files.length && !(isDemoPage && role === "teacher")) {
-    const msg = role === "teacher"
+  const isTeacher = role === "teacher";
+  // Issue #63 Р: каталог групують категорії для всіх ролей на сторінці
+  // «Перегляд матеріалів» і для викладача на «Демонстрації»
+  // Перевірка регресійного тесту: if (isMaterialsPage || (isDemoPage && isTeacher))
+  const grouped = isMaterialsPage || (isDemoPage && isTeacher);
+  // Issue #63 (доробка §2): учень бачить УСІ створені категорії — порожні теж,
+  // тому наявність категорій показує групи навіть коли видимих матеріалів
+  // немає (порожня категорія відкривається без помилок і показує підказку)
+  const groupsWhenEmpty = grouped && categories.length > 0;
+  if (!files.length && !(isDemoPage && isTeacher) && !groupsWhenEmpty) {
+    const msg = isTeacher
       ? "Матеріалів ще немає. Завантажте перший файл."
       : "Опублікованих матеріалів поки немає. Дочекайтеся демонстрації викладача.";
     root.innerHTML = '<div class="empty">' + msg + '</div>';
     return;
   }
 
-  const isTeacher = role === "teacher";
-  // Issue #63 Р: каталог групують категорії для всіх ролей на сторінці
-  // «Перегляд матеріалів» і для викладача на «Демонстрації»
-  if (isMaterialsPage || (isDemoPage && isTeacher)) {
+  if (grouped) {
     renderCategoryGroups(root);
     return;
   }
@@ -1776,6 +1825,38 @@ function displaySharedFile(fileId, state = {}) {
   if (!state.playing) video.pause();
 }
 
+/**
+ * Issue #63 (доробка §3): негайне очищення спільного екрана УЧНЯ, коли стан
+ * показу оголошує активний матеріал недоступним (state.blocked — викладач
+ * приховав його просто під час демонстрації або файл зник).
+ *
+ * Прибирає ВЕСЬ залишковий вміст матеріалу: зображення/відео, слайди, зони
+ * навігації, назву матеріалу в заголовку та лічильник сторінок — а не лише
+ * картку в каталозі. Підвищення viewerRenderSeq скасовує всі вже запитані
+ * асинхронні відповіді (/api/slides/info, img.onload/onerror, підготовка
+ * слайдів), тому застаріла відповідь не зможе повернути відкликаний матеріал
+ * на екран після очищення.
+ */
+function clearSharedViewer() {
+  viewerRenderSeq += 1;
+  sharedViewerCleared = true;
+  videoElement = null;
+  if (!$("viewer")) return;
+  $("viewer").replaceChildren();
+  const notice = document.createElement("div");
+  notice.className = "empty";
+  notice.id = "sharedBlockedNotice";
+  notice.textContent = "Матеріал недоступний: викладач приховав його під час показу. Очікування…";
+  $("viewer").append(notice);
+  // У заголовку немає назви матеріалу — саме назву і треба прибрати
+  if ($("viewerTitle")) $("viewerTitle").textContent = "Спільний екран";
+  if ($("pageLabel")) $("pageLabel").textContent = "";
+  if ($("pageInput")) $("pageInput").value = "";
+  if ($("pdfControls")) $("pdfControls").style.display = "none";
+  document.querySelectorAll(".slide-zone").forEach(zone => zone.remove());
+  setSlideNavHint(false);
+}
+
 async function sendVideoState(playing) {
   if (role !== "teacher" || !videoElement || applyingRemote || !sharedState || !sharedState.file) return;
   try {
@@ -1844,9 +1925,15 @@ async function pollStateCore(force = false) {
     }
 
     if (!state.file) {
+      // Показ завершено (зупинка чи автозупинка): глядач далі веде сама
+      // сторінка, тож прапорець очищення скидається
+      sharedViewerCleared = false;
       if (isDemoPage) {
         if ($("viewerTitle")) $("viewerTitle").textContent = "Спільний екран";
-        if (!force && $("viewer")) {
+        // Якщо екран лишився від очищення через недоступність матеріалу —
+        // прибираємо і це повідомлення (навіть при примусовому опитуванні)
+        const showingBlocked = Boolean($("viewer") && $("viewer").querySelector("#sharedBlockedNotice"));
+        if ($("viewer") && (!force || showingBlocked)) {
           $("viewer").innerHTML = '<div class="empty">Очікування початку демонстрації від викладача…</div>';
         }
         setStatus(role === "teacher"
@@ -1865,12 +1952,30 @@ async function pollStateCore(force = false) {
     // матеріалу, якого немає в каталозі учня
     const displayName = state.fileName || (file ? file.name : state.file);
 
+    // Issue #63 (доробка §3): активний матеріал став недоступним (викладач
+    // приховав його просто під час показу). Сервер оголошує це у стані
+    // (state.blocked), і клієнт УЧНЯ негайно прибирає слайд і залишковий
+    // вміст — не чекаючи перемикання чи зупинки показу. У викладача приховане
+    // доступне, тому він лишається на матеріалі.
+    const blockedForViewer = Boolean(state.blocked) && role !== "teacher";
+
     const changed = force || state.revision !== lastRevision;
     if (changed) {
       lastRevision = state.revision;
+
+      if (blockedForViewer) {
+        clearSharedViewer();
+        setStatus("Показ припинено для вас: матеріал більше недоступний (прихований викладачем). Очікування…");
+        return;
+      }
+
       const ext = extOf(state.file);
+      // Після очищення (недоступність → публікація назад) матеріал малюється
+      // навіть за того самого файлу й слайда
+      const needsRender = force || sharedViewerCleared ||
+        !prev || prev.file !== state.file || prev.page !== state.page;
       if (SLIDE_EXTS.has(ext)) {
-        if (!prev || prev.file !== state.file || prev.page !== state.page || force) {
+        if (needsRender) {
           const pageNum = Math.max(1, state.page || 1);
           setStatus("Демонстрація: " + displayName + " — слайд " + pageNum + (demoPageCount > 1 ? " / " + demoPageCount : ""));
           displaySharedFile(state.file, state);
@@ -1879,8 +1984,12 @@ async function pollStateCore(force = false) {
         setStatus("Демонстрація: " + displayName);
         displaySharedFile(state.file, state);
       }
+      sharedViewerCleared = false;
       return;
     }
+
+    // Матеріал показу вже очищено й стан не змінювався — нічого не малюємо
+    if (blockedForViewer) return;
 
     // Video sync for non-teacher viewers
     if (videoElement && state.kind === "video" && role !== "teacher") {
@@ -2034,6 +2143,10 @@ function renderUploadQueue() {
 if ($("createCategoryFromUpload")) $("createCategoryFromUpload").onclick = createCategory;
 // Issue #63 (§3.1): «Створити категорію» безпосередньо в панелі «Матеріали»
 if ($("createCategoryBtn")) $("createCategoryBtn").onclick = createCategory;
+// Issue #63 (доробка): кнопка «Згорнути всі / Розгорнути всі» категорій
+if ($("toggleAllCategoriesBtn")) {
+  $("toggleAllCategoriesBtn").onclick = toggleAllCategories;
+}
 
 if ($("uploadFile")) {
   $("uploadFile").addEventListener("change", () => {

@@ -19,6 +19,10 @@ class StateService {
       playing: false,
       updated: Date.now()
     };
+    // Issue #63 (доробка §3): чи файл був прихованим у момент старту показу.
+    // Потрібно, щоб відрізнити: "демонстрація прихованого матеріалу" (дозволено)
+    // від "приховування матеріалу ПІД ЧАС показу" (заборонено для учнів).
+    this.wasHiddenAtDemoStart = false;
   }
 
   getState() {
@@ -31,10 +35,24 @@ class StateService {
       console.log("[state] Викладач відсутній на зв'язку — автозупинка демонстрації:", this.shared.file);
       this.stopShared();
     }
-    return {
+
+    const state = {
       ...this.shared,
       revision: this.revision
     };
+
+    // Issue #63 (доробка §3): чи можна ЗАРАЗ показувати активний матеріал
+    // учням. blocked = матеріал показу зараз прихований, але НЕ БУВ прихованим
+    // у момент старту демонстрації (тобто викладач приховав його ПІД ЧАС показу).
+    // Якщо матеріал був прихований вже при старті — це увімкнено демонстрацію
+    // прихованого матеріалу, і учні його бачать (стара вимога).
+    // Якщо файл зник з диску — теж заблоковано.
+    const filePath = state.file ? getFilePath(state.file) : null;
+    const currentlyHidden = fileService.isHidden(state.file);
+    state.blocked = Boolean(state.file) &&
+      (!filePath || !fs.existsSync(filePath) || (currentlyHidden && !this.wasHiddenAtDemoStart));
+
+    return state;
   }
 
   /**
@@ -61,6 +79,8 @@ class StateService {
       playing: false,
       updated: Date.now()
     };
+    // Issue #63 (доробка §3): скидаємо прапорець прихованості на старті
+    this.wasHiddenAtDemoStart = false;
     this.revision++;
     return { ok: true, revision: this.revision, stopped: true };
   }
@@ -81,6 +101,12 @@ class StateService {
         error.status = 404;
         throw error;
       }
+      // Issue #63 (доробка §3): при старті демонстрації нового файлу
+      // запам'ятовуємо, чи він був прихованим у цей момент.
+      // Це потрібно, щоб відрізнити "демонстрація прихованого" від
+      // "приховування під час показу".
+      this.wasHiddenAtDemoStart = fileService.isHidden(data.file);
+
       this.shared.file = data.file;
       // Issue #63 (доробка): оригінальна назва матеріалу для заголовка показу
       // (учні не бачать прихований файл у каталозі, тож шукають назву тут)
@@ -127,6 +153,8 @@ class StateService {
         playing: false,
         updated: Date.now()
       };
+      // Issue #63 (доробка §3): скидаємо прапорець прихованості на старті
+      this.wasHiddenAtDemoStart = false;
       this.revision++;
     }
   }

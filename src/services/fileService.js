@@ -425,6 +425,19 @@ class FileService {
     const hiddenSet = new Set(metadata.hidden || []);
     return !hiddenSet.has(name);
   }
+
+  /**
+   * Issue #63 (доробка §3): чи матеріал зараз прихований.
+   * Використовується станом демонстрації (/api/state → blocked): щойно
+   * викладач приховує матеріал, який демонструється, клієнти учнів мають
+   * негайно прибрати його з екрана.
+   */
+  isHidden(name) {
+    const safe = safeFilename(name);
+    if (!safe) return false;
+    const metadata = this.getMetadata();
+    return new Set(metadata.hidden || []).has(safe);
+  }
 }
 
 module.exports = new FileService();

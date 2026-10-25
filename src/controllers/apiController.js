@@ -7,6 +7,20 @@ const stateService = require("../services/stateService");
 const presenceService = require("../services/presenceService");
 const slideService = require("../services/slideService");
 
+/**
+ * Issue #63 (доробка §2): безпечний набір полів категорії.
+ * У відповідь віддаються ЛИШЕ id/name/order/createdAt — ніяких даних про
+ * матеріали (приховані чи опубліковані), їх кількості чи складу.
+ */
+function safeCategory(category) {
+  return {
+    id: category.id,
+    name: category.name,
+    order: category.order || 0,
+    createdAt: category.createdAt
+  };
+}
+
 class ApiController {
   verifyAuth(req, res) {
     if (!auth.requirePinJson(req, res)) return;
@@ -138,9 +152,12 @@ class ApiController {
    * Issue #63 (аудит endpoint-ів, доробка): читання для викладача (PIN або
    * сесія) і для учасника з чинною сесією; без входу — 403. Відповідь містить
    * лише id/name/order/createdAt — жодних даних про матеріали.
-   * Учень отримує ЛИШЕ категорії, у яких є хоча б один видимий йому матеріал:
-   * структура каталогу прихованих матеріалів (порожні або «прихований»
-   * вміст) йому не розкривається.
+   * Issue #63 (доробка §2): обидві ролі отримують ПЕРЕЛІК УСІХ створених
+   * категорій, включно з порожніми та з категоріями, де лише приховані
+   * матеріали: структура каталогу однакова для всіх, а про наявність і
+   * видимість матеріалів свідчить тільки /api/files (для учня — лише
+   * опубліковані та готові). Назви, метадані чи кількість прихованих
+   * матеріалів через категорії не розкриваються.
    * Створення, видалення та зміна складу категорій, як і раніше, потребують
    * PIN (див. createCategory/...).
    */
@@ -150,18 +167,23 @@ class ApiController {
       return res.status(403).send("Категорії недоступні — увійдіть на портал");
     }
     res.set("Cache-Control", "no-store");
-    const categories = fileService.getCategories();
-    if (identity.role === "teacher") return res.json(categories);
-    const visibleCategoryIds = new Set(
-      fileService.getFilesList(false).map(file => file.categoryId)
-    );
-    res.json(categories.filter(category => visibleCategoryIds.has(category.id)));
+    // Issue #63 (доробка §2): учень бачить УСІ створені категорії — порожні,
+    // з опублікованими та з прихованими матеріалами. Раніше категорії без
+    // видимого йому матеріалу приховувалися, і структура каталогу залежала від
+    // поточної видимості; тепер перелік категорій однаковий для всіх ролей,
+    // а видимість матеріалів усередині визначає лише /api/files (для учня —
+    // тільки опубліковані та готові). Повертаються виключно безпечні поля.
+    res.json(fileService.getCategories().map(safeCategory));
   }
 
   createCategory(req, res) {
     if (!auth.requirePin(req, res)) return;
     try {
       const category = fileService.createCategory(req.body && req.body.name);
+      // Issue #63 (доробка §2): ревізія стану зростає — клієнти учнів
+      // перечитують /api/categories на черговому опитуванні, тобто нова
+      // категорія з'являється в них без перезавантаження сторінки
+      stateService.touch();
       res.status(201).json({ ok: true, category });
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Не вдалося створити категорію");
@@ -172,6 +194,9 @@ class ApiController {
     if (!auth.requirePin(req, res)) return;
     try {
       const result = fileService.deleteCategory(req.body && req.body.categoryId);
+      // Issue #63 (доробка §2): ревізія стану — клієнти учнів перечитують
+      // перелік категорій без перезавантаження сторінки
+      stateService.touch();
       res.json(result);
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Не вдалося видалити категорію");
@@ -182,7 +207,9 @@ class ApiController {
     if (!auth.requirePin(req, res)) return;
     try {
       const body = req.body || {};
-      res.json(fileService.renameCategory(body.categoryId, body.name));
+      const result = fileService.renameCategory(body.categoryId, body.name);
+      stateService.touch(); // Issue #63 (доробка §2): нова назва в учнів без перезавантаження
+      res.json(result);
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Не вдалося перейменувати категорію");
     }
@@ -192,7 +219,9 @@ class ApiController {
     if (!auth.requirePin(req, res)) return;
     try {
       const body = req.body || {};
-      res.json(fileService.reorderCategory(body.categoryId, body.direction));
+      const result = fileService.reorderCategory(body.categoryId, body.direction);
+      stateService.touch(); // Issue #63 (доробка §2): новий порядок в учнів без перезавантаження
+      res.json(result);
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Не вдалося змінити порядок категорій");
     }
@@ -212,7 +241,11 @@ class ApiController {
     if (!auth.requirePin(req, res)) return;
     try {
       const body = req.body || {};
-      res.json(fileService.moveFileToCategory(body.file, body.categoryId));
+      const result = fileService.moveFileToCategory(body.file, body.categoryId);
+      // Issue #63 (доробка §2): склад категорій змінився — групування каталогу
+      // в учнів оновлюється на наступному опитуванні стану
+      stateService.touch();
+      res.json(result);
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Не вдалося перемістити матеріал");
     }
