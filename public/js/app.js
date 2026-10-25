@@ -46,6 +46,15 @@ let demoPageCount = 1;
 // Issue #61: файл, для якого вже показано початкову підказку навігації (демонстрація)
 let sharedNavHintFile = null;
 
+// Issue #63 (доробка): номер останнього відображення у спільному глядачі.
+// displaySharedFile асинхронно читає /api/slides/info; якщо за цей час стан
+// уже змінився (інший цикл опитування), відповідь застаріла — малювати її
+// не можна, інакше глядач відкочується до попереднього матеріалу.
+let viewerRenderSeq = 0;
+
+// Issue #63 (доробка): глибина активних циклів опитування стану — див. pollState
+let pollBusyDepth = 0;
+
 // Determine current page type
 const isDemoPage = Boolean(window.location.pathname.includes("demonstration"));
 const isUploadPage = Boolean(window.location.pathname.includes("upload"));
@@ -457,6 +466,9 @@ function renderSlideImage(name, page, totalPages, ctx) {
   // Show loading overlay only when first loaded
   img.onload = () => {};
   img.onerror = () => {
+    // Якщо цей <img> уже замінено іншим показом (дані зіткнення застаріли),
+    // його відміна не має чіпати поточний вміст глядача
+    if (img.parentNode !== viewer) return;
     viewer.innerHTML = '<div class="empty">⚠️ Помилка завантаження зображення слайду ' + page + '</div>';
   };
 
@@ -1687,6 +1699,7 @@ async function broadcastFile(fileId, navigateToDemo = false) {
 function displaySharedFile(fileId, state = {}) {
   if (!$("viewer")) return;
   videoElement = null;
+  const seq = ++viewerRenderSeq;
 
   const file = files.find(f => (f.id === fileId || f.name === fileId));
   // Issue #63 (доробка): назва зі стану показу — прихований матеріал учень не
@@ -1712,18 +1725,21 @@ function displaySharedFile(fileId, state = {}) {
     fetch("/api/slides/info?file=" + encodeURIComponent(fileId))
       .then(r => r.ok ? r.json() : null)
       .then(manifest => {
+        if (seq !== viewerRenderSeq) return; // стан уже змінився — відповідь застаріла
         if (manifest && manifest.ready) {
           demoPageCount = manifest.pageCount;
           renderSlideImage(fileId, pageNum, manifest.pageCount);
         } else {
           // If slides not prepared yet, prepare and display
           prepareAndShowSlides(fileId, pageNum, pageCount => {
+            if (seq !== viewerRenderSeq) return;
             demoPageCount = pageCount;
             renderSlideImage(fileId, pageNum, pageCount);
           });
         }
       })
       .catch(() => {
+        if (seq !== viewerRenderSeq) return;
         renderSlideImage(fileId, pageNum, pageNum);
       });
     return;
@@ -1782,6 +1798,22 @@ async function changeSharedPage(delta) {
 }
 
 async function pollState(force = false) {
+  // Issue #63 (доробка): лише один інтервальний цикл опитування за раз.
+  // Поки триває повільний цикл (наприклад, із refreshFiles за ревізією), новий
+  // старт з інтервалу блокується: два паралельні цикли працюють із різними
+  // знімками стану, і той, що завершиться останнім (зі ЗАСТІЛЯЛИМ станом),
+  // відкочує глядач і каталог до попереднього матеріалу. Примусові виклики
+  // (force) не блокуються, щоб не загальмувати реакцію викладача.
+  if (pollBusyDepth > 0 && !force) return;
+  pollBusyDepth += 1;
+  try {
+    await pollStateCore(force);
+  } finally {
+    pollBusyDepth -= 1;
+  }
+}
+
+async function pollStateCore(force = false) {
   // Сторінка перегляду: учні дізнаються про демонстрацію зі СЕРВЕРНОГО стану
   // (та самий шлях при перезавантаженні чи повторному підключенні); викладач
   // керує показом на сторінці «Демонстрація» і тут не спостерігає.

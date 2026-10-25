@@ -1697,6 +1697,25 @@ async function main() {
             `status=${r.status}, file=${wState.file}`
           );
 
+          // Issue #63 (доробка): прихований матеріал відкритий учневі ЛИШЕ в
+          // момент активного показу; сам каталог учня його не містить
+          await fetch(wdogBase + "/api/files/toggle-hide", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pin: PIN, file: fileId, hidden: true })
+          });
+          const wHiddenSlides = await fetch(`${wdogBase}/slides/${encodeURIComponent(fileId)}/1`, { headers: sess(wdogBase) });
+          const wHiddenRaw = await fetch(`${wdogBase}/files/${encodeURIComponent(fileId)}`, { headers: sess(wdogBase) });
+          const wHiddenListRes = await fetch(wdogBase + "/api/files", { headers: sess(wdogBase) });
+          const wHiddenList = wHiddenListRes.status === 200 ? await wHiddenListRes.json() : [];
+          const wHiddenLeak = wHiddenList.some((f) => f.id === fileId);
+          check(
+            "Issue #63 (доробка): під час показу прихований матеріал відкритий учневі (слайди 200), але в каталозі його немає",
+            wHiddenSlides.status === 200 && wHiddenRaw.status === 403 &&
+              wHiddenListRes.status === 200 && !wHiddenLeak,
+            `slides=${wHiddenSlides.status}, raw=${wHiddenRaw.status}, cat=${wHiddenListRes.status}, leak=${wHiddenLeak}`
+          );
+
           // Жодного control/heartbeat довше за тайм-аут (3 с) → автозупинка.
           // Перевірка виконується в GET /api/state, який учні опитують саме
           // так, тож тест відтворює реальний шлях відновлення каталогу.
@@ -1706,6 +1725,18 @@ async function main() {
             "Issue #63: без вчителя демонстрація зупиняється автоматично",
             wState.file === "" && wState.revision > 0,
             `file=${JSON.stringify(wState.file)}, rev=${wState.revision}`
+          );
+
+          // Issue #63 (доробка): разом зі станом автозупинка відкликає і ДОСТУП
+          // до медіа прихованого матеріалу — перевірка виконується на сервері
+          // при кожному запиті, тож 404 повертається без дій клієнта
+          const wAutoSlides = await fetch(`${wdogBase}/slides/${encodeURIComponent(fileId)}/1`, { headers: sess(wdogBase) });
+          const wAutoFiles = await fetch(`${wdogBase}/files/${encodeURIComponent(fileId)}`, { headers: sess(wdogBase) });
+          const wAutoInfo = await fetch(`${wdogBase}/api/slides/info?file=${encodeURIComponent(fileId)}`, { headers: sess(wdogBase) });
+          check(
+            "Issue #63 (доробка): після автозупинки медіа прихованого матеріалу закриті (404 на всіх шляхах)",
+            wAutoSlides.status === 404 && wAutoFiles.status === 404 && wAutoInfo.status === 404,
+            `slides=${wAutoSlides.status}, files=${wAutoFiles.status}, info=${wAutoInfo.status}`
           );
 
           // Heartbeat викладача утримує показ активним (2 × 1.8 с < 3 с)
@@ -1728,7 +1759,22 @@ async function main() {
             `file=${wState.file}`
           );
 
-          // Прибрати за собою на тестовому екземплярі
+          // Повторний старт показу знову відкриває медіа прихованого матеріалу
+          // (зворотний бік відкликання); далі — повернення початкового стану
+          const wRestartSlides = await fetch(`${wdogBase}/slides/${encodeURIComponent(fileId)}/1`, { headers: sess(wdogBase) });
+          check(
+            "Issue #63 (доробка): після повторного старту показу медіа прихованого знову відкриті (200)",
+            wRestartSlides.status === 200,
+            `slides=${wRestartSlides.status}`
+          );
+
+          // Прибрати за собою на тестовому екземплярі: показ зупинено, файл
+          // повернуто до опублікованого стану (він належить тестовому набору)
+          await fetch(wdogBase + "/api/files/toggle-hide", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pin: PIN, file: fileId, hidden: false })
+          });
           await fetch(wdogBase + "/api/control", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
