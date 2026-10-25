@@ -604,6 +604,8 @@ async function main() {
   // відкритими рівно до моменту перемикання чи зупинки.
 
   // 6.1 показ опублікованого WAV, потім приховування його ПІД ЧАС показу
+  // Нова поведінка (Issue #63 доробка): медіа відкликається негайно (404),
+  // екран учнів очищується (state.blocked), картка зникає з каталогу.
   const demoWavClicked = await teacherAction(T, TEST_MEDIA, "Показувати всім");
   const demoWavStarted = await waitDemoFile(wavId, true);
   const wavDuringDemo = await httpStatus(S1, "/files/" + encodeURIComponent(wavId));
@@ -615,19 +617,17 @@ async function main() {
   const teacherStillSees = await waitFor(T,
     `!!(${cardExpr(TEST_MEDIA)}) && (${cardExpr(TEST_MEDIA)}).className.includes('file-is-hidden')`, 8000);
   const wavHiddenDuringDemo = await httpStatus(S1, "/files/" + encodeURIComponent(wavId));
-  const s1VideoAfterHide = await waitFor(S1,
-    mediaExpr("video") +
-    " && document.getElementById('viewerTitle').textContent.startsWith('Спільна демонстрація')" +
-    " && window.__mark === 42", 15000);
+  // Екран учнів очищується: перевіряємо, що з'явилося повідомлення про недоступність
+  const s1ViewerCleared = await waitFor(S1,
+    "document.getElementById('sharedBlockedNotice') !== null && window.__mark === 42", 12000);
   // Прихований матеріал зникає з каталогу ОБОХ учнів без перезавантаження
-  // (сервер піднімає ревізію стану → клієнт перечитує /api/files)
   const s1CardGoneAfterHide = await waitFor(S1, `!(${cardExpr(TEST_MEDIA)}) && window.__mark === 42`, 12000);
   const s2CardGoneAfterHide = await waitFor(S2, `!(${cardExpr(TEST_MEDIA)}) && window.__mark === 42`, 12000);
-  check("Сценарій 6: приховування не обриває демонстрацію (медіа показу 200) і прибирає картку з каталогу учнів без перезавантаження",
+  check("Сценарій 6: приховування активного матеріалу — медіа відкликано (404), екран очищено, картка з каталогу прибрана",
     demoWavClicked && demoWavStarted && wavDuringDemo === 200 && s1VideoDuring &&
-      hideClicked && teacherStillSees && wavHiddenDuringDemo === 200 && s1VideoAfterHide &&
+      hideClicked && teacherStillSees && wavHiddenDuringDemo === 404 && s1ViewerCleared &&
       s1CardGoneAfterHide && s2CardGoneAfterHide,
-    JSON.stringify({ demoWavStarted, wavDuringDemo, hideClicked, teacherStillSees, wavHiddenDuringDemo, s1CardGoneAfterHide, s2CardGoneAfterHide }));
+    JSON.stringify({ demoWavStarted, wavDuringDemo, hideClicked, teacherStillSees, wavHiddenDuringDemo, s1ViewerCleared, s1CardGoneAfterHide, s2CardGoneAfterHide }));
 
   // 6.2 публікація повертає матеріал у КАТАЛОГИ викладача й обох учнів
   //     (без перезавантаження); медіа того самого показу для учня лишаються

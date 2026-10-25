@@ -84,10 +84,14 @@
   <div class="panel-header-row">
     <h3>Матеріали</h3>
     <div class="row">
-      <!-- Issue #63 (доробка): кнопка «Згорнути всі / Розгорнути всі» категорій -->
-      <button id="toggleAllCategoriesBtn" type="button" class="secondary btn-sm" title="Згорнути всі" aria-label="Згорнути всі категорії">
+      <!-- Issue #63 (доробка): дві окремі кнопки «Згорнути всі» / «Розгорнути всі» -->
+      <button id="collapseAllCategoriesBtn" type="button" class="secondary btn-sm" title="Згорнути всі категорії" aria-label="Згорнути всі категорії">
         <svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#arrow-up"></use></svg>
         <span class="btn-text">Згорнути всі</span>
+      </button>
+      <button id="expandAllCategoriesBtn" type="button" class="secondary btn-sm" title="Розгорнути всі категорії" aria-label="Розгорнути всі категорії">
+        <svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#arrow-down"></use></svg>
+        <span class="btn-text">Розгорнути всі</span>
       </button>
       <button id="createCategoryBtn" type="button" class="secondary btn-sm" title="Створити нову категорію">
         <svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#plus"></use></svg> Створити категорію

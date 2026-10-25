@@ -1097,10 +1097,12 @@ footer {
      (доступність клавіатурою та скринрідером не втрачається) */
   .category-actions .btn-label { display: none; }
   .category-actions button.btn-sm { min-width: 40px; min-height: 40px; padding: 8px 10px; }
-  /* Issue #63 (доробка): кнопка «Згорнути всі / Розгорнути всі» — на мобільному
-     показуємо лише іконку, текст у btn-text ховається, aria-label/title залишаються */
-  #toggleAllCategoriesBtn .btn-text { display: none; }
-  #toggleAllCategoriesBtn { min-width: 40px; min-height: 40px; padding: 8px 10px; }
+  /* Issue #63 (доробка): кнопки «Згорнути всі» / «Розгорнути всі» — на мобільному
+     показуємо лише іконки, текст у btn-text ховається, aria-label/title залишаються */
+  #collapseAllCategoriesBtn .btn-text,
+  #expandAllCategoriesBtn .btn-text { display: none; }
+  #collapseAllCategoriesBtn,
+  #expandAllCategoriesBtn { min-width: 40px; min-height: 40px; padding: 8px 10px; }
 }
 
 .ui-icon {

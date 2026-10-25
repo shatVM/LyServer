@@ -179,6 +179,24 @@ class StateService {
     const state = this.getState();
     return Boolean(state.file) && state.file === name;
   }
+
+  /**
+   * Issue #63 (доробка): чи активний демонстрований матеріал треба ВІДКЛИКАТИ
+   * у учнів (був доступний на старті показу, а вчитель приховав його ПІД ЧАС
+   * демонстрації). Повертає true лише для поточного файлу показу, якщо:
+   *  - показ активний (shared.file === name)
+   *  - файл зараз прихований
+   *  - файл НЕ БУВ прихованим у момент старту показу (wasHiddenAtDemoStart = false)
+   *
+   * Це сигнал для mediaAccess: доступ до медіа такого файлу має бути відкликаний
+   * негайно (404), навіть якщо демонстрація технічно триває.
+   */
+  isDemonstratedButHiddenDuringDemo(name) {
+    if (!name || !this.shared.file) return false;
+    if (this.shared.file !== name) return false;
+    // Матеріал приховано зараз, але на старті показу його НЕ було прихованим
+    return fileService.isHidden(name) && !this.wasHiddenAtDemoStart;
+  }
 }
 
 module.exports = new StateService();

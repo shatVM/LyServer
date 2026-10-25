@@ -1697,8 +1697,9 @@ async function main() {
             `status=${r.status}, file=${wState.file}`
           );
 
-          // Issue #63 (доробка): прихований матеріал відкритий учневі ЛИШЕ в
-          // момент активного показу; сам каталог учня його не містить
+          // Issue #63 (доробка): приховування опублікованого матеріалу ПІД ЧАС
+          // активного показу — негайне відкликання медіа (404) і очищення екрану.
+          // Каталог учня теж оновлюється (матеріал зникає).
           await fetch(wdogBase + "/api/files/toggle-hide", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1706,14 +1707,15 @@ async function main() {
           });
           const wHiddenSlides = await fetch(`${wdogBase}/slides/${encodeURIComponent(fileId)}/1`, { headers: sess(wdogBase) });
           const wHiddenRaw = await fetch(`${wdogBase}/files/${encodeURIComponent(fileId)}`, { headers: sess(wdogBase) });
+          const wHiddenInfo = await fetch(`${wdogBase}/api/slides/info?file=${encodeURIComponent(fileId)}`, { headers: sess(wdogBase) });
           const wHiddenListRes = await fetch(wdogBase + "/api/files", { headers: sess(wdogBase) });
           const wHiddenList = wHiddenListRes.status === 200 ? await wHiddenListRes.json() : [];
           const wHiddenLeak = wHiddenList.some((f) => f.id === fileId);
           check(
-            "Issue #63 (доробка): під час показу прихований матеріал відкритий учневі (слайди 200), але в каталозі його немає",
-            wHiddenSlides.status === 200 && wHiddenRaw.status === 403 &&
+            "Issue #63 (доробка): після приховування активного матеріалу медіа відкликано (404), каталог оновлено",
+            wHiddenSlides.status === 404 && wHiddenRaw.status === 404 && wHiddenInfo.status === 404 &&
               wHiddenListRes.status === 200 && !wHiddenLeak,
-            `slides=${wHiddenSlides.status}, raw=${wHiddenRaw.status}, cat=${wHiddenListRes.status}, leak=${wHiddenLeak}`
+            `slides=${wHiddenSlides.status}, raw=${wHiddenRaw.status}, info=${wHiddenInfo.status}, cat=${wHiddenListRes.status}, leak=${wHiddenLeak}`
           );
 
           // Жодного control/heartbeat довше за тайм-аут (3 с) → автозупинка.

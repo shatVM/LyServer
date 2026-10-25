@@ -925,30 +925,15 @@ async function createCategory() {
   } catch (error) { alert("Не вдалося створити категорію: " + error.message); }
 }
 
-// Issue #63 (доробка): перемикання «Згорнути всі / Розгорнути всі» категорій
-function toggleAllCategories() {
-  const btn = $("toggleAllCategoriesBtn");
-  if (!btn) return;
-  // Визначаємо поточний стан: чи є хоча б одна згорнута категорія
-  const anyCollapsed = categories.some(cat => !expandedCategoryIds.has(cat.id));
-  // Якщо є згорнуті — розгортаємо всі, інакше — згортаємо всі
-  if (anyCollapsed) {
-    categories.forEach(cat => expandedCategoryIds.add(cat.id));
-    // Кнопка показує наступну дію: "Згорнути всі"
-    btn.setAttribute("title", "Згорнути всі");
-    btn.setAttribute("aria-label", "Згорнути всі категорії");
-    btn.querySelector(".btn-text").textContent = "Згорнути всі";
-    // Іконка: arrow-up = згорнути (стрілка вгору = згортає)
-    btn.querySelector(".ui-icon use").setAttribute("href", "/icons.svg#arrow-up");
-  } else {
-    categories.forEach(cat => expandedCategoryIds.delete(cat.id));
-    // Кнопка показує наступну дію: "Розгорнути всі"
-    btn.setAttribute("title", "Розгорнути всі");
-    btn.setAttribute("aria-label", "Розгорнути всі категорії");
-    btn.querySelector(".btn-text").textContent = "Розгорнути всі";
-    // Іконка: arrow-down = розгорнути (стрілка вниз = розгортає)
-    btn.querySelector(".ui-icon use").setAttribute("href", "/icons.svg#arrow-down");
-  }
+// Issue #63 (доробка): дві окремі кнопки «Згорнути всі» / «Розгорнути всі» категорій
+function collapseAllCategories() {
+  categories.forEach(cat => expandedCategoryIds.delete(cat.id));
+  // Перемальовуємо каталог
+  if ($("files")) renderFiles();
+}
+
+function expandAllCategories() {
+  categories.forEach(cat => expandedCategoryIds.add(cat.id));
   // Перемальовуємо каталог
   if ($("files")) renderFiles();
 }
@@ -2143,10 +2128,9 @@ function renderUploadQueue() {
 if ($("createCategoryFromUpload")) $("createCategoryFromUpload").onclick = createCategory;
 // Issue #63 (§3.1): «Створити категорію» безпосередньо в панелі «Матеріали»
 if ($("createCategoryBtn")) $("createCategoryBtn").onclick = createCategory;
-// Issue #63 (доробка): кнопка «Згорнути всі / Розгорнути всі» категорій
-if ($("toggleAllCategoriesBtn")) {
-  $("toggleAllCategoriesBtn").onclick = toggleAllCategories;
-}
+// Issue #63 (доробка): дві окремі кнопки «Згорнути всі» / «Розгорнути всі»
+if ($("collapseAllCategoriesBtn")) $("collapseAllCategoriesBtn").onclick = collapseAllCategories;
+if ($("expandAllCategoriesBtn")) $("expandAllCategoriesBtn").onclick = expandAllCategories;
 
 if ($("uploadFile")) {
   $("uploadFile").addEventListener("change", () => {
