@@ -6,7 +6,9 @@
 </div>
 
 <div class="grid-2col">
-  <section class="panel">
+  <!-- Issue #63: контейнер каталогу ховається на час спільної демонстрації
+       (два режими однієї сторінки учня — див. setMaterialsDemoMode у app.js) -->
+  <section class="panel" id="materialsCatalogPanel">
     <div class="panel-header-row">
       <h2 id="catalogTitle">Каталог матеріалів</h2>
       <button id="refresh" class="secondary btn-sm">🔄 Оновити</button>

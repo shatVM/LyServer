@@ -3,6 +3,7 @@ const path = require("node:path");
 const config = require("../config");
 const auth = require("../utils/auth");
 const fileService = require("../services/fileService");
+const { canViewMedia } = require("../utils/mediaAccess");
 
 class FileController {
   streamFile(req, res) {
@@ -13,15 +14,21 @@ class FileController {
       return res.status(400).send("Некоректне ім'я файлу");
     }
 
-    const isTeacher = auth.isTeacher(req);
+    // Issue #63 (доробка/Етап 5): викладач ідентифікується за PIN або HttpOnly
+    // сесією — у <img>/<video> PIN більше не передається у URL. Без входу — 401.
+    const identity = auth.mediaIdentity(req, res);
+    if (!identity) return;
+    const isTeacher = identity.isTeacher;
 
     const filePath = fileService.getFilePath(name);
     if (!filePath || !fs.existsSync(filePath)) {
       return res.status(404).send("Файл не знайдено");
     }
 
-    // Issue #4: приховані файли недоступні учням
-    if (!fileService.canAccess(name, isTeacher)) {
+    // Issue #4: приховані файли недоступні учням.
+    // Issue #63 (доробка): виняток — матеріал, який зараз демонструється
+    // (перевірка на сервері при кожному запиті, див. mediaAccess)
+    if (!canViewMedia(name, isTeacher)) {
       return res.status(404).send("Файл не знайдено");
     }
 

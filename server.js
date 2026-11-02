@@ -1,6 +1,12 @@
 const os = require("node:os");
 const app = require("./src/app");
 const config = require("./src/config");
+// Issue #63 (Етап 5): усі попередні входи (сесії викладача й учнів) стають
+// недійсними при кожному перезапуску — сховище сесій живе в пам'яті процесу,
+// тому скидання робиться явно на старті, до прийому запитів.
+const sessionService = require("./src/services/sessionService");
+
+sessionService.reset();
 
 /** Локальні IPv4-адреси для відображення адреси порталу в мережі */
 function lanAddresses() {

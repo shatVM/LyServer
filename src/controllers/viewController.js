@@ -1,7 +1,21 @@
 const config = require("../config");
+const auth = require("../utils/auth");
 
 class ViewController {
+  /**
+   * Issue #63 (доробка §1): сторінка «Перегляд матеріалів» — сторінка
+   * САМОСТІЙНОГО перегляду учня. Усі дії викладача з матеріалами (каталог,
+   * категорії, публікація/приховування, описи, порядок, приватне прев'ю) уже
+   * виконуються на сторінці «Демонстрація», тому викладача на /materials
+   * перенаправляємо туди (302). Без чинної сесії викладача (гість, учень)
+   * сторінка рендериться як раніше; клієнт додатково переводить викладача
+   * на /demonstration після входу прямо на цій сторінці (updateRoleUI).
+   */
   renderMaterials(req, res) {
+    const session = auth.readSession(req);
+    if (session && session.role === "teacher") {
+      return res.redirect("/demonstration");
+    }
     res.render("materials", {
       title: "Перегляд матеріалів",
       activeMenu: "materials",
