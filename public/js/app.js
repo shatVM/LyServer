@@ -312,11 +312,13 @@ function renderStudentsList(list) {
     for (const s of list) {
       const item = document.createElement("div");
       item.className = "student-row" + (s.online ? "" : " student-offline");
-      const badgeClass = s.online ? "badge-online" : "badge-offline";
-      const badgeText = s.online ? "● Онлайн" : "○ Неактивний";
-      // Issue #75: IP-адреса окремим дрібним сірим рядком ПІД ім'ям — сервер
-      // надає її у полі s.ip (визначається з запиту, не від клієнта); без IP
-      // рядок не показується, картка не розширюється
+      // Issue #75 (доробка за зворотним зв'язком власника): статус — лише
+      // крапка відповідного кольору; назва стану лишається в title/aria-label
+      const statusDot = s.online
+        ? '<span class="status-dot status-dot-online" title="Онлайн" role="img" aria-label="Онлайн"></span>'
+        : '<span class="status-dot status-dot-offline" title="Неактивний" role="img" aria-label="Неактивний"></span>';
+      // Issue #75: ім'я та IP-адреса в ОДНОМУ рядку (IP — дрібним сірим одразу
+      // після імені); без IP рядок не показується, сервер надає s.ip із запиту
       const ipLine = s.ip
         ? '<span class="student-ip">' + esc(s.ip) + "</span>"
         : "";
@@ -325,7 +327,7 @@ function renderStudentsList(list) {
         '<span class="student-name">' + esc(s.name) + "</span>" +
         ipLine +
         "</span>" +
-        '<span class="badge ' + badgeClass + '">' + badgeText + "</span>";
+        statusDot;
       root.append(item);
     }
   }

@@ -806,6 +806,12 @@ footer {
   .grid-demo {
     grid-template-columns: 1fr;
   }
+  /* Issue #75 (доробка): на мобільному внутрішній скрол списку учнів прибрано —
+     блок росте разом зі своїм вмістом, прокручується сторінка */
+  .students-side-block .students-list {
+    max-height: none;
+    overflow-y: visible;
+  }
   .role-grid {
     grid-template-columns: 1fr;
   }
@@ -914,11 +920,14 @@ footer {
 
 .student-name { font-weight: 600; }
 
-/* Issue #75: IP-адреса під ім'ям учня — дрібний ненав'язливий сірий рядок;
-   overflow-wrap не дає довгій IPv6-адресі ламати картку чи рядок учня */
+/* Issue #75: IP-адреса в тому самому рядку, що й ім'я учня — дрібний
+   ненав'язливий сірий шрифт; overflow-wrap не дає довгій IPv6-адресі ламати
+   картку чи рядок, на вузькому екрані IP може перейти на другий рядок */
 .student-info {
   display: flex;
-  flex-direction: column;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 8px;
   min-width: 0;
 }
 
@@ -936,8 +945,19 @@ footer {
   font-weight: 700;
 }
 
-.badge-online { background: #d3f9d8; color: #2b8a3e; }
-.badge-offline { background: #ffe8cc; color: #d9480f; }
+/* Issue #75 (доробка за зворотним зв'язком власника): статус присутності —
+   лише крапка відповідного кольору; слів «Онлайн/Неактивний» у рядку немає
+   (назва стану доступна скринрідеру й підказці через title/aria-label) */
+.status-dot {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.status-dot-online { background: #2b8a3e; }
+.status-dot-offline { background: #d9480f; }
 
 /* --- Issue #9: ���� �������� �� ������ �� ������� --- */
 .page-input {
@@ -967,8 +987,11 @@ footer {
   margin-top: 0;
 }
 
+/* Issue #75 (доробка): батьківський блок списку учнів значно вищий за
+   попередні 340px — на звичайному екрані вміщає ~16 рядків «ім'я + IP» без
+   внутрішнього прокручування; понад те — внутрішній скрол */
 .students-side-block .students-list {
-  max-height: 340px;
+  max-height: 70vh;
   overflow-y: auto;
 }
 

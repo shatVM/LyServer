@@ -700,7 +700,7 @@ async function main() {
         JSON.stringify(list.map((s) => s.ip))
       );
       check(
-        "Issue #75: IP-рядок під ім'ям — рендер у JS і CSS",
+        "Issue #75: IP-рядок з ім'ям — рендер у JS і CSS",
         jsSrc.includes('class="student-ip"') &&
           jsSrc.includes("student-info") &&
           css.includes(".student-ip") &&
@@ -709,6 +709,23 @@ async function main() {
       check(
         "Issue #75: дрібний сірий шрифт IP у CSS",
         /\.student-ip\s*\{[^}]*font-size:\s*12px[^}]*color:\s*#8a94a6/s.test(css)
+      );
+
+      // 7д. Issue #75 (доробка за зворотним зв'язком власника): статус — лише
+      // крапка відповідного кольору, ім'я та IP в одному рядку, блок вищий
+      check(
+        "Issue #75 (доробка): статус — лише крапка, слова «Онлайн» у рядку немає",
+        jsSrc.includes("status-dot-online") &&
+          jsSrc.includes("status-dot-offline") &&
+          !jsSrc.includes("● Онлайн") &&
+          /\.status-dot-online\s*\{[^}]*background:\s*#2b8a3e/s.test(css) &&
+          /\.status-dot-offline\s*\{[^}]*background:\s*#d9480f/s.test(css)
+      );
+      check(
+        "Issue #75 (доробка): ім'я та IP в одному рядку (baseline), блок учнів вищий 70vh",
+        /\.student-info\s*\{[^}]*align-items:\s*baseline/s.test(css) &&
+          /\.students-side-block\s+\.students-list\s*\{[^}]*max-height:\s*70vh/s.test(css) &&
+          /@media \(max-width: 900px\)[\s\S]*?\.students-side-block\s+\.students-list\s*\{[^}]*max-height:\s*none/s.test(css)
       );
 
       // 7г. Issue #75: розгорнутий режим спільної демонстрації на пристрої учня

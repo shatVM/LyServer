@@ -500,7 +500,14 @@ async function main() {
     `(() => { const el = document.querySelector('.student-row .student-ip');` +
     ` return !!el && (/^([0-9]{1,3}\\.){3}[0-9]{1,3}$|^[0-9a-f:]+$/i).test(el.textContent.trim()); })()`,
     15000);
-  check("Сценарій 1: IP-адреса учня під ім'ям у списку викладача", tIpShown);
+  check("Сценарій 1: IP-адреса учня у тому самому рядку, що й ім'я, у списку викладача", tIpShown);
+
+  // Issue #75 (доробка): статус — лише крапка відповідного кольору, без слів
+  const tDotOnly = await waitFor(T,
+    `(() => { const rows = [...document.querySelectorAll('.student-row')];` +
+    ` return rows.some(r => r.querySelector('.status-dot-online')) &&` +
+    ` rows.every(r => !r.textContent.includes('Онлайн')); })()`, 15000);
+  check("Сценарій 1: статус учня — лише крапка, слова «Онлайн» у рядку немає", tDotOnly);
 
   // Під час показу матеріал у учнів займає весь доступний простір вікна
   // (body.demo-focus), є кнопка системного fullscreen; у викладача — ні
