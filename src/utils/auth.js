@@ -160,6 +160,10 @@ function mediaIdentity(req, res) {
   return null;
 }
 
+// Issue #75: єдине серверне читання клієнтської IP — адреса TCP-підключення
+// (req.ip без trust proxy не враховує proxy-заголовки; конфігурації проксі у
+// проєкті немає, тому довіра до X-Forwarded-* не змінюється). Використовується
+// і для лімітатора PIN, і для IP-адреси у списку учнів.
 function clientKey(req) {
   return req.ip || (req.socket && req.socket.remoteAddress) || "unknown";
 }
@@ -234,6 +238,7 @@ function requirePinJson(req, res) {
 module.exports = {
   safeEqual,
   extractPin,
+  clientKey,
   isTeacher,
   catalogIdentity,
   requirePin,

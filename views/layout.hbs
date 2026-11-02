@@ -20,6 +20,14 @@
   <!-- Toast container (teacher disconnect notifications) -->
   <div id="toastContainer" class="toast-container"></div>
 
+  <!-- Issue #75: системний повноекранний режим спільної демонстрації на
+       пристрої учня. Браузер вмикає Fullscreen API лише за прямого жесту
+       користувача, тому кнопка, а не віддалений запуск; прихована, поки на
+       цій сторінці не активний розгорнутий режим показу (body.demo-focus) -->
+  <button type="button" id="demoFullscreenBtn" class="secondary demo-fs-btn"
+          style="display:none"
+          title="Системний повноекранний режим (вихід — Esc)">⛶ На весь екран</button>
+
   <!-- Role Selection Modal -->
   <div id="roleModal" class="modal-backdrop" style="display:none">
     <div class="modal-card">

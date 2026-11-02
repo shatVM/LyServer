@@ -914,6 +914,21 @@ footer {
 
 .student-name { font-weight: 600; }
 
+/* Issue #75: IP-адреса під ім'ям учня — дрібний ненав'язливий сірий рядок;
+   overflow-wrap не дає довгій IPv6-адресі ламати картку чи рядок учня */
+.student-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.student-ip {
+  font-size: 12px;
+  font-weight: 400;
+  color: #8a94a6;
+  overflow-wrap: anywhere;
+}
+
 .badge {
   padding: 3px 10px;
   border-radius: 999px;
@@ -1167,4 +1182,73 @@ footer {
   .preview-viewer { height: calc(100vh - 210px); min-height: 120px; }
   .preview-viewer .slide-img,
   .preview-viewer video { max-height: 100%; }
+}
+
+/* --- Issue #75: розгорнутий режим спільної демонстрації на пристрої учня ---
+   Прапорець body.demo-focus ставить app.js (setDemoFocus) лише для ролі
+   «учень» і лише за серверним станом показу. У режимі матеріал займає весь
+   доступний простір вікна/екрана (vh/dvh) на ПК й мобільному; системний
+   Fullscreen API не застосовується примусово — для нього окрема кнопка
+   «⛶ На весь екран» (лише за жесту користувача, див. app.js). */
+body.demo-focus header,
+body.demo-focus .nav-bar,
+body.demo-focus footer,
+body.demo-focus .page-title-area {
+  display: none !important;
+}
+
+body.demo-focus .main-container {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+
+body.demo-focus .grid-2col,
+body.demo-focus .grid-demo {
+  display: block;
+}
+
+body.demo-focus .panel {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
+/* Службові елементи панелі: під час показу учню потрібен лише матеріал
+   (навігація слайдами вчителя та його керування приховані окремо — teacher-only) */
+body.demo-focus .panel-header-row,
+body.demo-focus #status,
+body.demo-focus main .panel > .hint {
+  display: none !important;
+}
+
+body.demo-focus #viewer {
+  height: calc(100vh - 16px);
+  height: calc(100dvh - 16px);
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: #0b1220;
+}
+
+body.demo-focus #viewer video {
+  max-height: none;
+}
+
+/* Кнопка системного повноекранного режиму (лише коли активний body.demo-focus;
+   прихована інлайн-стилем, поки режим вимкнено). Лівий нижній кут — не
+   перекриває toast-контейнер праворуч; мінімальний розмір дотику 44px */
+.demo-fs-btn {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 950;
+  min-height: 44px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  font-weight: 700;
+  box-shadow: 0 6px 18px rgba(10, 27, 51, 0.35);
 }

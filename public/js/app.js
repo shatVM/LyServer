@@ -314,8 +314,17 @@ function renderStudentsList(list) {
       item.className = "student-row" + (s.online ? "" : " student-offline");
       const badgeClass = s.online ? "badge-online" : "badge-offline";
       const badgeText = s.online ? "● Онлайн" : "○ Неактивний";
+      // Issue #75: IP-адреса окремим дрібним сірим рядком ПІД ім'ям — сервер
+      // надає її у полі s.ip (визначається з запиту, не від клієнта); без IP
+      // рядок не показується, картка не розширюється
+      const ipLine = s.ip
+        ? '<span class="student-ip">' + esc(s.ip) + "</span>"
+        : "";
       item.innerHTML =
+        '<span class="student-info">' +
         '<span class="student-name">' + esc(s.name) + "</span>" +
+        ipLine +
+        "</span>" +
         '<span class="badge ' + badgeClass + '">' + badgeText + "</span>";
       root.append(item);
     }
@@ -338,6 +347,10 @@ function handleSessionExpired() {
   stopHeartbeat();
   stopTeacherHeartbeat();
   stopPresencePolling();
+  // Issue #75: без чинної сесії стан показу не опитується — повертаємо учня
+  // до звичайного режиму (разом із виходом із fullscreen, якщо ввійшли нашою
+  // кнопкою), щоб розгорнутий режим не залишився після перезапуску сервера
+  setDemoFocus(false);
   role = "";
   pin = "";
   localStorage.setItem("portalRole", "");
@@ -639,6 +652,10 @@ function updateRoleUI() {
   // /demonstration, а клієнт робить те саме після входу на цій сторінці
   // (див. DECISIONS.md).
   if (isTeacher) {
+    // Issue #75: після переходу в роль викладача учнівський розгорнутий режим
+    // показу (якщо був активний) завершується — вчитель працює у звичайному
+    // інтерфейсі, його системний fullscreen не чіпається
+    setDemoFocus(false);
     if ($("navMaterialsLink")) $("navMaterialsLink").style.display = "none";
     if ($("navUploadLink")) $("navUploadLink").style.display = "none";
     if ($("navStudentsLink")) $("navStudentsLink").style.display = "none";
@@ -1493,8 +1510,86 @@ function stepLocalPage(delta) {
 // після зупинки показу каталог опублікованих матеріалів повертається на тій
 // самій сторінці без перезавантаження (Issue #63, доробка).
 
+// ---------------------------------------------------------------------------
+// Issue #75: розгорнутий режим спільної демонстрації на пристрої учня
+// ---------------------------------------------------------------------------
+// Режим вмикається лише для ролі «учень» і лише за СЕРВЕРНИМ станом показу
+// (state.file). У межах сторінки ховаються шапка, навігація, футер і службові
+// елементи панелі, а #viewer займає весь доступний простір вікна (vh/dvh).
+// Системний Fullscreen API НЕ застосовується віддалено (браузер вимагає
+// прямого жесту користувача): помітна кнопка «⛶ На весь екран» на пристрої
+// учня вмикає його за натискання; із системного fullscreen виходимо лише
+// тоді, коли ввійшли саме цією кнопкою (щоб не витісняти власний fullscreen
+// викладача чи випадковий режим браузера). Викладачу режим не вмикається —
+// його приватний перегляд і системний fullscreen не змінюються.
+let demoFocusActive = false;
+let demoFullscreenByUs = false;
+
+/** Fullscreen API підтримується браузером? */
+function demoFullscreenSupported() {
+  return Boolean(document.documentElement && document.documentElement.requestFullscreen);
+}
+
+/** Увімкнення/вимкнення розгорнутого режиму показу (ідемпотентно) */
+function setDemoFocus(active) {
+  const enabled = Boolean(active) && role !== "teacher";
+  if (enabled === demoFocusActive) return;
+  demoFocusActive = enabled;
+  document.body.classList.toggle("demo-focus", enabled);
+  const btn = $("demoFullscreenBtn");
+  if (btn) btn.style.display = enabled && demoFullscreenSupported() ? "" : "none";
+  if (enabled) {
+    // Підказка про обмеження браузера: системний fullscreen запускається лише
+    // цією кнопкою, віддалено — ні (чесно без заяви про примусовий fullscreen)
+    showToast(
+      "Підказка: для системного повноекранного режиму натисніть «⛶ На весь екран» — браузер не дозволяє вмикати його віддалено.",
+      "info",
+      8000
+    );
+  } else {
+    exitDemoFullscreen();
+  }
+}
+
+/** Вихід із системного fullscreen, якщо ввійшли нашою кнопкою */
+function exitDemoFullscreen() {
+  if (demoFullscreenByUs && document.fullscreenElement && document.exitFullscreen) {
+    document.exitFullscreen().catch(() => {});
+  }
+  demoFullscreenByUs = false;
+}
+
+/** Кнопка «⛶ На весь екран»: лише за прямого жесту користувача */
+function setupDemoFullscreenButton() {
+  const btn = $("demoFullscreenBtn");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await document.documentElement.requestFullscreen();
+        demoFullscreenByUs = true;
+      }
+    } catch (e) {
+      showToast(
+        "Браузер не дозволив повноекранний режим: " + (e && e.message ? e.message : e),
+        "warning",
+        8000
+      );
+    }
+  });
+  // Користувач міг вийти з fullscreen сам (Esc) — наш прапорець скидається
+  document.addEventListener("fullscreenchange", () => {
+    if (!document.fullscreenElement) demoFullscreenByUs = false;
+  });
+}
+setupDemoFullscreenButton();
+
 function setMaterialsDemoMode(active, state = {}) {
   materialsDemoActive = active;
+  // Issue #75: розгорнутий режим показу — за тим самим серверним станом
+  setDemoFocus(active);
   const catalog = $("materialsCatalogPanel");
   if (catalog) catalog.style.display = active ? "none" : "";
   if (active) {
@@ -1892,6 +1987,11 @@ async function pollStateCore(force = false) {
     const state = await response.json();
     const prev = sharedState;
     sharedState = state;
+
+    // Issue #75: розгорнутий режим показу на пристрої учня — за тим самим
+    // серверним станом (початок показу розгортає, зупинка повертає звичайний
+    // режим); у викладача цей режим не вмикається
+    if (role !== "teacher") setDemoFocus(Boolean(state.file));
 
     // Issue #63 (доробка): каталог учня перечитується за ревізією стану —
     // публікація/приховування матеріалу викладачем оновлює список без

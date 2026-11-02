@@ -657,6 +657,86 @@ async function main() {
         JSON.stringify(list)
       );
 
+      // 7в. Issue #75: IP-адреса учня — визначається СЕРВЕРОМ із контексту
+      // запиту; поле `ip` у тілі та заголовок X-Forwarded-For (без trust proxy)
+      // мають ігноруватися
+      await fetch(`${base}/api/presence/heartbeat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...sess() },
+        body: JSON.stringify({
+          studentId: "s_test_ip",
+          name: "IP Учень",
+          active: true,
+          ip: "203.0.113.7"
+        })
+      });
+      await fetch(`${base}/api/presence/heartbeat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Forwarded-For": "203.0.113.99",
+          ...sess()
+        },
+        body: JSON.stringify({ studentId: "s_test_ip", name: "IP Учень", active: true })
+      });
+      list = await (await fetch(base + "/api/presence/students", { headers: { "X-Portal-Pin": PIN } })).json();
+      const ipStudent = list.find((s) => s.id === "s_test_ip");
+      check(
+        "Issue #75: IP визначає сервер (не тіло запиту, не X-Forwarded-For)",
+        Boolean(
+          ipStudent &&
+            typeof ipStudent.ip === "string" &&
+            ipStudent.ip.length > 0 &&
+            ipStudent.ip !== "203.0.113.7" &&
+            ipStudent.ip !== "203.0.113.99" &&
+            !ipStudent.ip.startsWith("::ffff:") &&
+            (/^(\d{1,3}\.){3}\d{1,3}$/.test(ipStudent.ip) || /^[0-9a-f:]+$/i.test(ipStudent.ip))
+        ),
+        JSON.stringify(ipStudent)
+      );
+      check(
+        "Issue #75: у кожного учня у списку є рядок ip",
+        Array.isArray(list) && list.every((s) => typeof s.ip === "string"),
+        JSON.stringify(list.map((s) => s.ip))
+      );
+      check(
+        "Issue #75: IP-рядок під ім'ям — рендер у JS і CSS",
+        jsSrc.includes('class="student-ip"') &&
+          jsSrc.includes("student-info") &&
+          css.includes(".student-ip") &&
+          css.includes(".student-info")
+      );
+      check(
+        "Issue #75: дрібний сірий шрифт IP у CSS",
+        /\.student-ip\s*\{[^}]*font-size:\s*12px[^}]*color:\s*#8a94a6/s.test(css)
+      );
+
+      // 7г. Issue #75: розгорнутий режим спільної демонстрації на пристрої учня
+      check(
+        "Issue #75: body.demo-focus у JS і CSS (#viewer на весь простір)",
+        jsSrc.includes('classList.toggle("demo-focus"') &&
+          css.includes("body.demo-focus #viewer") &&
+          css.includes("body.demo-focus header")
+      );
+      check(
+        "Issue #75: кнопка системного fullscreen у розмітці та JS",
+        demoHtml.includes('id="demoFullscreenBtn"') &&
+          jsSrc.includes("setupDemoFullscreenButton") &&
+          jsSrc.includes("requestFullscreen")
+      );
+      check(
+        "Issue #75: системний fullscreen лише за жестом, вихід лише нашим",
+        jsSrc.includes("demoFullscreenByUs") &&
+          jsSrc.includes("document.exitFullscreen()") &&
+          jsSrc.includes("Браузер не дозволив повноекранний режим")
+      );
+      check(
+        "Issue #75: режим прив'язаний до серверного стану показу і ролі",
+        jsSrc.includes("setDemoFocus(Boolean(state.file))") &&
+          jsSrc.includes("setDemoFocus(active)") &&
+          jsSrc.includes('role !== "teacher"')
+      );
+
       // 7б. Issue #61: навігація слайдами натисканням на ліву/праву зону зображення
       check(
         "Issue #61: зони створюються в JS і класи збігаються з CSS",

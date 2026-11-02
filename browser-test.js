@@ -493,6 +493,32 @@ async function main() {
   check("Сценарій 1: обидва учні бачать медіа опублікованого матеріалу без перезавантаження",
     s1Video1 && s2Video1, JSON.stringify({ s1Video1, s2Video1 }));
 
+  // --- Issue #75: IP у списку учнів та розгорнутий режим показу -------------
+  // Викладач бачить під ім'ям кожного учня серверну IP-адресу (дрібний сірий
+  // рядок), надану полем /api/presence/students
+  const tIpShown = await waitFor(T,
+    `(() => { const el = document.querySelector('.student-row .student-ip');` +
+    ` return !!el && (/^([0-9]{1,3}\\.){3}[0-9]{1,3}$|^[0-9a-f:]+$/i).test(el.textContent.trim()); })()`,
+    15000);
+  check("Сценарій 1: IP-адреса учня під ім'ям у списку викладача", tIpShown);
+
+  // Під час показу матеріал у учнів займає весь доступний простір вікна
+  // (body.demo-focus), є кнопка системного fullscreen; у викладача — ні
+  const s1Focus = await waitFor(S1,
+    `document.body.classList.contains('demo-focus') && window.__mark === 42`, 15000);
+  const s2Focus = await waitFor(S2,
+    `document.body.classList.contains('demo-focus') && window.__mark === 42`, 15000);
+  const tNoFocus = await evaluate(T, `!document.body.classList.contains('demo-focus')`);
+  const s1FsBtn = await evaluate(S1,
+    `(() => { const b = document.getElementById('demoFullscreenBtn');` +
+    ` return !!b && b.style.display !== 'none'; })()`);
+  const s1ViewerBig = await evaluate(S1,
+    `(() => { const v = document.getElementById('viewer');` +
+    ` return !!v && v.getBoundingClientRect().height >= window.innerHeight * 0.85; })()`);
+  check("Сценарій 1: під час показу в учнів розгорнутий режим і кнопка «На весь екран», #viewer майже на весь екран, у викладача режиму немає",
+    s1Focus && s2Focus && tNoFocus && s1FsBtn && s1ViewerBig,
+    JSON.stringify({ s1Focus, s2Focus, tNoFocus, s1FsBtn, s1ViewerBig }));
+
   // ---------------- Сценарій 5 (частина 1): два клієнти одночасно ----------
   // (перевіряється окремо нижче під час показу прихованого матеріалу)
 
@@ -559,6 +585,18 @@ async function main() {
   check("Сценарій 3: показ завершено, обидва учні вийшли з режиму показу, каталог повернувся без перезавантаження",
     demoStopped && s1BackToCatalog && s2BackToCatalog && s1CatalogVisible && s2CatalogVisible,
     JSON.stringify({ demoStopped, s1BackToCatalog, s2BackToCatalog, s1CatalogVisible, s2CatalogVisible }));
+
+  // --- Issue #75: завершення показу повертає учня до звичайного режиму ------
+  const s1FocusOff = await waitFor(S1,
+    `!document.body.classList.contains('demo-focus') && window.__mark === 42`, 15000);
+  const s2FocusOff = await waitFor(S2,
+    `!document.body.classList.contains('demo-focus') && window.__mark === 42`, 15000);
+  const s1FsBtnHidden = await waitFor(S1,
+    `(() => { const b = document.getElementById('demoFullscreenBtn');` +
+    ` return !!b && b.style.display === 'none'; })() && window.__mark === 42`, 15000);
+  check("Сценарій 3: після завершення показу розгорнутий режим знято і кнопка системного fullscreen прихована",
+    s1FocusOff && s2FocusOff && s1FsBtnHidden,
+    JSON.stringify({ s1FocusOff, s2FocusOff, s1FsBtnHidden }));
 
   const slideAfter = await httpStatus(S1, "/slides/" + encodeURIComponent(pdfId) + "/1");
   const filesAfter = await httpStatus(S1, "/files/" + encodeURIComponent(pdfId));
