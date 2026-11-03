@@ -359,7 +359,6 @@ const mediaExpr = (kind) =>
 // --------------------------- основний сценарій -----------------------------
 async function main() {
   fs.mkdirSync(TMP, { recursive: true });
-  const metaBeforeStable = stable(JSON.parse(fs.readFileSync(META_PATH, "utf-8")));
 
   // 1) ВЛАСНИЙ екземпляр сервера (не чіпає робочий порт власника)
   server = spawn(process.execPath, ["server.js"], {
@@ -377,6 +376,27 @@ async function main() {
   }
   if (!up) throw new Error("Сервер не піднявся. LOG:\n" + serverLog);
   check(`Локальний екземпляр сервера піднявся (порт ${PORT})`, true);
+
+  // 1а) Попереднє прибирання (net-zero): якщо ПОПЕРЕДНІЙ прогін було
+  // перервано, його тестові файли лишаються у спільному сховищі. Дублікати
+  // з однаковою назвою збивають сценарії: карток дві, клік іде по чужій
+  // (старій) картці, а перевірка стану чекає id нового файлу — показ
+  // «не стартує». Прибираємо залишки ДО фіксації базового стану метаданих.
+  const staleLeftovers = (await apiTeacherFiles())
+    .filter((f) => f.name === TEST_MEDIA || f.name === TEST_HIDDEN);
+  for (const f of staleLeftovers) {
+    await fetch(BASE + "/api/files/delete", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin: PIN, file: f.id })
+    });
+  }
+  const staleAfter = (await apiTeacherFiles())
+    .filter((f) => f.name === TEST_MEDIA || f.name === TEST_HIDDEN);
+  check("Залишки тестових файлів попередніх прогонів прибрано (net-zero)",
+    staleAfter.length === 0,
+    JSON.stringify(staleLeftovers.map((f) => f.id)));
+
+  const metaBeforeStable = stable(JSON.parse(fs.readFileSync(META_PATH, "utf-8")));
 
   // 2) Тестові дані (net-zero): WAV — опублікований, PDF — прихований
   const upWav = await fetch(BASE + "/api/upload?name=" + encodeURIComponent(TEST_MEDIA), {
