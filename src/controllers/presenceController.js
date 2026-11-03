@@ -28,7 +28,11 @@ class PresenceController {
       ? true
       : !(rawActive === false || rawActive === "false" || rawActive === "0");
     const safeName = (name || "Учень").slice(0, 80);
-    presenceService.heartbeat(studentId.slice(0, 64), safeName, active);
+    // Issue #75: IP-адреса береться ЛИШЕ з серверного контексту запиту
+    // (req.ip / сокет, див. auth.clientKey) — будь-яке поле `ip` у тілі запиту
+    // від клієнта ігнорується. `::ffff:`-префікс прибирається для показу.
+    const ip = String(auth.clientKey(req) || "").replace(/^::ffff:/, "");
+    presenceService.heartbeat(studentId.slice(0, 64), safeName, active, ip);
     res.json({ ok: true });
   }
 

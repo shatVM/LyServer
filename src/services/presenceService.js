@@ -18,9 +18,15 @@
 const TIMEOUT_MS = 6000; // 6 seconds without heartbeat → offline
 
 const students = new Map();
-// Map<studentId, { id, name, active, lastSeen, joinedAt }>
+// Map<studentId, { id, name, active, lastSeen, joinedAt, ip }>
 
-function heartbeat(id, name, active = true) {
+/**
+ * Issue #75: heartbeat зберігає IP-адресу пристрою учня. Адресу передає
+ * контролер із серверного контексту запиту (auth.clientKey) — значення з тіла
+ * запиту клієнта сюди не потрапляють. Порожнє значення не перетирає
+ * відомий IP (наприклад, beacon без мережевих даних).
+ */
+function heartbeat(id, name, active = true, ip = "") {
   const now = Date.now();
   const existing = students.get(id);
   students.set(id, {
@@ -28,7 +34,8 @@ function heartbeat(id, name, active = true) {
     name: name || (existing ? existing.name : id),
     active: Boolean(active),
     lastSeen: now,
-    joinedAt: existing ? existing.joinedAt : now
+    joinedAt: existing ? existing.joinedAt : now,
+    ip: ip || (existing ? existing.ip : "")
   });
 }
 
@@ -40,6 +47,7 @@ function getStudents() {
     active: s.active,
     lastSeen: s.lastSeen,
     joinedAt: s.joinedAt,
+    ip: s.ip || "",
     online: s.active && (now - s.lastSeen) < TIMEOUT_MS
   }));
 }

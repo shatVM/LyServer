@@ -359,7 +359,6 @@ const mediaExpr = (kind) =>
 // --------------------------- основний сценарій -----------------------------
 async function main() {
   fs.mkdirSync(TMP, { recursive: true });
-  const metaBeforeStable = stable(JSON.parse(fs.readFileSync(META_PATH, "utf-8")));
 
   // 1) ВЛАСНИЙ екземпляр сервера (не чіпає робочий порт власника)
   server = spawn(process.execPath, ["server.js"], {
@@ -377,6 +376,27 @@ async function main() {
   }
   if (!up) throw new Error("Сервер не піднявся. LOG:\n" + serverLog);
   check(`Локальний екземпляр сервера піднявся (порт ${PORT})`, true);
+
+  // 1а) Попереднє прибирання (net-zero): якщо ПОПЕРЕДНІЙ прогін було
+  // перервано, його тестові файли лишаються у спільному сховищі. Дублікати
+  // з однаковою назвою збивають сценарії: карток дві, клік іде по чужій
+  // (старій) картці, а перевірка стану чекає id нового файлу — показ
+  // «не стартує». Прибираємо залишки ДО фіксації базового стану метаданих.
+  const staleLeftovers = (await apiTeacherFiles())
+    .filter((f) => f.name === TEST_MEDIA || f.name === TEST_HIDDEN);
+  for (const f of staleLeftovers) {
+    await fetch(BASE + "/api/files/delete", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin: PIN, file: f.id })
+    });
+  }
+  const staleAfter = (await apiTeacherFiles())
+    .filter((f) => f.name === TEST_MEDIA || f.name === TEST_HIDDEN);
+  check("Залишки тестових файлів попередніх прогонів прибрано (net-zero)",
+    staleAfter.length === 0,
+    JSON.stringify(staleLeftovers.map((f) => f.id)));
+
+  const metaBeforeStable = stable(JSON.parse(fs.readFileSync(META_PATH, "utf-8")));
 
   // 2) Тестові дані (net-zero): WAV — опублікований, PDF — прихований
   const upWav = await fetch(BASE + "/api/upload?name=" + encodeURIComponent(TEST_MEDIA), {
@@ -493,6 +513,39 @@ async function main() {
   check("Сценарій 1: обидва учні бачать медіа опублікованого матеріалу без перезавантаження",
     s1Video1 && s2Video1, JSON.stringify({ s1Video1, s2Video1 }));
 
+  // --- Issue #75: IP у списку учнів та розгорнутий режим показу -------------
+  // Викладач бачить під ім'ям кожного учня серверну IP-адресу (дрібний сірий
+  // рядок), надану полем /api/presence/students
+  const tIpShown = await waitFor(T,
+    `(() => { const el = document.querySelector('.student-row .student-ip');` +
+    ` return !!el && (/^([0-9]{1,3}\\.){3}[0-9]{1,3}$|^[0-9a-f:]+$/i).test(el.textContent.trim()); })()`,
+    15000);
+  check("Сценарій 1: IP-адреса учня у тому самому рядку, що й ім'я, у списку викладача", tIpShown);
+
+  // Issue #75 (доробка): статус — лише крапка відповідного кольору, без слів
+  const tDotOnly = await waitFor(T,
+    `(() => { const rows = [...document.querySelectorAll('.student-row')];` +
+    ` return rows.some(r => r.querySelector('.status-dot-online')) &&` +
+    ` rows.every(r => !r.textContent.includes('Онлайн')); })()`, 15000);
+  check("Сценарій 1: статус учня — лише крапка, слова «Онлайн» у рядку немає", tDotOnly);
+
+  // Під час показу матеріал у учнів займає весь доступний простір вікна
+  // (body.demo-focus), є кнопка системного fullscreen; у викладача — ні
+  const s1Focus = await waitFor(S1,
+    `document.body.classList.contains('demo-focus') && window.__mark === 42`, 15000);
+  const s2Focus = await waitFor(S2,
+    `document.body.classList.contains('demo-focus') && window.__mark === 42`, 15000);
+  const tNoFocus = await evaluate(T, `!document.body.classList.contains('demo-focus')`);
+  const s1FsBtn = await evaluate(S1,
+    `(() => { const b = document.getElementById('demoFullscreenBtn');` +
+    ` return !!b && b.style.display !== 'none'; })()`);
+  const s1ViewerBig = await evaluate(S1,
+    `(() => { const v = document.getElementById('viewer');` +
+    ` return !!v && v.getBoundingClientRect().height >= window.innerHeight * 0.85; })()`);
+  check("Сценарій 1: під час показу в учнів розгорнутий режим і кнопка «На весь екран», #viewer майже на весь екран, у викладача режиму немає",
+    s1Focus && s2Focus && tNoFocus && s1FsBtn && s1ViewerBig,
+    JSON.stringify({ s1Focus, s2Focus, tNoFocus, s1FsBtn, s1ViewerBig }));
+
   // ---------------- Сценарій 5 (частина 1): два клієнти одночасно ----------
   // (перевіряється окремо нижче під час показу прихованого матеріалу)
 
@@ -559,6 +612,18 @@ async function main() {
   check("Сценарій 3: показ завершено, обидва учні вийшли з режиму показу, каталог повернувся без перезавантаження",
     demoStopped && s1BackToCatalog && s2BackToCatalog && s1CatalogVisible && s2CatalogVisible,
     JSON.stringify({ demoStopped, s1BackToCatalog, s2BackToCatalog, s1CatalogVisible, s2CatalogVisible }));
+
+  // --- Issue #75: завершення показу повертає учня до звичайного режиму ------
+  const s1FocusOff = await waitFor(S1,
+    `!document.body.classList.contains('demo-focus') && window.__mark === 42`, 15000);
+  const s2FocusOff = await waitFor(S2,
+    `!document.body.classList.contains('demo-focus') && window.__mark === 42`, 15000);
+  const s1FsBtnHidden = await waitFor(S1,
+    `(() => { const b = document.getElementById('demoFullscreenBtn');` +
+    ` return !!b && b.style.display === 'none'; })() && window.__mark === 42`, 15000);
+  check("Сценарій 3: після завершення показу розгорнутий режим знято і кнопка системного fullscreen прихована",
+    s1FocusOff && s2FocusOff && s1FsBtnHidden,
+    JSON.stringify({ s1FocusOff, s2FocusOff, s1FsBtnHidden }));
 
   const slideAfter = await httpStatus(S1, "/slides/" + encodeURIComponent(pdfId) + "/1");
   const filesAfter = await httpStatus(S1, "/files/" + encodeURIComponent(pdfId));

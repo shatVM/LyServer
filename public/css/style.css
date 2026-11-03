@@ -342,6 +342,43 @@ input:focus-visible {
   border: 1px solid #b7ecc0;
 }
 
+/* --- Issue #75 (доробка): рядок «Спільний екран» — заголовок, статус показу
+   та керування в ОДНОМУ рядку навпроти назви; кнопки — іконки без тексту --- */
+.demo-screen-header {
+  align-items: center;
+}
+
+/* Статус показу в тому самому рядку: обрізається еліпсисом, щоб не ламати
+   рядок; повний текст — у title (оновлює setStatus у app.js) */
+.demo-screen-header #status {
+  margin: 0;
+  padding: 8px 12px;
+  flex: 1 1 220px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.demo-screen-header .demo-header-actions {
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+.demo-screen-header .hint {
+  white-space: nowrap;
+}
+
+/* Кнопки-іконки: квадратна зона натискання, текстового напису немає
+   (назва дії доступна в title/aria-label) */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  min-height: 40px;
+}
+
 /* Issue #63 Етап 4 §4: службовий текст для скринрідера — стан «приховано»
    передається без видимої текстової мітки, щоб не покладатися лише на колір */
 .sr-only {
@@ -806,6 +843,12 @@ footer {
   .grid-demo {
     grid-template-columns: 1fr;
   }
+  /* Issue #75 (доробка): на мобільному внутрішній скрол списку учнів прибрано —
+     блок росте разом зі своїм вмістом, прокручується сторінка */
+  .students-side-block .students-list {
+    max-height: none;
+    overflow-y: visible;
+  }
   .role-grid {
     grid-template-columns: 1fr;
   }
@@ -914,6 +957,24 @@ footer {
 
 .student-name { font-weight: 600; }
 
+/* Issue #75: IP-адреса в тому самому рядку, що й ім'я учня — дрібний
+   ненав'язливий сірий шрифт; overflow-wrap не дає довгій IPv6-адресі ламати
+   картку чи рядок, на вузькому екрані IP може перейти на другий рядок */
+.student-info {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.student-ip {
+  font-size: 12px;
+  font-weight: 400;
+  color: #8a94a6;
+  overflow-wrap: anywhere;
+}
+
 .badge {
   padding: 3px 10px;
   border-radius: 999px;
@@ -921,8 +982,19 @@ footer {
   font-weight: 700;
 }
 
-.badge-online { background: #d3f9d8; color: #2b8a3e; }
-.badge-offline { background: #ffe8cc; color: #d9480f; }
+/* Issue #75 (доробка за зворотним зв'язком власника): статус присутності —
+   лише крапка відповідного кольору; слів «Онлайн/Неактивний» у рядку немає
+   (назва стану доступна скринрідеру й підказці через title/aria-label) */
+.status-dot {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.status-dot-online { background: #2b8a3e; }
+.status-dot-offline { background: #d9480f; }
 
 /* --- Issue #9: ���� �������� �� ������ �� ������� --- */
 .page-input {
@@ -952,8 +1024,11 @@ footer {
   margin-top: 0;
 }
 
+/* Issue #75 (доробка): батьківський блок списку учнів значно вищий за
+   попередні 340px — на звичайному екрані вміщає ~16 рядків «ім'я + IP» без
+   внутрішнього прокручування; понад те — внутрішній скрол */
 .students-side-block .students-list {
-  max-height: 340px;
+  max-height: 70vh;
   overflow-y: auto;
 }
 
@@ -1167,4 +1242,73 @@ footer {
   .preview-viewer { height: calc(100vh - 210px); min-height: 120px; }
   .preview-viewer .slide-img,
   .preview-viewer video { max-height: 100%; }
+}
+
+/* --- Issue #75: розгорнутий режим спільної демонстрації на пристрої учня ---
+   Прапорець body.demo-focus ставить app.js (setDemoFocus) лише для ролі
+   «учень» і лише за серверним станом показу. У режимі матеріал займає весь
+   доступний простір вікна/екрана (vh/dvh) на ПК й мобільному; системний
+   Fullscreen API не застосовується примусово — для нього окрема кнопка
+   «⛶ На весь екран» (лише за жесту користувача, див. app.js). */
+body.demo-focus header,
+body.demo-focus .nav-bar,
+body.demo-focus footer,
+body.demo-focus .page-title-area {
+  display: none !important;
+}
+
+body.demo-focus .main-container {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+
+body.demo-focus .grid-2col,
+body.demo-focus .grid-demo {
+  display: block;
+}
+
+body.demo-focus .panel {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
+/* Службові елементи панелі: під час показу учню потрібен лише матеріал
+   (навігація слайдами вчителя та його керування приховані окремо — teacher-only) */
+body.demo-focus .panel-header-row,
+body.demo-focus #status,
+body.demo-focus main .panel > .hint {
+  display: none !important;
+}
+
+body.demo-focus #viewer {
+  height: calc(100vh - 16px);
+  height: calc(100dvh - 16px);
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: #0b1220;
+}
+
+body.demo-focus #viewer video {
+  max-height: none;
+}
+
+/* Кнопка системного повноекранного режиму (лише коли активний body.demo-focus;
+   прихована інлайн-стилем, поки режим вимкнено). Лівий нижній кут — не
+   перекриває toast-контейнер праворуч; мінімальний розмір дотику 44px */
+.demo-fs-btn {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 950;
+  min-height: 44px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  font-weight: 700;
+  box-shadow: 0 6px 18px rgba(10, 27, 51, 0.35);
 }

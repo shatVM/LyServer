@@ -8,30 +8,43 @@
 <div class="grid-demo" id="demoGridContainer">
   <!-- Shared Display Panel -->
   <section class="panel demo-screen-panel">
-    <div class="panel-header-row">
+    <!-- Issue #75 (доробка за зворотним зв'язком власника): заголовок, статус
+         показу та всі елементи керування — в ОДНОМУ рядку навпроти назви
+         «Спільний екран». Текстові написи на кнопках замінено іконками
+         (назва дії збережена в title/aria-label), статус і номер слайда —
+         динамічні тексти, вони лишаються в рядку -->
+    <div class="panel-header-row demo-screen-header">
       <h2 id="viewerTitle">Спільний екран</h2>
-      <div class="row">
-        <div id="syncIndicator" class="badge-live">● Синхронізація активна</div>
-        <button id="showShared" class="secondary btn-sm">🔄 Оновити</button>
-      </div>
-    </div>
-
-    <div id="status" class="status">Підключення до спільної трансляції…</div>
-
-    <!-- Teacher Shared Control Bar (shown only for teacher) -->
-    <div class="row shared-nav-bar teacher-only" id="teacherDemoControls" style="display:none; margin-bottom:12px; justify-content:space-between">
-      <div class="row">
-        <button id="prevPage" class="secondary btn-sm">← Попередня сторінка</button>
-        <span id="pageLabel" class="hint">PDF: сторінка 1</span>
-        <button id="nextPage" class="secondary btn-sm">Наступна сторінка →</button>
-        <input id="pageInput" class="page-input" type="number" min="1" step="1" inputmode="numeric" placeholder="№">
-        <button id="gotoPage" class="secondary btn-sm">Перейти</button>
-      </div>
-      <div class="row">
-        <!-- Issue #63: явна зупинка демонстрації — сервер скидає спільний стан,
-             сторінки учнів самі повертаються до самостійного перегляду -->
-        <button id="stopDemo" class="secondary btn-sm" title="Зупинити спільну демонстрацію">⏹ Зупинити демонстрацію</button>
-        <span class="hint">Керування показом (викладач)</span>
+      <div id="status" class="status">Підключення до спільної трансляції…</div>
+      <div class="row demo-header-actions">
+        <div id="syncIndicator" class="status-dot status-dot-online"
+             title="Синхронізація активна" role="img" aria-label="Синхронізація активна"></div>
+        <button id="showShared" type="button" class="secondary btn-sm icon-btn"
+                title="Оновити" aria-label="Оновити">
+          <svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#refresh-cw"></use></svg>
+        </button>
+        <!-- Панель показу (лише викладач): попередній/наступний слайд,
+             номер і перехід, зупинка демонстрації — усе іконками -->
+        <div class="row teacher-only demo-page-controls" id="teacherDemoControls" style="display:none">
+          <button id="prevPage" type="button" class="secondary btn-sm icon-btn"
+                  title="Попередня сторінка" aria-label="Попередня сторінка">
+            <svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#chevron-left"></use></svg>
+          </button>
+          <span id="pageLabel" class="hint">PDF: сторінка 1</span>
+          <button id="nextPage" type="button" class="secondary btn-sm icon-btn"
+                  title="Наступна сторінка" aria-label="Наступна сторінка">
+            <svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#chevron-right"></use></svg>
+          </button>
+          <input id="pageInput" class="page-input" type="number" min="1" step="1" inputmode="numeric" placeholder="№" aria-label="Номер сторінки">
+          <button id="gotoPage" type="button" class="secondary btn-sm icon-btn"
+                  title="Перейти до сторінки" aria-label="Перейти до сторінки">
+            <svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#corner-down-left"></use></svg>
+          </button>
+          <button id="stopDemo" type="button" class="secondary btn-sm icon-btn"
+                  title="Зупинити демонстрацію" aria-label="Зупинити демонстрацію">
+            <svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#square"></use></svg>
+          </button>
+        </div>
       </div>
     </div>
 

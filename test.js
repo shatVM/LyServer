@@ -657,6 +657,147 @@ async function main() {
         JSON.stringify(list)
       );
 
+      // 7в. Issue #75: IP-адреса учня — визначається СЕРВЕРОМ із контексту
+      // запиту; поле `ip` у тілі та заголовок X-Forwarded-For (без trust proxy)
+      // мають ігноруватися
+      await fetch(`${base}/api/presence/heartbeat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...sess() },
+        body: JSON.stringify({
+          studentId: "s_test_ip",
+          name: "IP Учень",
+          active: true,
+          ip: "203.0.113.7"
+        })
+      });
+      await fetch(`${base}/api/presence/heartbeat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Forwarded-For": "203.0.113.99",
+          ...sess()
+        },
+        body: JSON.stringify({ studentId: "s_test_ip", name: "IP Учень", active: true })
+      });
+      list = await (await fetch(base + "/api/presence/students", { headers: { "X-Portal-Pin": PIN } })).json();
+      const ipStudent = list.find((s) => s.id === "s_test_ip");
+      check(
+        "Issue #75: IP визначає сервер (не тіло запиту, не X-Forwarded-For)",
+        Boolean(
+          ipStudent &&
+            typeof ipStudent.ip === "string" &&
+            ipStudent.ip.length > 0 &&
+            ipStudent.ip !== "203.0.113.7" &&
+            ipStudent.ip !== "203.0.113.99" &&
+            !ipStudent.ip.startsWith("::ffff:") &&
+            (/^(\d{1,3}\.){3}\d{1,3}$/.test(ipStudent.ip) || /^[0-9a-f:]+$/i.test(ipStudent.ip))
+        ),
+        JSON.stringify(ipStudent)
+      );
+      check(
+        "Issue #75: у кожного учня у списку є рядок ip",
+        Array.isArray(list) && list.every((s) => typeof s.ip === "string"),
+        JSON.stringify(list.map((s) => s.ip))
+      );
+      check(
+        "Issue #75: IP-рядок з ім'ям — рендер у JS і CSS",
+        jsSrc.includes('class="student-ip"') &&
+          jsSrc.includes("student-info") &&
+          css.includes(".student-ip") &&
+          css.includes(".student-info")
+      );
+      check(
+        "Issue #75: дрібний сірий шрифт IP у CSS",
+        /\.student-ip\s*\{[^}]*font-size:\s*12px[^}]*color:\s*#8a94a6/s.test(css)
+      );
+
+      // 7д. Issue #75 (доробка за зворотним зв'язком власника): статус — лише
+      // крапка відповідного кольору, ім'я та IP в одному рядку, блок вищий
+      check(
+        "Issue #75 (доробка): статус — лише крапка, слова «Онлайн» у рядку немає",
+        jsSrc.includes("status-dot-online") &&
+          jsSrc.includes("status-dot-offline") &&
+          !jsSrc.includes("● Онлайн") &&
+          /\.status-dot-online\s*\{[^}]*background:\s*#2b8a3e/s.test(css) &&
+          /\.status-dot-offline\s*\{[^}]*background:\s*#d9480f/s.test(css)
+      );
+      check(
+        "Issue #75 (доробка): ім'я та IP в одному рядку (baseline), блок учнів вищий 70vh",
+        /\.student-info\s*\{[^}]*align-items:\s*baseline/s.test(css) &&
+          /\.students-side-block\s+\.students-list\s*\{[^}]*max-height:\s*70vh/s.test(css) &&
+          /@media \(max-width: 900px\)[\s\S]*?\.students-side-block\s+\.students-list\s*\{[^}]*max-height:\s*none/s.test(css)
+      );
+
+      // 7е. Issue #75 (доробка): у блоці «Спільний екран» заголовок, статус і
+      // керування в одному рядку; кнопки — іконки без текстових написів.
+      // Тексти перевіряються ЛИШЕ в межах рядка заголовка (інші панелі
+      // сторінки, наприклад «Матеріали», мають власні написи)
+      const demoHeaderHtml = demoHtml.slice(
+        demoHtml.indexOf('class="panel-header-row demo-screen-header"'),
+        demoHtml.indexOf('id="viewer"')
+      );
+      check(
+        "Issue #75 (доробка): статус і керування в одному рядку навпроти «Спільний екран»",
+        demoHtml.includes('class="panel-header-row demo-screen-header"') &&
+          demoHtml.indexOf('id="viewerTitle"') < demoHtml.indexOf('id="status"') &&
+          demoHtml.indexOf('id="status"') < demoHtml.indexOf('id="teacherDemoControls"') &&
+          demoHtml.indexOf('id="teacherDemoControls"') < demoHtml.indexOf('id="viewer"'),
+        JSON.stringify({
+          header: demoHtml.indexOf('id="viewerTitle"'),
+          status: demoHtml.indexOf('id="status"'),
+          controls: demoHtml.indexOf('id="teacherDemoControls"'),
+          viewer: demoHtml.indexOf('id="viewer"')
+        })
+      );
+      check(
+        "Issue #75 (доробка): кнопки керування — іконки без текстових написів, статус у title",
+        demoHeaderHtml.length > 0 &&
+          !demoHeaderHtml.includes("← Попередня") &&
+          !demoHeaderHtml.includes("Наступна сторінка →") &&
+          !demoHeaderHtml.includes("⏹ Зупинити") &&
+          !demoHeaderHtml.includes("🔄 Оновити") &&
+          !demoHeaderHtml.includes("Керування показом") &&
+          /<button[^>]*id="prevPage"[^>]*aria-label="Попередня сторінка"/.test(demoHeaderHtml) &&
+          /<button[^>]*id="nextPage"[^>]*aria-label="Наступна сторінка"/.test(demoHeaderHtml) &&
+          /<button[^>]*id="stopDemo"[^>]*aria-label="Зупинити демонстрацію"/.test(demoHeaderHtml) &&
+          /<button[^>]*id="showShared"[^>]*aria-label="Оновити"/.test(demoHeaderHtml) &&
+          demoHeaderHtml.includes("/icons.svg#refresh-cw") &&
+          demoHeaderHtml.includes("/icons.svg#chevron-left") &&
+          demoHeaderHtml.includes("/icons.svg#chevron-right") &&
+          demoHeaderHtml.includes("/icons.svg#corner-down-left") &&
+          demoHeaderHtml.includes("/icons.svg#square") &&
+          css.includes(".icon-btn") &&
+          css.includes(".demo-screen-header") &&
+          jsSrc.includes('$("status").title = text'),
+        demoHeaderHtml.slice(0, 300)
+      );
+
+      // 7г. Issue #75: розгорнутий режим спільної демонстрації на пристрої учня
+      check(
+        "Issue #75: body.demo-focus у JS і CSS (#viewer на весь простір)",
+        jsSrc.includes('classList.toggle("demo-focus"') &&
+          css.includes("body.demo-focus #viewer") &&
+          css.includes("body.demo-focus header")
+      );
+      check(
+        "Issue #75: кнопка системного fullscreen у розмітці та JS",
+        demoHtml.includes('id="demoFullscreenBtn"') &&
+          jsSrc.includes("setupDemoFullscreenButton") &&
+          jsSrc.includes("requestFullscreen")
+      );
+      check(
+        "Issue #75: системний fullscreen лише за жестом, вихід лише нашим",
+        jsSrc.includes("demoFullscreenByUs") &&
+          jsSrc.includes("document.exitFullscreen()") &&
+          jsSrc.includes("Браузер не дозволив повноекранний режим")
+      );
+      check(
+        "Issue #75: режим прив'язаний до серверного стану показу і ролі",
+        jsSrc.includes("setDemoFocus(Boolean(state.file))") &&
+          jsSrc.includes("setDemoFocus(active)") &&
+          jsSrc.includes('role !== "teacher"')
+      );
+
       // 7б. Issue #61: навігація слайдами натисканням на ліву/праву зону зображення
       check(
         "Issue #61: зони створюються в JS і класи збігаються з CSS",
