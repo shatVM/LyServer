@@ -342,6 +342,43 @@ input:focus-visible {
   border: 1px solid #b7ecc0;
 }
 
+/* --- Issue #75 (доробка): рядок «Спільний екран» — заголовок, статус показу
+   та керування в ОДНОМУ рядку навпроти назви; кнопки — іконки без тексту --- */
+.demo-screen-header {
+  align-items: center;
+}
+
+/* Статус показу в тому самому рядку: обрізається еліпсисом, щоб не ламати
+   рядок; повний текст — у title (оновлює setStatus у app.js) */
+.demo-screen-header #status {
+  margin: 0;
+  padding: 8px 12px;
+  flex: 1 1 220px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.demo-screen-header .demo-header-actions {
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+.demo-screen-header .hint {
+  white-space: nowrap;
+}
+
+/* Кнопки-іконки: квадратна зона натискання, текстового напису немає
+   (назва дії доступна в title/aria-label) */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  min-height: 40px;
+}
+
 /* Issue #63 Етап 4 §4: службовий текст для скринрідера — стан «приховано»
    передається без видимої текстової мітки, щоб не покладатися лише на колір */
 .sr-only {

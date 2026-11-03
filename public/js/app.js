@@ -71,7 +71,12 @@ const isMaterialsPage = Boolean(!isDemoPage && !isUploadPage && !isStudentsPage)
 const SLIDE_EXTS = new Set([".pdf", ".ppt", ".pptx"]);
 
 function setStatus(text) {
-  if ($("status")) $("status").textContent = text;
+  if ($("status")) {
+    $("status").textContent = text;
+    // Issue #75 (доробка): у рядку з заголовком «Спільний екран» статус може
+    // обрізатися еліпсисом — повний текст завжди доступний у підказці
+    $("status").title = text;
+  }
 }
 
 // Issue #63, Етап 2: статус блоку завантаження «Додати матеріали».

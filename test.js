@@ -728,6 +728,50 @@ async function main() {
           /@media \(max-width: 900px\)[\s\S]*?\.students-side-block\s+\.students-list\s*\{[^}]*max-height:\s*none/s.test(css)
       );
 
+      // 7е. Issue #75 (доробка): у блоці «Спільний екран» заголовок, статус і
+      // керування в одному рядку; кнопки — іконки без текстових написів.
+      // Тексти перевіряються ЛИШЕ в межах рядка заголовка (інші панелі
+      // сторінки, наприклад «Матеріали», мають власні написи)
+      const demoHeaderHtml = demoHtml.slice(
+        demoHtml.indexOf('class="panel-header-row demo-screen-header"'),
+        demoHtml.indexOf('id="viewer"')
+      );
+      check(
+        "Issue #75 (доробка): статус і керування в одному рядку навпроти «Спільний екран»",
+        demoHtml.includes('class="panel-header-row demo-screen-header"') &&
+          demoHtml.indexOf('id="viewerTitle"') < demoHtml.indexOf('id="status"') &&
+          demoHtml.indexOf('id="status"') < demoHtml.indexOf('id="teacherDemoControls"') &&
+          demoHtml.indexOf('id="teacherDemoControls"') < demoHtml.indexOf('id="viewer"'),
+        JSON.stringify({
+          header: demoHtml.indexOf('id="viewerTitle"'),
+          status: demoHtml.indexOf('id="status"'),
+          controls: demoHtml.indexOf('id="teacherDemoControls"'),
+          viewer: demoHtml.indexOf('id="viewer"')
+        })
+      );
+      check(
+        "Issue #75 (доробка): кнопки керування — іконки без текстових написів, статус у title",
+        demoHeaderHtml.length > 0 &&
+          !demoHeaderHtml.includes("← Попередня") &&
+          !demoHeaderHtml.includes("Наступна сторінка →") &&
+          !demoHeaderHtml.includes("⏹ Зупинити") &&
+          !demoHeaderHtml.includes("🔄 Оновити") &&
+          !demoHeaderHtml.includes("Керування показом") &&
+          /<button[^>]*id="prevPage"[^>]*aria-label="Попередня сторінка"/.test(demoHeaderHtml) &&
+          /<button[^>]*id="nextPage"[^>]*aria-label="Наступна сторінка"/.test(demoHeaderHtml) &&
+          /<button[^>]*id="stopDemo"[^>]*aria-label="Зупинити демонстрацію"/.test(demoHeaderHtml) &&
+          /<button[^>]*id="showShared"[^>]*aria-label="Оновити"/.test(demoHeaderHtml) &&
+          demoHeaderHtml.includes("/icons.svg#refresh-cw") &&
+          demoHeaderHtml.includes("/icons.svg#chevron-left") &&
+          demoHeaderHtml.includes("/icons.svg#chevron-right") &&
+          demoHeaderHtml.includes("/icons.svg#corner-down-left") &&
+          demoHeaderHtml.includes("/icons.svg#square") &&
+          css.includes(".icon-btn") &&
+          css.includes(".demo-screen-header") &&
+          jsSrc.includes('$("status").title = text'),
+        demoHeaderHtml.slice(0, 300)
+      );
+
       // 7г. Issue #75: розгорнутий режим спільної демонстрації на пристрої учня
       check(
         "Issue #75: body.demo-focus у JS і CSS (#viewer на весь простір)",
