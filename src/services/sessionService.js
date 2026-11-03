@@ -63,6 +63,25 @@ class SessionService {
   }
 
   /**
+   * Issue #79: прив'язка клієнтського studentId до СЕРВЕРНОЇ сесії учня.
+   *
+   * Викликається лише з heartbeat власника cookie: studentId генерується
+   * клієнтом і приходить у тілі запиту, тож сам по собі він не є доказом
+   * належності. Після прив'язки /api/state віддає персональні сигнали саме
+   * цьому клієнту — підробити чужий studentId для отримання чужого сигналу
+   * неможливо, бо прив'язку може зробити лише власник сесії.
+   * @param {string} id — id серверної сесії
+   * @param {string} studentId — ідентифікатор з тіла heartbeat (обмежується)
+   * @returns {boolean} чи відбулася прив'язка (лише для ролі student)
+   */
+  bindStudent(id, studentId) {
+    const session = this.get(id);
+    if (!session || session.role !== "student") return false;
+    session.studentId = String(studentId || "").slice(0, 64);
+    return true;
+  }
+
+  /**
    * Скидання ВСІХ активних сесій. Викликається на старті server.js, тому
    * після кожного перезапуску вчителі та учні входять заново, а старі cookie
    * не відновлюють доступ. Використовується також тестом для перевірки.

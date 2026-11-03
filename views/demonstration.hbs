@@ -118,6 +118,55 @@
   </div>
 </section>
 
+<!-- Issue #79: підблок «Сигнали учням» — безпосередньо під блоком «Матеріали».
+     Один універсальний механізм для всіх написів: параметри (напис, іконка з
+     набору проєкту, колір, прозорість, тривалість, «до зняття», «для всіх»)
+     налаштовуються тут, порядок змінюється кнопками ↑/↓, попередній перегляд —
+     локальний оверлей без надсилання. Надсилання — іконками сигналів у рядку
+     учня та біля лічильника учнів -->
+<section class="panel demo-signals-panel teacher-only" id="teacherSignalsPanel" style="display:none">
+  <div class="panel-header-row">
+    <h3>Сигнали учням</h3>
+    <button id="signalAddBtn" type="button" class="secondary btn-sm" title="Створити сигнал">
+      <svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#plus"></use></svg>
+      <span class="btn-text">Створити сигнал</span>
+    </button>
+  </div>
+  <p class="hint">
+    Натискання іконки сигналу в рядку учня надсилає сигнал лише цьому учню, іконки «для всіх» — біля лічильника учнів.
+    Під час показу сигнал з'являється як рамка зі світінням і напис поверх матеріалу.
+  </p>
+
+  <!-- Форма створення/редагування сигналу (параметри — універсальні для всіх написів) -->
+  <div id="signalForm" class="signal-form" style="display:none">
+    <div class="signal-form-row">
+      <label for="signalTextInput">Напис</label>
+      <input id="signalTextInput" type="text" maxlength="60" placeholder="Напр.: ЧИТАЙ">
+      <label for="signalIconSelect">Іконка</label>
+      <select id="signalIconSelect"></select>
+      <label for="signalColorInput">Колір</label>
+      <input id="signalColorInput" type="color" value="#e03131">
+    </div>
+    <div class="signal-form-row">
+      <label for="signalOpacityInput">Прозорість напису, %</label>
+      <input id="signalOpacityInput" type="number" min="0" max="100" step="5" value="75">
+      <label for="signalDurationInput">Тривалість показу, с</label>
+      <input id="signalDurationInput" type="number" min="1" max="60" value="3">
+      <label class="signal-flag"><input id="signalUntilDismissInput" type="checkbox"> Показувати до зняття</label>
+      <label class="signal-flag"><input id="signalForAllInput" type="checkbox"> Застосувати для всіх</label>
+    </div>
+    <div class="row signal-form-actions">
+      <button id="signalSaveBtn" type="button">Зберегти</button>
+      <button id="signalCancelBtn" type="button" class="secondary">Скасувати</button>
+      <span id="signalFormStatus" class="hint" role="status"></span>
+    </div>
+  </div>
+
+  <div id="signalList" class="signal-list">
+    <div class="empty">Сигналів ще немає — створіть перший.</div>
+  </div>
+</section>
+
 <!-- Issue #63 (§3.3): приватний перегляд викладача в модальному вікні.
      Відкривається дією «👁️ Перегляд», закривається кнопкою ✕ або Escape;
      не змінює стан спільної демонстрації -->

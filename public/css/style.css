@@ -1312,3 +1312,241 @@ body.demo-focus #viewer video {
   font-weight: 700;
   box-shadow: 0 6px 18px rgba(10, 27, 51, 0.35);
 }
+
+/* --- Issue #79: універсальні візуальні сигнали учням --- */
+
+/* Оверлей сигналу: рамка по периметру доступної області перегляду з
+   внутрішнім відступом ~50 px (на вузьких/мобільних екранах — 16 px),
+   світіння кольором сигналу; напис по центру з прозорістю з налаштувань
+   (типово 75%) і плавним масштабуванням. pointer-events:none — оверлей не
+   перекриває керування показом; z-index нижчий за модальні вікна, toast і
+   кнопку системного повноекранного режиму. */
+.signal-overlay {
+  position: fixed;
+  inset: 50px;
+  z-index: 940;
+  pointer-events: none;
+}
+
+.signal-overlay-frame {
+  position: absolute;
+  inset: 0;
+  border: 6px solid var(--signal-color, #e03131);
+  border-radius: 18px;
+  box-shadow: 0 0 26px 6px var(--signal-color, #e03131),
+    inset 0 0 26px 4px var(--signal-color, #e03131);
+  animation: signalFramePulse 1.6s ease-in-out infinite;
+}
+
+/* Пульс рамки: непрозорість від 50% до 0% (вимога ефекту сигналу) */
+@keyframes signalFramePulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0; }
+}
+
+.signal-overlay-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px;
+  font-size: clamp(32px, 7vw, 88px);
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  line-height: 1.1;
+  color: var(--signal-color, #e03131);
+  opacity: var(--signal-opacity, 0.75);
+  overflow-wrap: anywhere;
+  animation: signalTextScale 1.6s ease-in-out infinite;
+}
+
+/* Напис: плавне збільшення/зменшення масштабу поверх матеріалу */
+@keyframes signalTextScale {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.06); }
+}
+
+/* «Показувати до зняття»: після початкової анімації — спокійний стан
+   (дуже ненав'язливе повільне пульсування замість безперервного блимання) */
+.signal-overlay.signal-overlay-steady .signal-overlay-frame {
+  animation: signalFrameSteady 4s ease-in-out infinite;
+}
+.signal-overlay.signal-overlay-steady .signal-overlay-text {
+  animation: signalTextSteady 4s ease-in-out infinite;
+}
+@keyframes signalFrameSteady {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.12; }
+}
+@keyframes signalTextSteady {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.02); }
+}
+
+/* Адаптив (вузькі/мобільні екрани): менший відступ і тонша рамка, щоб
+   сигнал не «з'їдав» матеріал і не виходив за межі екрана */
+@media (max-width: 600px), (max-height: 500px) {
+  .signal-overlay { inset: 16px; }
+  .signal-overlay-frame { border-width: 4px; border-radius: 12px; }
+  .signal-overlay-text { font-size: clamp(24px, 10vw, 48px); padding: 12px; }
+}
+
+/* Іконки сигналів праворуч у рядку учня, біля крапки онлайн: колір — із
+   налаштувань сигналу (інлайн-стиль). Компактні, без текстових написів. */
+.student-signals {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.signal-send-btn,
+.group-signal-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid #d3dce7;
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+.signal-send-btn .ui-icon,
+.group-signal-btn .ui-icon { width: 16px; height: 16px; }
+.signal-send-btn:hover:not(:disabled),
+.group-signal-btn:hover:not(:disabled) { background: #f1f5fb; }
+.signal-send-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* Активний сигнал: виразний стан — рамка кольором сигналу та м'який пульс */
+.signal-send-btn.is-active,
+.group-signal-btn.is-active {
+  border-color: currentColor;
+  animation: signalBtnActive 1.4s ease-in-out infinite;
+}
+@keyframes signalBtnActive {
+  0%, 100% { box-shadow: 0 0 0 1px currentColor, 0 0 8px 0 currentColor; }
+  50% { box-shadow: 0 0 0 1px currentColor, 0 0 3px 0 currentColor; }
+}
+
+/* Групові сигнали («Застосувати для всіх») — одразу біля лічильника учнів */
+.students-header-side {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.group-signals { display: flex; align-items: center; gap: 4px; }
+
+/* Підблок «Сигнали учням»: форма параметрів (універсальна для всіх написів) */
+.signal-form {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #dce5ef;
+  border-radius: 10px;
+  background: #f8fafc;
+  margin-bottom: 12px;
+}
+.signal-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.signal-form-row label { font-weight: 600; font-size: 13.5px; color: #33507a; }
+.signal-form-row input[type="text"] {
+  flex: 1 1 180px;
+  min-width: 140px;
+  padding: 8px 10px;
+  border: 1px solid #ccd8e6;
+  border-radius: 8px;
+}
+.signal-form-row input[type="number"] {
+  width: 84px;
+  padding: 8px;
+  border: 1px solid #ccd8e6;
+  border-radius: 8px;
+}
+.signal-form-row input[type="color"] {
+  width: 46px;
+  height: 34px;
+  padding: 2px;
+  border: 1px solid #ccd8e6;
+  border-radius: 8px;
+  background: #fff;
+}
+.signal-form-row select {
+  padding: 8px;
+  border: 1px solid #ccd8e6;
+  border-radius: 8px;
+  background: #fff;
+  max-width: 170px;
+}
+.signal-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 13.5px;
+  color: #33507a;
+  cursor: pointer;
+}
+.signal-flag input { width: 18px; height: 18px; accent-color: #1d4ed8; }
+.signal-form-actions { gap: 8px; align-items: center; }
+#signalFormStatus:empty { display: none; }
+
+/* Список сигналів: прев'ю іконки + напис + метадані + дії в одному рядку */
+.signal-list { display: grid; gap: 8px; }
+.signal-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid #dce5ef;
+  border-radius: 10px;
+  background: #f8fafc;
+  flex-wrap: wrap;
+}
+.signal-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid #d3dce7;
+  border-radius: 8px;
+  background: #fff;
+  flex: 0 0 auto;
+}
+.signal-item-text {
+  font-weight: 700;
+  color: #1c3d66;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.signal-item-meta { flex: 1 1 auto; min-width: 0; }
+.signal-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+.signal-item-actions .icon-btn { min-width: 36px; min-height: 36px; }
+
+/* Вузькі/мобільні екрани: іконки сигналів не ламають рядок учня, дії
+   сигналів переходять на окремий рядок, форма — на всю ширину */
+@media (max-width: 600px) {
+  .student-signals { flex-wrap: wrap; justify-content: flex-end; }
+  .signal-send-btn,
+  .group-signal-btn { width: 34px; height: 34px; }
+  .signal-item-actions { margin-left: 0; width: 100%; }
+  .signal-form-row input[type="text"] { flex: 1 1 100%; }
+  .students-header-side { width: 100%; justify-content: space-between; }
+}

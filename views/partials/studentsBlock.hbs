@@ -5,7 +5,12 @@
 <aside class="panel students-side-block teacher-only" id="studentsSideBlock" style="display:none">
   <div class="panel-header-row">
     <h3>👥 Учні</h3>
-    <span id="studentsSideOnlineCount" class="badge-live js-students-online-count" style="display:none">● 0 онлайн</span>
+    <!-- Issue #79: іконки групових сигналів («Застосувати для всіх») одразу
+         біля лічильника; індивідуальні — у рядку кожного учня -->
+    <div class="row students-header-side">
+      <span id="studentsGroupSignals" class="group-signals"></span>
+      <span id="studentsSideOnlineCount" class="badge-live js-students-online-count" style="display:none">● 0 онлайн</span>
+    </div>
   </div>
   <div id="studentsSideList" class="students-list js-students-list">
     <div class="empty">Завантаження списку учнів…</div>

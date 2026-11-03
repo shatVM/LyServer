@@ -251,6 +251,9 @@ let presenceTimer = null;
 /** Старт опитування присутності: перший запит одразу, далі — за інтервалом */
 function startPresencePolling() {
   if (presenceTimer) clearInterval(presenceTimer);
+  // Issue #79: конфігурація сигналів потрібна викладачу для іконок у рядках
+  // учнів і біля лічильника (перезавантажується після кожної CRUD-операції)
+  void loadSignalConfig();
   pollPresence();
   presenceTimer = setInterval(pollPresence, PRESENCE_POLL_MS);
 }
@@ -297,6 +300,7 @@ async function pollPresence() {
  *  і «Перегляд матеріалів»). Логіка присутності не змінюється —
  *  змінюється лише кількість місць, куди виводиться той самий список. */
 function renderStudentsList(list) {
+  lastStudentsList = Array.isArray(list) ? list : [];
   const containers = document.querySelectorAll(".js-students-list");
   if (!containers.length) return;
 
@@ -327,16 +331,392 @@ function renderStudentsList(list) {
       const ipLine = s.ip
         ? '<span class="student-ip">' + esc(s.ip) + "</span>"
         : "";
+      // Issue #79: іконки сигналів праворуч у рядку, біля крапки онлайн (без
+      // текстових написів): колір — із налаштувань сигналу, активний сигнал —
+      // стан is-active з серверного персонального стану; офлайн-учню іконка
+      // недоступна (сервер усе одно перевіряє адресата)
+      const signalBtns = (role === "teacher" && signalConfig.length)
+        ? '<span class="student-signals">' + signalConfig.map((sig) => {
+            const active = findActiveSignal(sig.id, s.id);
+            const label = "Сигнал «" + sig.text + "»" + (s.online ? "" : " — учень офлайн");
+            return '<button type="button" class="signal-send-btn' + (active ? " is-active" : "") +
+              '" data-signal-id="' + esc(sig.id) + '" data-target="' + esc(s.id) +
+              '" style="color:' + esc(sig.color) + '" title="' + esc(label) +
+              '" aria-label="' + esc(label) + '"' + (s.online ? "" : " disabled") + ">" +
+              signalIconSvg(sig.icon) + "</button>";
+          }).join("") + "</span>"
+        : "";
       item.innerHTML =
         '<span class="student-info">' +
         '<span class="student-name">' + esc(s.name) + "</span>" +
         ipLine +
         "</span>" +
+        signalBtns +
         statusDot;
       root.append(item);
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #79: універсальні візуальні сигнали учням
+// ---------------------------------------------------------------------------
+
+/** Конфігурація сигналів викладача та доступний набір іконок (GET /api/signals) */
+let signalConfig = [];
+let signalIcons = [];
+/** Останній список присутності — для повторного рендеру рядків без опитування */
+let lastStudentsList = [];
+/** Активні сигнали у вигляді викладача (поле signals стану / відповідь send) */
+let activeSignalsState = [];
+/** Ключ активних станів — щоб не перерисовувати іконки на кожне опитування */
+let activeSignalsKey = "";
+
+/** Іконка сигналу зі спрайта (колір задається інлайн-стилем кнопки) */
+function signalIconSvg(icon) {
+  return '<svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#' + esc(icon) + '"></use></svg>';
+}
+
+/** Активний запис для пари (сигнал, ціль) — активний стан іконок */
+function findActiveSignal(signalId, target) {
+  return activeSignalsState.find((entry) =>
+    entry.signalId === signalId && entry.target === target
+  ) || null;
+}
+
+/** Завантаження конфігурації: список сигналів + набір іконок (лише викладач) */
+async function loadSignalConfig() {
+  if (role !== "teacher" || !pin) return;
+  try {
+    const headers = {};
+    if (pin) headers["X-Portal-Pin"] = pin;
+    const response = await api("/api/signals", { headers });
+    const data = await response.json();
+    signalConfig = Array.isArray(data.signals) ? data.signals : [];
+    signalIcons = Array.isArray(data.icons) ? data.icons : [];
+    fillSignalIconSelect();
+    renderSignalList();
+    renderGroupSignalIcons();
+    renderStudentsList(lastStudentsList);
+  } catch { /* без конфігурації іконки сигналів просто не показуються */ }
+}
+
+/** Наповнення select іконками зі спрайта проєкту (значення — id символів) */
+function fillSignalIconSelect() {
+  const select = $("signalIconSelect");
+  if (!select) return;
+  select.replaceChildren();
+  for (const name of signalIcons) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name;
+    select.append(option);
+  }
+  if (signalIcons.length && !select.value) select.value = signalIcons[0];
+}
+
+/** Список сигналів у підблоку: іконка + напис + параметри + дії */
+function renderSignalList() {
+  const root = $("signalList");
+  if (!root) return;
+  root.replaceChildren();
+  if (!signalConfig.length) {
+    root.innerHTML = '<div class="empty">Сигналів ще немає — створіть перший.</div>';
+    return;
+  }
+  const sorted = signalConfig.slice().sort((a, b) => (a.order || 0) - (b.order || 0));
+  for (const sig of sorted) {
+    const flags = [sig.duration + " с", sig.opacity + "%"];
+    if (sig.untilDismiss) flags.push("до зняття");
+    if (sig.forAll) flags.push("для всіх");
+    const item = document.createElement("div");
+    item.className = "signal-item";
+    item.dataset.id = sig.id;
+    item.innerHTML =
+      '<span class="signal-item-icon" style="color:' + esc(sig.color) + '">' + signalIconSvg(sig.icon) + "</span>" +
+      '<span class="signal-item-text">' + esc(sig.text) + "</span>" +
+      '<span class="signal-item-meta hint">' + esc(flags.join(" · ")) + "</span>" +
+      '<span class="row signal-item-actions">' +
+      iconAction("preview", "Попередній перегляд", "eye", sig.text) +
+      iconAction("edit", "Редагувати", "edit", sig.text) +
+      iconAction("up", "Вище", "arrow-up", sig.text) +
+      iconAction("down", "Нижче", "arrow-down", sig.text) +
+      iconAction("delete", "Видалити", "trash-2", sig.text) +
+      "</span>";
+    root.append(item);
+  }
+}
+
+/** Кнопка-іконка дії в рядку сигналу (дії ловляться делегуванням на #signalList) */
+function iconAction(act, title, icon, text) {
+  const label = title + " сигнал «" + text + "»";
+  return '<button type="button" class="secondary btn-sm icon-btn" data-act="' + act +
+    '" title="' + esc(title) + '" aria-label="' + esc(label) + '">' +
+    signalIconSvg(icon) + "</button>";
+}
+
+/** Групові сигнали («Застосувати для всіх») — одразу біля лічильника учнів */
+function renderGroupSignalIcons() {
+  const root = $("studentsGroupSignals");
+  if (!root) return;
+  root.replaceChildren();
+  const forAll = signalConfig.filter((sig) => sig.forAll)
+    .sort((a, b) => (a.order || 0) - (b.order || 0));
+  for (const sig of forAll) {
+    const active = findActiveSignal(sig.id, "all");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "group-signal-btn" + (active ? " is-active" : "");
+    btn.dataset.signalId = sig.id;
+    btn.dataset.target = "all";
+    btn.style.color = sig.color;
+    btn.title = "Сигнал для всіх: " + sig.text;
+    btn.setAttribute("aria-label", "Сигнал для всіх учнів: " + sig.text);
+    btn.innerHTML = signalIconSvg(sig.icon);
+    root.append(btn);
+  }
+}
+
+/** Оновлення станів іконок викладача з нового переліку активних сигналів */
+function applyTeacherSignals(list) {
+  const next = Array.isArray(list) ? list : [];
+  activeSignalsState = next;
+  const key = next.map((e) => e.id + ":" + e.signalId + ":" + e.target).join("|");
+  if (key === activeSignalsKey) return;
+  activeSignalsKey = key;
+  renderStudentsList(lastStudentsList);
+  renderGroupSignalIcons();
+}
+
+/**
+ * Натискання іконки сигналу: активний сигнал «до зняття» знімається повторним
+ * натисканням, сигнал із тривалістю — перенадсилається (сервер перезапускає
+ * таймер); відповідь сервера оновлює стани іконок без очікування опитування.
+ */
+async function handleSignalButtonClick(signalId, target) {
+  const conf = signalConfig.find((sig) => sig.id === signalId);
+  if (!conf || role !== "teacher") return;
+  const active = findActiveSignal(signalId, target);
+  const action = active && active.untilDismiss ? "dismiss" : "send";
+  try {
+    const headers = { "Content-Type": "application/json" };
+    if (pin) headers["X-Portal-Pin"] = pin;
+    const response = await api("/api/signals/" + action, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ signalId, target })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      showToast("⚠️ " + (data.message || "Не вдалося виконати сигнал"), "warning");
+      return;
+    }
+    applyTeacherSignals(data.active || []);
+  } catch {
+    if (sessionExpiredHandled) return; // оброблено api()
+    showToast("⚠️ Немає зв'язку зі сервером", "warning");
+  }
+}
+
+// --- Оверлей ефекту: учень бачить сигнали, викладач — попередній перегляд ---
+
+let signalEffectTimer = null;
+let signalSteadyTimer = null;
+let currentSignalId = "";
+
+function clearSignalTimers() {
+  if (signalEffectTimer) { clearTimeout(signalEffectTimer); signalEffectTimer = null; }
+  if (signalSteadyTimer) { clearTimeout(signalSteadyTimer); signalSteadyTimer = null; }
+}
+
+/** Приховати оверлей (таймер тривалості, завершення показу, кінець стану) */
+function hideSignalEffect() {
+  clearSignalTimers();
+  currentSignalId = "";
+  const overlay = $("signalOverlay");
+  if (!overlay) return;
+  overlay.style.display = "none";
+  overlay.classList.remove("signal-overlay-steady");
+  const textEl = overlay.querySelector(".signal-overlay-text");
+  if (textEl) textEl.textContent = "";
+}
+
+/**
+ * Показати сигнал: рамка зі світінням і напис поверх матеріалу. Повторне
+ * надсилання приходить з новим id — анімації й таймер стартують заново;
+ * «до зняття» після початкової анімації переходить у спокійний стан і лишається
+ * до зняття (таймер не встановлюється).
+ */
+function showSignalEffect(signal) {
+  const overlay = $("signalOverlay");
+  if (!overlay) return;
+  const textEl = overlay.querySelector(".signal-overlay-text");
+  clearSignalTimers();
+  overlay.classList.remove("signal-overlay-steady");
+  overlay.style.setProperty("--signal-color", signal.color || "#e03131");
+  const opacity = Number(signal.opacity);
+  const opacityRatio = Number.isFinite(opacity)
+    ? Math.min(100, Math.max(0, opacity)) / 100
+    : 0.75;
+  overlay.style.setProperty("--signal-opacity", String(opacityRatio));
+  if (textEl) textEl.textContent = signal.text || "";
+  overlay.style.display = "block";
+  currentSignalId = signal.id;
+  // Рестарт CSS-анімацій: зміна layout форсує перезапуск keyframes
+  void overlay.offsetWidth;
+  if (signal.untilDismiss) {
+    // Постійний сигнал: початкова анімація, далі — дуже ненав'язливе пульсування
+    signalSteadyTimer = setTimeout(() => overlay.classList.add("signal-overlay-steady"), 1600);
+  } else {
+    const durationMs = Number(signal.durationMs) > 0 ? Number(signal.durationMs) : 3000;
+    signalEffectTimer = setTimeout(hideSignalEffect, durationMs);
+  }
+}
+
+/**
+ * Обробка персонального поля signals стану для учня: показується найновіший
+ * активний сигнал (індивідуальний чи груповий); коли він завершується —
+ * наступний, якщо є; без активних сигналів оверлей приховується. Зупинка
+ * показу на сервері очищає перелік — оверлей зникає автоматично.
+ */
+function applyStudentSignals(list) {
+  const active = Array.isArray(list) ? list : [];
+  if (!active.length) {
+    if (currentSignalId) hideSignalEffect();
+    return;
+  }
+  const primary = active.slice()
+    .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))[0];
+  if (currentSignalId === primary.id) return;
+  showSignalEffect(primary);
+}
+
+/** Попередній перегляд викладача — локально, без надсилання учням */
+function previewSignal(sig) {
+  showSignalEffect({
+    id: "preview_" + Date.now(),
+    text: sig.text,
+    color: sig.color,
+    opacity: sig.opacity,
+    // Для «до зняття» показ обмежується, щоб попередній перегляд не завис
+    durationMs: sig.untilDismiss ? 5000 : sig.duration * 1000,
+    untilDismiss: false,
+    startedAt: Date.now()
+  });
+}
+
+// --- Форма створення/редагування та дії зі списком ---
+
+function openSignalForm(sig) {
+  const form = $("signalForm");
+  if (!form) return;
+  form.dataset.editingId = sig ? sig.id : "";
+  if ($("signalFormStatus")) $("signalFormStatus").textContent = "";
+  fillSignalIconSelect();
+  const set = (id, value) => { if ($(id)) $(id).value = value; };
+  const setChecked = (id, value) => { if ($(id)) $(id).checked = value; };
+  set("signalTextInput", sig ? sig.text : "");
+  set("signalIconSelect", sig ? sig.icon : (signalIcons[0] || "monitor-play"));
+  set("signalColorInput", sig ? sig.color : "#e03131");
+  set("signalOpacityInput", String(sig ? sig.opacity : 75));
+  set("signalDurationInput", String(sig ? sig.duration : 3));
+  setChecked("signalUntilDismissInput", sig ? Boolean(sig.untilDismiss) : false);
+  setChecked("signalForAllInput", sig ? Boolean(sig.forAll) : false);
+  form.style.display = "grid";
+  if ($("signalTextInput")) $("signalTextInput").focus();
+}
+
+function closeSignalForm() {
+  const form = $("signalForm");
+  if (!form) return;
+  form.style.display = "none";
+  form.dataset.editingId = "";
+}
+
+/** POST-запит викладача зі заголовком PIN; повертає data або null + тост */
+async function signalApiCall(url, payload) {
+  const headers = { "Content-Type": "application/json" };
+  if (pin) headers["X-Portal-Pin"] = pin;
+  const response = await api(url, { method: "POST", headers, body: JSON.stringify(payload) });
+  const data = await response.json();
+  if (!response.ok) {
+    showToast("⚠️ " + (data.message || "Не вдалося виконати дію"), "warning");
+    return null;
+  }
+  return data;
+}
+
+async function saveSignalForm() {
+  const form = $("signalForm");
+  const editingId = (form && form.dataset.editingId) || "";
+  const text = $("signalTextInput") ? $("signalTextInput").value.trim() : "";
+  if (!text) {
+    if ($("signalFormStatus")) $("signalFormStatus").textContent = "Вкажіть напис сигналу.";
+    return;
+  }
+  const payload = {
+    text,
+    icon: $("signalIconSelect") ? $("signalIconSelect").value : "monitor-play",
+    color: $("signalColorInput") ? $("signalColorInput").value : "#e03131",
+    opacity: $("signalOpacityInput") ? Number($("signalOpacityInput").value) : 75,
+    duration: $("signalDurationInput") ? Number($("signalDurationInput").value) : 3,
+    untilDismiss: $("signalUntilDismissInput") ? $("signalUntilDismissInput").checked : false,
+    forAll: $("signalForAllInput") ? $("signalForAllInput").checked : false
+  };
+  try {
+    const url = editingId ? "/api/signals/update" : "/api/signals/create";
+    if (editingId) payload.signalId = editingId;
+    const data = await signalApiCall(url, payload);
+    if (!data) {
+      if ($("signalFormStatus")) $("signalFormStatus").textContent = "Не вдалося зберегти сигнал.";
+      return;
+    }
+    closeSignalForm();
+    await loadSignalConfig();
+  } catch {
+    if (sessionExpiredHandled) return;
+    if ($("signalFormStatus")) $("signalFormStatus").textContent = "Немає зв'язку зі сервером.";
+  }
+}
+
+// --- Делеговані обробники (кнопки створюються/перестворюються динамічно) ---
+
+document.addEventListener("click", (event) => {
+  if (!event.target || !event.target.closest) return;
+  const btn = event.target.closest(".signal-send-btn, .group-signal-btn");
+  if (!btn) return;
+  void handleSignalButtonClick(btn.dataset.signalId, btn.dataset.target);
+});
+
+document.addEventListener("click", async (event) => {
+  if (!event.target || !event.target.closest) return;
+  const btn = event.target.closest("#signalList [data-act]");
+  if (!btn) return;
+  const item = btn.closest(".signal-item");
+  const sig = item ? signalConfig.find((s) => s.id === item.dataset.id) : null;
+  if (!sig) return;
+  const act = btn.dataset.act;
+  if (act === "preview") { previewSignal(sig); return; }
+  if (act === "edit") { openSignalForm(sig); return; }
+  if (act === "up" || act === "down") {
+    if (await signalApiCall("/api/signals/reorder", { signalId: sig.id, direction: act })) {
+      await loadSignalConfig();
+    }
+    return;
+  }
+  if (act === "delete") {
+    if (!window.confirm("Видалити сигнал «" + sig.text + "»?")) return;
+    if (await signalApiCall("/api/signals/delete", { signalId: sig.id })) {
+      await loadSignalConfig();
+    }
+  }
+});
+
+document.addEventListener("DOMContentLoaded", () => {
+  if ($("signalAddBtn")) $("signalAddBtn").addEventListener("click", () => openSignalForm(null));
+  if ($("signalSaveBtn")) $("signalSaveBtn").addEventListener("click", () => void saveSignalForm());
+  if ($("signalCancelBtn")) $("signalCancelBtn").addEventListener("click", closeSignalForm);
+});
 
 // ---------------------------------------------------------------------------
 // API
@@ -683,6 +1063,8 @@ function updateRoleUI() {
   if (isDemoPage) {
     if ($("teacherDemoControls")) $("teacherDemoControls").style.display = isTeacher ? "flex" : "none";
     if ($("teacherBroadcastPanel")) $("teacherBroadcastPanel").style.display = isTeacher ? "block" : "none";
+    // Issue #79: підблок «Сигнали учням» — тільки викладач, одразу під «Матеріали»
+    if ($("teacherSignalsPanel")) $("teacherSignalsPanel").style.display = isTeacher ? "block" : "none";
     if ($("demoGridContainer")) {
       $("demoGridContainer").classList.toggle("student-demo-layout", !isTeacher);
     }
@@ -1999,6 +2381,15 @@ async function pollStateCore(force = false) {
     // серверним станом (початок показу розгортає, зупинка повертає звичайний
     // режим); у викладача цей режим не вмикається
     if (role !== "teacher") setDemoFocus(Boolean(state.file));
+
+    // Issue #79: активні сигнали — персональна частина стану від /api/state.
+    // Учневі сервер віддає лише свої записи (групові та адресовані) і одразу
+    // показує/ховає оверлей; викладачу — усі (активні стани іконок у списку)
+    if (role === "teacher") {
+      applyTeacherSignals(state.signals);
+    } else {
+      applyStudentSignals(state.signals);
+    }
 
     // Issue #63 (доробка): каталог учня перечитується за ревізією стану —
     // публікація/приховування матеріалу викладачем оновлює список без

@@ -6,6 +6,8 @@ const presenceService = require("./presenceService");
 // отримують прихований матеріал у каталозі, тому клієнт не може сам знайти
 // назву в /api/files — сервер віддає її у стані (лише назва, без доступу).
 const fileService = require("./fileService");
+// Issue #79: активні сигнали учням очищаються разом зі зупинкою показу
+const signalService = require("./signalService");
 
 class StateService {
   constructor() {
@@ -81,6 +83,10 @@ class StateService {
     };
     // Issue #63 (доробка §3): скидаємо прапорець прихованості на старті
     this.wasHiddenAtDemoStart = false;
+    // Issue #79: завершення демонстрації прибирає й активні сигнали — учні не
+    // отримують сигнали, надіслані для показу, що вже завершився (і автозупинка
+    // при виході викладача проходить цей самий шлях)
+    signalService.clearActive();
     this.revision++;
     return { ok: true, revision: this.revision, stopped: true };
   }
@@ -155,6 +161,8 @@ class StateService {
       };
       // Issue #63 (доробка §3): скидаємо прапорець прихованості на старті
       this.wasHiddenAtDemoStart = false;
+      // Issue #79: матеріал показу зник/видалений — активні сигнали прибираємо
+      signalService.clearActive();
       this.revision++;
     }
   }

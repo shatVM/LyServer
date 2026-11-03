@@ -1,6 +1,8 @@
 const express = require("express");
 const apiController = require("../controllers/apiController");
 const presenceController = require("../controllers/presenceController");
+// Issue #79: універсальні візуальні сигнали учням (усі операції — лише з PIN)
+const signalController = require("../controllers/signalController");
 
 const router = express.Router();
 
@@ -31,5 +33,16 @@ router.get("/slides/info", (req, res) => apiController.getSlideInfo(req, res));
 router.post("/presence/heartbeat", (req, res) => presenceController.heartbeat(req, res));
 router.post("/presence/teacher", (req, res) => presenceController.teacherHeartbeat(req, res));
 router.get("/presence/students", (req, res) => presenceController.getStudents(req, res));
+
+// Issue #79: універсальні візуальні сигнали учням (конфігурація + доставка).
+// Кожна операція перевіряє PIN усередині контролера (приховування елементів
+// в інтерфейсі не є захистом); читання стану — /api/state (персональне поле).
+router.get("/signals", (req, res) => signalController.getConfig(req, res));
+router.post("/signals/create", (req, res) => signalController.create(req, res));
+router.post("/signals/update", (req, res) => signalController.update(req, res));
+router.post("/signals/delete", (req, res) => signalController.remove(req, res));
+router.post("/signals/reorder", (req, res) => signalController.reorder(req, res));
+router.post("/signals/send", (req, res) => signalController.send(req, res));
+router.post("/signals/dismiss", (req, res) => signalController.dismiss(req, res));
 
 module.exports = router;

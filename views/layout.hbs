@@ -20,6 +20,16 @@
   <!-- Toast container (teacher disconnect notifications) -->
   <div id="toastContainer" class="toast-container"></div>
 
+  <!-- Issue #79: оверлей візуального сигналу учневі — рамка зі світінням по
+       периметру доступної області перегляду та напис по центру поверх
+       матеріалу (pointer-events:none, тому керування показом не перекривається).
+       Прихований, поки сервер не надішле активний сигнал; параметри (колір,
+       прозорість) задаються змінними при показу -->
+  <div id="signalOverlay" class="signal-overlay" style="display:none" role="status" aria-live="polite">
+    <div class="signal-overlay-frame" aria-hidden="true"></div>
+    <div class="signal-overlay-text"></div>
+  </div>
+
   <!-- Issue #75: системний повноекранний режим спільної демонстрації на
        пристрої учня. Браузер вмикає Fullscreen API лише за прямого жесту
        користувача, тому кнопка, а не віддалений запуск; прихована, поки на

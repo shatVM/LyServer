@@ -4,6 +4,7 @@
  */
 
 const presenceService = require("../services/presenceService");
+const sessionService = require("../services/sessionService");
 const auth = require("../utils/auth");
 
 class PresenceController {
@@ -18,7 +19,8 @@ class PresenceController {
    * а анонімні клієнти не можуть наповнювати список присутності.
    */
   heartbeat(req, res) {
-    if (!auth.requireViewer(req, res)) return;
+    const viewer = auth.requireViewer(req, res);
+    if (!viewer) return;
     const { studentId, name } = req.body || {};
     if (!studentId || typeof studentId !== "string") {
       return res.status(400).json({ ok: false, message: "Відсутній studentId" });
@@ -33,6 +35,10 @@ class PresenceController {
     // від клієнта ігнорується. `::ffff:`-префікс прибирається для показу.
     const ip = String(auth.clientKey(req) || "").replace(/^::ffff:/, "");
     presenceService.heartbeat(studentId.slice(0, 64), safeName, active, ip);
+    // Issue #79: studentId прив'язується до СЕРВЕРНОЇ сесії (лише власник
+    // cookie може зробити цю прив'язку) — далі /api/state віддає сигнали саме
+    // цьому клієнту, а значення з тіла запиту не дає змоги отримати чужий сигнал
+    if (viewer.role === "student") sessionService.bindStudent(viewer.id, studentId);
     res.json({ ok: true });
   }
 

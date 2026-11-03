@@ -5,6 +5,7 @@ const { canViewMedia } = require("../utils/mediaAccess");
 const fileService = require("../services/fileService");
 const stateService = require("../services/stateService");
 const presenceService = require("../services/presenceService");
+const signalService = require("../services/signalService");
 const slideService = require("../services/slideService");
 
 /**
@@ -87,11 +88,19 @@ class ApiController {
    * без входу — 401, після перезапуску сервера старі сесії теж дають 401.
    */
   getState(req, res) {
-    if (!auth.requireViewer(req, res)) return;
+    const identity = auth.requireViewer(req, res);
+    if (!identity) return;
     // Issue #63 (аудит кешування): стан показу — приватні дані сесії,
     // кешувати його не можна (інакше клієнт міг би бачити застарілий стан)
     res.set("Cache-Control", "no-store");
-    res.json(stateService.getState());
+    const state = stateService.getState();
+    // Issue #79: активні сигнали — ПЕРСОНАЛЬНА частина стану, яка обчислюється
+    // для конкретного запитувача. Учневі віддаються лише групові та
+    // адресовані йому записи (індивідуальний сигнал не потрапляє в спільний
+    // стан інших учнів; ціль береться з прив'язки сесії в heartbeat, а не з
+    // запиту), викладачу — усі (для активних станів іконок у списку учнів).
+    state.signals = signalService.getVisibleTo(identity);
+    res.json(state);
   }
 
   updateControl(req, res) {

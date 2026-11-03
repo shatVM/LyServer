@@ -39,6 +39,15 @@ function heartbeat(id, name, active = true, ip = "") {
   });
 }
 
+/**
+ * Issue #79: чи відомий учень у списку присутності (наявний ідентифікатор —
+ * єдина перевірка адресата при надсиланні сигналу; онлайн-статус не обов'язковий,
+ * сигнал діятиме, коли учень повернеться, або завершиться за тривалістю).
+ */
+function hasStudent(id) {
+  return Boolean(id) && students.has(id);
+}
+
 function getStudents() {
   const now = Date.now();
   return Array.from(students.values()).map(s => ({
@@ -87,4 +96,4 @@ function cleanup() {
 // Run cleanup every minute
 setInterval(cleanup, 60000).unref();
 
-module.exports = { heartbeat, getStudents, TIMEOUT_MS, markTeacherSeen, isTeacherOnline, TEACHER_TIMEOUT_MS };
+module.exports = { heartbeat, getStudents, hasStudent, TIMEOUT_MS, markTeacherSeen, isTeacherOnline, TEACHER_TIMEOUT_MS };
