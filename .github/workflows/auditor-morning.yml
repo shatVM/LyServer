@@ -115,7 +115,15 @@ jobs:
               print(f"Report for {today} already exists; skipping duplicate.")
               raise SystemExit(0)
 
-          issues_response = gh("issues?state=open&per_page=100")
+          # Fetch every page so the most recently updated open issue is not missed.
+          issues_response = []
+          page = 1
+          while True:
+              page_items = gh(f"issues?state=open&per_page=100&page={page}")
+              issues_response.extend(page_items)
+              if len(page_items) < 100:
+                  break
+              page += 1
           issues = [i for i in issues_response if "pull_request" not in i]
           issues.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
           branches = gh("branches?per_page=100")
