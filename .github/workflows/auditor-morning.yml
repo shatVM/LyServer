@@ -85,7 +85,10 @@ jobs:
                   ) from None
 
           def gh(path):
-              return request(f"{api}/repos/{repo}/{path}")
+              url = f"{api}/repos/{repo}"
+              if path:
+                  url += f"/{path.lstrip('/')}"
+              return request(url)
 
           issue_comments = gh(f"issues/{issue_number}/comments?per_page=100")
           marker = f"## Ранковий аудит — {today}"
