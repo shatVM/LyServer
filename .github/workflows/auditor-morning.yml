@@ -90,6 +90,24 @@ jobs:
                   url += f"/{path.lstrip('/')}"
               return request(url)
 
+          # Issue #73 is the authoritative audit policy. Read its current body on every run.
+          policy_issue = gh(f"issues/{issue_number}")
+          policy_body = policy_issue.get("body") or ""
+          required_policy_sections = [
+              "## Призначення",
+              "## Обов’язковий формат",
+              "## Функціональні й дизайнерські ідеї",
+              "## Межі повноважень",
+          ]
+          missing_policy = [section for section in required_policy_sections if section not in policy_body]
+          if missing_policy:
+              raise RuntimeError(
+                  "Issue #73 audit policy is incomplete; missing sections: "
+                  + ", ".join(missing_policy)
+              )
+          if "лише аналізує та радить" not in policy_body or "Telegram-повідомлення" not in policy_body:
+              raise RuntimeError("Issue #73 is missing the Auditor authority or Telegram requirements.")
+
           issue_comments = gh(f"issues/{issue_number}/comments?per_page=100")
           marker = f"## Ранковий аудит — {today}"
           if any(marker in c.get("body", "") and c.get("user", {}).get("type") == "Bot"
@@ -97,7 +115,15 @@ jobs:
               print(f"Report for {today} already exists; skipping duplicate.")
               raise SystemExit(0)
 
-          issues_response = gh("issues?state=open&per_page=100")
+          # Fetch every page so the most recently updated open issue is not missed.
+          issues_response = []
+          page = 1
+          while True:
+              page_items = gh(f"issues?state=open&per_page=100&page={page}")
+              issues_response.extend(page_items)
+              if len(page_items) < 100:
+                  break
+              page += 1
           issues = [i for i in issues_response if "pull_request" not in i]
           issues.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
           branches = gh("branches?per_page=100")
@@ -131,10 +157,21 @@ jobs:
               for w in workflow_response.get("workflows", [])
           ]
 
+          failed_runs = [run for run in runs if run.get("conclusion") == "failure"]
+          active_issue = issues[0] if issues else None
+          summary = (
+              f"Останній коміт: {latest_sha[:7]} ({latest_message}); "
+              f"відкритих задач: {len(issues)}; невдалих Actions: {len(failed_runs)}."
+          )
+
           report = [
               "Auditor",
               "",
               f"## Ранковий аудит — {today}",
+              "",
+              f"**Короткий підсумок:** {summary}",
+              "",
+              "**Правила:** перед аудитом прочитано актуальний опис Issue #73; він використаний як джерело вимог до формату та повноважень Auditor.",
               "",
               "**Тип:** автоматичний аудит доказів GitHub; файли й робочий код не змінювалися.",
               "",
@@ -145,19 +182,28 @@ jobs:
               f"- Останній коміт: [`{latest_sha[:7]}`]({latest_commit.get('html_url', f'https://github.com/{repo}/commits/{default_branch_name}')}) — {latest_message} ({latest_date}).",
               f"- Workflow у відповіді GitHub API: {', '.join(workflow_names) if workflow_names else 'не отримано'}.",
               "",
-              "### Відкриті Issues — останні оновлені",
+              "### Активна задача та відкриті Issues",
+              *([f"- Найсвіжіша активна задача за updated_at: [#{active_issue['number']} — {active_issue['title']}]({active_issue['html_url']})."] if active_issue else ["- Відкритих задач не знайдено у відповіді API."]),
               *(issue_lines or ["- Відкритих Issues не знайдено у відповіді API."]),
               "",
               "### Останні запуски GitHub Actions",
               *(workflow_lines or ["- Запуски не повернуто API; це не означає, що перевірки пройшли."]),
               "",
-              "### Обмеження та ризики",
+              "### Ризики та блокери",
+              *( [f"- Є невдалі запуски Actions: {len(failed_runs)}; перевірити їхні логи перед висновком про справність CI."] if failed_runs else ["- Серед останніх повернутих запусків Actions немає статусу failure; це не гарантує відсутності інших проблем."] ),
+              "- Аудит використовує факти, доступні через GitHub API; він не виконує локальний запуск тестів і не перевіряє вміст кожного документа.",
+              "",
+              "### Практичні ідеї",
+              "- Нові UX/дизайн-ідеї додаються лише за наявності конкретного підтвердження в активних задачах, обговореннях або перевірених матеріалах; без доказів нові пропозиції не вигадуються.",
+              "",
+              "### Обмеження перевірки",
               "- Цей workflow формує звіт детерміновано з GitHub API; зовнішня модель та `OPENAI_API_KEY` не потрібні.",
               "- `npm test` та браузерні тести цим workflow не запускаються. Їхній стан можна оцінювати лише за відповідними CI-запусками вище.",
               "- Список гілок і Issues обмежений сторінкою API; це оперативний огляд, а не повний аудит кожного рядка коду.",
               "",
-              "### Наступна дія",
-              "- Переглянути відкриті Issues та деталі останніх відповідних CI-запусків перед прийняттям рішень.",
+              "### Конкретні наступні кроки",
+              *( [f"- Відкрити логи невдалих Actions: {', '.join(run.get('html_url', '') for run in failed_runs[:3])}."] if failed_runs else ["- Переглянути найактуальнішу відкриту задачу та відповідні перевірки перед прийняттям рішень."] ),
+              "- Перевірити документацію, пов’язану з активною задачею, перш ніж рекомендувати зміни; у цьому автоматичному огляді вміст документації не сканується.",
               "",
               f"[Відкрити цей запуск Auditor]({os.environ['GITHUB_RUN_URL']})",
           ]
@@ -180,9 +226,9 @@ jobs:
               raise SystemExit(0)
 
           message = (
-              f"🔎 Auditor — ранковий аудит {today}\n"
-              f"Відкритих Issues: {len(issues)}; гілок: {len(branches)}\n"
-              f"{comment_url}\n"
+              f"🔎 Auditor — {today}\n"
+              f"{summary}\n"
+              f"Звіт: {comment_url}\n"
               f"Actions: {os.environ['GITHUB_RUN_URL']}"
           )
           form = urllib.parse.urlencode({
