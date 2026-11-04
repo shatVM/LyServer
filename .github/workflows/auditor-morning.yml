@@ -218,9 +218,9 @@ jobs:
               raise SystemExit(0)
 
           message = (
-              f"🔎 Auditor — ранковий аудит {today}\n"
-              f"Відкритих Issues: {len(issues)}; гілок: {len(branches)}\n"
-              f"{comment_url}\n"
+              f"🔎 Auditor — {today}\n"
+              f"{summary}\n"
+              f"Звіт: {comment_url}\n"
               f"Actions: {os.environ['GITHUB_RUN_URL']}"
           )
           form = urllib.parse.urlencode({
