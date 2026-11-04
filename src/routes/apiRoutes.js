@@ -3,6 +3,8 @@ const apiController = require("../controllers/apiController");
 const presenceController = require("../controllers/presenceController");
 // Issue #79: універсальні візуальні сигнали учням (усі операції — лише з PIN)
 const signalController = require("../controllers/signalController");
+// Issue #83: MVP системи тестування під час демонстрації
+const testingController = require("../controllers/testingController");
 
 const router = express.Router();
 
@@ -44,5 +46,13 @@ router.post("/signals/delete", (req, res) => signalController.remove(req, res));
 router.post("/signals/reorder", (req, res) => signalController.reorder(req, res));
 router.post("/signals/send", (req, res) => signalController.send(req, res));
 router.post("/signals/dismiss", (req, res) => signalController.dismiss(req, res));
+
+// Issue #83: тестування під час демонстрації. Старт/завершення — лише з PIN;
+// відповідь учня — лише з чинною сесією (studentId із прив'язки сесії, не з
+// тіла запиту). Читання стану — state.testing у GET /api/state, без нового
+// ендпоінту: той самий механізм опитування, що й решта стану демонстрації.
+router.post("/testing/start", (req, res) => testingController.start(req, res));
+router.post("/testing/finish", (req, res) => testingController.finish(req, res));
+router.post("/testing/answer", (req, res) => testingController.answer(req, res));
 
 module.exports = router;

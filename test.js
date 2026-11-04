@@ -1787,6 +1787,349 @@ async function main() {
       });
       check("Issue #63: heartbeat викладача з PIN → 200", r.status === 200, `status=${r.status}`);
 
+      // 7г. Issue #83: MVP системи тестування під час демонстрації.
+      // Повний цикл на ОСНОВНОМУ екземплярі: старт (3/4 варіанти) → відповіді
+      // на парному слайді → автозачинення на непарному → ручне завершення →
+      // збереження результатів після зупинки показу → очищення при новому старті.
+      const t83Demo = await (await fetch(base + "/demonstration")).text();
+      const t83Css = await (await fetch(base + "/css/style.css")).text();
+      const t83Js = await (await fetch(base + "/js/app.js")).text();
+      const t83StateSrc = require("node:fs").readFileSync(
+        require("node:path").join(__dirname, "src", "services", "stateService.js"),
+        "utf-8"
+      );
+
+      check(
+        "Issue #83: розмітка — панель вчителя і кнопки відповіді учня",
+        t83Demo.includes('id="testPanel"') &&
+          t83Demo.includes('id="testToggleBtn"') &&
+          t83Demo.includes('id="testOpt3"') &&
+          t83Demo.includes('id="testOpt4"') &&
+          t83Demo.includes('id="testStatus"') &&
+          t83Demo.includes('id="testHistogram"') &&
+          t83Demo.includes('id="testAnswerBar"')
+      );
+      check(
+        "Issue #83: панель тестування — усередині teacher-only блоку «Учні»",
+        t83Demo.indexOf('id="studentsSideBlock"') !== -1 &&
+          t83Demo.indexOf('id="testPanel"') > t83Demo.indexOf('id="studentsSideBlock"')
+      );
+      check(
+        "Issue #83: CSS кнопок відповіді, гістограми, бейджа та рядка учня",
+        t83Css.includes(".test-answer-btn") &&
+          t83Css.includes(".test-panel") &&
+          t83Css.includes(".test-histogram") &&
+          t83Css.includes(".student-test-answer") &&
+          t83Css.includes("#viewer[data-test-answer]")
+      );
+      check(
+        "Issue #83: клієнт — стан, рендер панелі/кнопок, три операції",
+        t83Js.includes("function applyTestingState") &&
+          t83Js.includes("function renderTestingPanel") &&
+          t83Js.includes("function renderTestAnswerBar") &&
+          t83Js.includes("function updateViewerTestBadge") &&
+          t83Js.includes("/api/testing/start") &&
+          t83Js.includes("/api/testing/answer") &&
+          t83Js.includes("/api/testing/finish")
+      );
+      check(
+        "Issue #83: клієнт надсилає відповідь лише за серверного accepting",
+        t83Js.includes("view.accepting !== true")
+      );
+      check(
+        "Issue #83: вказівник запитання оновлюється лише при зміні слайда",
+        t83StateSrc.includes("testingService.syncSlide(this.shared.file, this.shared.page);")
+      );
+
+      // --- Захист операцій (PIN для старту/завершення, сесія для відповіді) ---
+      r = await fetch(base + "/api/testing/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ options: 3 })
+      });
+      check("Issue #83: старт тестування без PIN → 403", r.status === 403, `status=${r.status}`);
+
+      r = await fetch(base + "/api/testing/finish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN })
+      });
+      check("Issue #83: завершення незапущеного тестування → 409", r.status === 409, `status=${r.status}`);
+
+      r = await fetch(base + "/api/testing/answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ variant: 0 })
+      });
+      check("Issue #83: відповідь без сесії → 401", r.status === 401, `status=${r.status}`);
+
+      r = await fetch(base + "/api/testing/answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...tSess() },
+        body: JSON.stringify({ variant: 0 })
+      });
+      check("Issue #83: відповідь викладача → 403", r.status === 403, `status=${r.status}`);
+
+      // Друга сесія учня БЕЗ heartbeat: studentId ще не прив'язаний до сесії
+      const t83Unbound = await studentLogin(base, "Учень без прив'язки", false);
+      r = await fetch(base + "/api/testing/answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: "ly_session=" + t83Unbound.cookie },
+        body: JSON.stringify({ variant: 0 })
+      });
+      check("Issue #83: відповідь до прив'язки studentId → 409", r.status === 409, `status=${r.status}`);
+
+      // --- Показ на ПАРНОМУ слайді: там саме запитання ---
+      r = await fetch(`${base}/api/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, file: fileId, kind: "slides", page: 2 })
+      });
+      check("Issue #83: демонстрація на слайді 2 (запитання)", r.status === 200, `status=${r.status}`);
+
+      r = await fetch(base + "/api/testing/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, options: 5 })
+      });
+      check("Issue #83: кількість варіантів лише 3 або 4 → 400", r.status === 400, `status=${r.status}`);
+
+      let t83Start = await (await fetch(base + "/api/testing/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, options: 4 })
+      })).json();
+      check(
+        "Issue #83: старт (4 варіанти) — active, options=4, запитання = слайд 2",
+        Boolean(t83Start.testing) && t83Start.testing.status === "active" &&
+          t83Start.testing.options === 4 &&
+          Boolean(t83Start.testing.question) && t83Start.testing.question.page === 2,
+        JSON.stringify(t83Start.testing)
+      );
+
+      r = await fetch(base + "/api/testing/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, options: 3 })
+      });
+      check("Issue #83: повторний старт під час активного → 409", r.status === 409, `status=${r.status}`);
+
+      // Персональний стан: вчитель бачить гістограму, учень — лише свій вибір
+      let t83TeacherState = await (await fetch(base + "/api/state", { headers: tSess() })).json();
+      let t83StudentState = await (await fetch(base + "/api/state", { headers: sess() })).json();
+      check(
+        "Issue #83: state.testing викладача — гістограма та відповіді",
+        Boolean(t83TeacherState.testing) && t83TeacherState.testing.status === "active" &&
+          Array.isArray(t83TeacherState.testing.histogram) &&
+          t83TeacherState.testing.histogram.length === 4 &&
+          Boolean(t83TeacherState.testing.answers),
+        JSON.stringify(t83TeacherState.testing)
+      );
+      check(
+        "Issue #83: state.testing учня — accepting і свій вибір, без чужих даних",
+        Boolean(t83StudentState.testing) && t83StudentState.testing.accepting === true &&
+          t83StudentState.testing.yourAnswer === null &&
+          t83StudentState.testing.answers === undefined &&
+          t83StudentState.testing.histogram === undefined,
+        JSON.stringify(t83StudentState.testing)
+      );
+
+      // --- Відповідь першого учня (сесія уже прив'язана до s_test_1) ---
+      r = await fetch(base + "/api/testing/answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...sess() },
+        body: JSON.stringify({ variant: 0 })
+      });
+      t83StudentState = await (await fetch(base + "/api/state", { headers: sess() })).json();
+      check(
+        "Issue #83: відповідь учня прийнято (варіант 0 → yourAnswer=0)",
+        r.status === 200 && t83StudentState.testing.yourAnswer === 0,
+        `status=${r.status}, yourAnswer=${t83StudentState.testing.yourAnswer}`
+      );
+
+      // Повторне натискання ЗАМІНЮЄ вибір (у статистиці — лише останній)
+      await fetch(base + "/api/testing/answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...sess() },
+        body: JSON.stringify({ variant: 2 })
+      });
+
+      // Другий учень: окрема сесія + heartbeat для прив'язки studentId
+      const t83Second = await studentLogin(base, "Другий Учень", false);
+      const t83SecondCookie = { Cookie: "ly_session=" + t83Second.cookie };
+      await fetch(`${base}/api/presence/heartbeat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...t83SecondCookie },
+        body: JSON.stringify({ studentId: "s_test_83b", name: "Другий Учень", active: true })
+      });
+      r = await fetch(base + "/api/testing/answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...t83SecondCookie },
+        body: JSON.stringify({ variant: 1 })
+      });
+
+      // Обидва стани — ПІСЛЯ обох відповідей (стан персональний, не спільний)
+      const t83SecondState = await (await fetch(base + "/api/state", { headers: t83SecondCookie })).json();
+      t83StudentState = await (await fetch(base + "/api/state", { headers: sess() })).json();
+      t83TeacherState = await (await fetch(base + "/api/state", { headers: tSess() })).json();
+      const t83Histogram = (t83TeacherState.testing || {}).histogram;
+      check(
+        "Issue #83: гістограма — два учні, заміна вибору врахована лише один раз",
+        Array.isArray(t83Histogram) && t83Histogram.join(",") === "0,1,1,0",
+        JSON.stringify(t83Histogram)
+      );
+      check(
+        "Issue #83: відповіді вчителя — по одному актуальному вибору на учня",
+        Object.keys(t83TeacherState.testing.answers).length === 2 &&
+          t83TeacherState.testing.answers.s_test_83b === 1 &&
+          Object.keys(t83TeacherState.testing.answers)
+            .some((id) => t83TeacherState.testing.answers[id] === 2),
+        JSON.stringify(t83TeacherState.testing.answers)
+      );
+      check(
+        "Issue #83: у кожного учня у стані ЛИШЕ його власний вибір",
+        t83SecondState.testing.yourAnswer === 1 && t83SecondState.testing.answers === undefined &&
+          t83StudentState.testing.yourAnswer === 2,
+        JSON.stringify({ second: t83SecondState.testing, first: t83StudentState.testing })
+      );
+
+      // Невідомий варіант (для 4 варіантів допустимі 0…3)
+      r = await fetch(base + "/api/testing/answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...sess() },
+        body: JSON.stringify({ variant: 7 })
+      });
+      check("Issue #83: невідомий варіант відповіді → 400", r.status === 400, `status=${r.status}`);
+
+      // --- Вступний слайд (1): запитання немає, але результати не зникають ---
+      await fetch(`${base}/api/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, file: fileId, kind: "slides", page: 1 })
+      });
+      t83StudentState = await (await fetch(base + "/api/state", { headers: sess() })).json();
+      t83TeacherState = await (await fetch(base + "/api/state", { headers: tSess() })).json();
+      check(
+        "Issue #83: слайд 1 — приймання зачинене, запитання та відповіді збережені",
+        t83StudentState.testing.accepting === false &&
+          Boolean(t83TeacherState.testing.question) &&
+          t83TeacherState.testing.question.page === 2 &&
+          (t83TeacherState.testing.histogram || []).join(",") === "0,1,1,0",
+        JSON.stringify({ student: t83StudentState.testing, teacher: t83TeacherState.testing })
+      );
+
+      // --- Непарний слайд-відповідь (3): приймання зачинене, вибір свій лишається ---
+      await fetch(`${base}/api/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, file: fileId, kind: "slides", page: 3 })
+      });
+      t83StudentState = await (await fetch(base + "/api/state", { headers: sess() })).json();
+      r = await fetch(base + "/api/testing/answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...sess() },
+        body: JSON.stringify({ variant: 3 })
+      });
+      check(
+        "Issue #83: на слайді-відповіді приймання зачинене (відповідь → 409)",
+        t83StudentState.testing.accepting === false &&
+          t83StudentState.testing.yourAnswer === 2 && r.status === 409,
+        `status=${r.status}, accepting=${t83StudentState.testing.accepting}, yourAnswer=${t83StudentState.testing.yourAnswer}`
+      );
+
+      // Повернення на парний слайд відкриває приймання ЗНОВУ (тестування не завершено)
+      await fetch(base + "/api/presence/teacher", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Portal-Pin": PIN },
+        body: "{}"
+      });
+      await fetch(`${base}/api/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, file: fileId, kind: "slides", page: 2 })
+      });
+      t83StudentState = await (await fetch(base + "/api/state", { headers: sess() })).json();
+      check(
+        "Issue #83: повернення на запитання відкриває приймання знову",
+        t83StudentState.testing.accepting === true,
+        `accepting=${t83StudentState.testing.accepting}`
+      );
+
+      // --- Ручне завершення: відповіді блокуються, результати лишаються ---
+      await fetch(base + "/api/presence/teacher", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Portal-Pin": PIN },
+        body: "{}"
+      });
+      const t83Finish = await (await fetch(base + "/api/testing/finish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN })
+      })).json();
+      t83StudentState = await (await fetch(base + "/api/state", { headers: sess() })).json();
+      t83TeacherState = await (await fetch(base + "/api/state", { headers: tSess() })).json();
+      r = await fetch(base + "/api/testing/answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...sess() },
+        body: JSON.stringify({ variant: 0 })
+      });
+      check(
+        "Issue #83: ручне завершення — status=finished, приймання заблоковано",
+        t83Finish.testing.status === "finished" &&
+          t83StudentState.testing.status === "finished" &&
+          t83StudentState.testing.accepting === false && r.status === 409,
+        `finish=${t83Finish.testing.status}, student=${JSON.stringify(t83StudentState.testing)}, answer=${r.status}`
+      );
+      check(
+        "Issue #83: після завершення вчитель бачить результати запитання",
+        Boolean(t83TeacherState.testing.question) &&
+          (t83TeacherState.testing.histogram || []).join(",") === "0,1,1,0",
+        JSON.stringify(t83TeacherState.testing)
+      );
+
+      // --- Зупинка показу НЕ знищує вказівник і результати останнього запитання ---
+      await fetch(`${base}/api/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, stop: true })
+      });
+      const t83Stopped = await (await fetch(base + "/api/state", { headers: tSess() })).json();
+      const t83StoppedStudent = await (await fetch(base + "/api/state", { headers: sess() })).json();
+      check(
+        "Issue #83: після зупинки показу запитання та відповіді збережені",
+        t83Stopped.file === "" &&
+          Boolean(t83Stopped.testing.question) && t83Stopped.testing.question.page === 2 &&
+          (t83Stopped.testing.histogram || []).join(",") === "0,1,1,0" &&
+          t83StoppedStudent.testing.accepting === false &&
+          t83StoppedStudent.testing.yourAnswer === 2,
+        JSON.stringify({ teacher: t83Stopped.testing, student: t83StoppedStudent.testing })
+      );
+
+      // --- Нове тестування: попередні відповіді очищаються (3 варіанти) ---
+      const t83Restart = await (await fetch(base + "/api/testing/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, options: 3 })
+      })).json();
+      t83TeacherState = await (await fetch(base + "/api/state", { headers: tSess() })).json();
+      t83StudentState = await (await fetch(base + "/api/state", { headers: sess() })).json();
+      check(
+        "Issue #83: нове тестування (3 варіанти) — попередні відповіді очищено",
+        t83Restart.testing.status === "active" && t83Restart.testing.options === 3 &&
+          t83TeacherState.testing.question === null &&
+          !Array.isArray(t83TeacherState.testing.histogram) &&
+          t83StudentState.testing.yourAnswer === null &&
+          t83StudentState.testing.accepting === false,
+        JSON.stringify({ restart: t83Restart.testing, teacher: t83TeacherState.testing })
+      );
+
+      // Прибирання: активне тестування завершуємо, щоб не лишати стан «active»
+      await fetch(base + "/api/testing/finish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN })
+      });
+
       // Issue #63: автозупинка демонстрації, коли вчитель пішов. Окремий
       // екземпляр із коротким тайм-аутом присутності — щоб не впливати на
       // інші тести; той самий каталог матеріалів на диску (fileId існує на

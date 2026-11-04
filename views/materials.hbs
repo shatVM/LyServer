@@ -33,6 +33,11 @@
     <div id="viewer">
       <div class="empty">Оберіть файл зі списку та натисніть «Відкрити для себе».</div>
     </div>
+    <!-- Issue #83: кнопки відповідей учня і на сторінці перегляду — режим
+         демонстрації вмикається тим самим серверним станом, що й на
+         «Демонстрації» (app.js renderTestAnswerBar) -->
+    <div id="testAnswerBar" class="test-answer-bar" role="group"
+         aria-label="Варіанти відповіді" style="display:none"></div>
     <div class="hint" style="margin-top:12px">
       💡 Особистий перегляд дозволяє читати PDF чи переглядати відео у власному темпі.
     </div>

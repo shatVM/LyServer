@@ -52,6 +52,12 @@
     <div id="viewer">
       <div class="empty">Очікування початку демонстрації від викладача…</div>
     </div>
+
+    <!-- Issue #83: програмні кнопки відповідей учня — ПІД зображенням, лише на
+         активному запитанні, поки вчитель відкрив приймання. Створюються в
+         app.js (renderTestAnswerBar) за кількістю варіантів із state.testing -->
+    <div id="testAnswerBar" class="test-answer-bar" role="group"
+         aria-label="Варіанти відповіді" style="display:none"></div>
   </section>
 
   <!-- Issue #19: блок «Учні» у правій колонці сітки -->

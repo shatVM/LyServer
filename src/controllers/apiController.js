@@ -6,6 +6,8 @@ const fileService = require("../services/fileService");
 const stateService = require("../services/stateService");
 const presenceService = require("../services/presenceService");
 const signalService = require("../services/signalService");
+// Issue #83: стан тестування для конкретного запитувача (state.testing)
+const testingService = require("../services/testingService");
 const slideService = require("../services/slideService");
 
 /**
@@ -100,6 +102,11 @@ class ApiController {
     // стан інших учнів; ціль береться з прив'язки сесії в heartbeat, а не з
     // запиту), викладачу — усі (для активних станів іконок у списку учнів).
     state.signals = signalService.getVisibleTo(identity);
+    // Issue #83: тестування — теж персональна частина стану: викладач бачить
+    // гістограму й відповіді учнів, учень — лише свій поточний вибір. Опитування
+    // те саме (/api/state, ~0.5 с), тому результати оновлюються в реальному
+    // часі без перезавантаження сторінки й без окремого каналу подій.
+    state.testing = testingService.getView(identity, state);
     res.json(state);
   }
 
