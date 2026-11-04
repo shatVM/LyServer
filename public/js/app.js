@@ -142,6 +142,10 @@ let heartbeatTimer = null;
 /** Старт heartbeat учня (перший виклик у setRole), далі — за інтервалом */
 function startHeartbeat() {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
+  // Issue #83: перший heartbeat — НЕГАЙНО, а не через 2 с: сервер прив'язує
+  // studentId до сесії саме в ньому, і відповідь на тестування до прив'язки
+  // відхиляється більшістю (409)
+  void sendHeartbeat();
   heartbeatTimer = setInterval(() => sendHeartbeat(), HEARTBEAT_MS);
 }
 
@@ -331,6 +335,22 @@ function renderStudentsList(list) {
       const ipLine = s.ip
         ? '<span class="student-ip">' + esc(s.ip) + "</span>"
         : "";
+      // Issue #83: обраний варіант біля імені (вчитель бачить у реальному
+      // часі). Дані — із персонального поля state.testing (лише в нього є
+      // answers): показуються лише коли є поточне запитання, тобто під час
+      // активного тестування та після завершення (результати зберігаються)
+      const testingAnswers = (role === "teacher" && testingState &&
+        testingState.question && testingState.answers)
+        ? testingState.answers : null;
+      let answerLabel = "";
+      if (testingAnswers) {
+        const value = Number.isInteger(testingAnswers[s.id])
+          ? testingAnswers[s.id] : null;
+        answerLabel = value !== null
+          ? '<span class="student-test-answer" title="Обраний варіант">' +
+            esc(TESTING_VARIANT_LETTERS[value] || "?") + "</span>"
+          : '<span class="student-test-answer is-missing" title="Відповіді ще немає">—</span>';
+      }
       // Issue #79: іконки сигналів праворуч у рядку, біля крапки онлайн (без
       // текстових написів): колір — із налаштувань сигналу, активний сигнал —
       // стан is-active з серверного персонального стану; офлайн-учню іконка
@@ -350,6 +370,7 @@ function renderStudentsList(list) {
         '<span class="student-info">' +
         '<span class="student-name">' + esc(s.name) + "</span>" +
         ipLine +
+        answerLabel +
         "</span>" +
         signalBtns +
         statusDot;
@@ -716,6 +737,292 @@ document.addEventListener("DOMContentLoaded", () => {
   if ($("signalAddBtn")) $("signalAddBtn").addEventListener("click", () => openSignalForm(null));
   if ($("signalSaveBtn")) $("signalSaveBtn").addEventListener("click", () => void saveSignalForm());
   if ($("signalCancelBtn")) $("signalCancelBtn").addEventListener("click", closeSignalForm);
+});
+
+// ---------------------------------------------------------------------------
+// Issue #83: MVP системи тестування під час демонстрації
+// ---------------------------------------------------------------------------
+// Стан приходить у персональному полі state.testing наявного /api/state
+// (той самий механізм, що й сигнали в Issue #79): вчителю — статус, кількість
+// варіантів, поточне запитання, гістограма й відповіді учнів; учневі — лише
+// статус і його власний вибір (yourAnswer). Запис відповіді — POST
+// /api/testing/answer (лише сесія учня, studentId сервер бере з прив'язки).
+
+/** Написи варіантів у порядку індексів (0 → А … 3 → Г), як на сервері */
+const TESTING_VARIANT_LETTERS = ["А", "Б", "В", "Г"];
+
+/** Останній отриманий стан тестування (state.testing) або null */
+let testingState = null;
+/** Ключ попереднього стану — щоб не перерисовувати інтерфейс на кожне опитування */
+let testingStateKey = null;
+/** Кількість варіантів, обрана вчителем для НАСТУПНОГО старту (3 | 4) */
+let testOptionCount = 3;
+/** Захист від повторних натискань, поки запит до сервера виконується */
+let testingBusy = false;
+
+/** JSON-ключ стану (порівняння без глибокої різниці об'єктів) */
+function testingKeyOf(view) {
+  return view ? JSON.stringify(view) : "";
+}
+
+/**
+ * Застосувати новий стан тестування (з опитування або з відповіді запиту).
+ * @param {object|null} view — state.testing або data.testing з відповіді
+ * @param {boolean} force — перерисувати навіть за однакового ключа
+ */
+function applyTestingState(view, force = false) {
+  const next = view || null;
+  const key = testingKeyOf(next);
+  if (!force && key === testingStateKey) return false;
+  testingStateKey = key;
+  testingState = next;
+  // Поки тестування не запущено, вчитель бачить лише свій вибір перемикача,
+  // тому кількість варіантів оновлюємо ТІЛЬКИ з активного/завершеного стану —
+  // інакше кожне опитування відкочувало б його до серверного значення
+  if (next && next.status !== "idle" && (next.options === 3 || next.options === 4)) {
+    testOptionCount = next.options;
+  }
+  renderTestUI();
+  return true;
+}
+
+/** Повне оновлення UI тестування: панель вчителя, кнопки учня, бейдж, список */
+function renderTestUI() {
+  renderTestingPanel();
+  renderTestAnswerBar();
+  updateViewerTestBadge();
+  renderStudentsList(lastStudentsList);
+}
+
+/** Панель керування тестуванням у блоці «Учні» (лише викладач) */
+function renderTestingPanel() {
+  const panel = $("testPanel");
+  if (!panel) return;
+  const view = role === "teacher" ? testingState : null;
+  const status = view ? view.status : "idle";
+  const active = status === "active";
+
+  // Перемикач кількості варіантів: активний лише до старту
+  const opt3 = $("testOpt3");
+  const opt4 = $("testOpt4");
+  const shownOptions = active && view.options === 4 ? 4 : (active ? 3 : testOptionCount);
+  if (opt3) {
+    opt3.setAttribute("aria-pressed", String(shownOptions === 3));
+    opt3.disabled = active;
+  }
+  if (opt4) {
+    opt4.setAttribute("aria-pressed", String(shownOptions === 4));
+    opt4.disabled = active;
+  }
+
+  // Кнопка дії: Почати → Завершити → Нове тестування
+  const toggle = $("testToggleBtn");
+  if (toggle) {
+    toggle.textContent = status === "active"
+      ? "Завершити тестування"
+      : (status === "finished" ? "Нове тестування" : "Тестування");
+  }
+
+  // Текст стану
+  const statusEl = $("testStatus");
+  if (statusEl) statusEl.textContent = testingStatusText(view);
+
+  // Гістограма: лише коли є поточне запитання (активне або завершене)
+  const histogramEl = $("testHistogram");
+  if (histogramEl) {
+    const histogram = view && view.question && Array.isArray(view.histogram)
+      ? view.histogram : null;
+    if (!histogram) {
+      histogramEl.replaceChildren();
+      histogramEl.style.display = "none";
+    } else {
+      renderTestHistogram(histogramEl, view);
+      histogramEl.style.display = "";
+    }
+  }
+}
+
+/** Текст рядка стану під перемикачем */
+function testingStatusText(view) {
+  if (!view || view.status === "idle") {
+    return "Тестування не активне. Оберіть кількість варіантів і натисніть «Тестування».";
+  }
+  const question = view.question ? view.question.page : 0;
+  if (view.status === "finished") {
+    return "Тестування завершено вручну — відповіді заблоковано" +
+      (question ? ". Останнє запитання: слайд " + question + "." : ".");
+  }
+  if (view.accepting) {
+    return "Приймання відкрито: запитання, слайд " + question +
+      ". Варіанти: " + TESTING_VARIANT_LETTERS.slice(0, view.options).join(", ") + ".";
+  }
+  if (question) {
+    return "Тестування активне, але на цьому слайді запитання немає — приймання зачинено " +
+      "(слайд запитання: " + question + ").";
+  }
+  return "Тестування активне. Відкрийте парний слайд — там з'являться варіанти відповіді.";
+}
+
+/** Гістограма відповідей поточного запитання (варіант → смуга → кількість) */
+function renderTestHistogram(root, view) {
+  root.replaceChildren();
+  const histogram = view.histogram;
+  const total = histogram.reduce((sum, n) => sum + (Number(n) || 0), 0);
+  const max = Math.max(1, ...histogram.map((n) => Number(n) || 0));
+
+  for (let i = 0; i < histogram.length; i += 1) {
+    const count = Number(histogram[i]) || 0;
+    const row = document.createElement("div");
+    row.className = "test-hist-row";
+    row.innerHTML =
+      '<span class="test-hist-label">' + esc(TESTING_VARIANT_LETTERS[i] || "?") + "</span>" +
+      '<span class="test-hist-track"><span class="test-hist-bar" style="width:' +
+      Math.round((count / max) * 100) + '%"></span></span>' +
+      '<span class="test-hist-count">' + count + "</span>";
+    root.append(row);
+  }
+  const summary = document.createElement("div");
+  summary.className = "hint test-hist-summary";
+  summary.textContent = total
+    ? "Відповіли: " + total + " учн. (останній вибір кожного)"
+    : "Відповідей ще немає";
+  root.append(summary);
+}
+
+/** Кнопки відповіді учня ПІД глядачем: лише поки сервер відкриває приймання */
+function renderTestAnswerBar() {
+  const bar = $("testAnswerBar");
+  if (!bar) return;
+  const view = testingState;
+  const show = role === "student" && Boolean(view) &&
+    view.status === "active" && view.accepting === true;
+  if (!show) {
+    bar.style.display = "none";
+    bar.replaceChildren();
+    bar.removeAttribute("data-options");
+    return;
+  }
+  const count = view.options === 4 ? 4 : 3;
+  const selected = Number.isInteger(view.yourAnswer) ? view.yourAnswer : -1;
+  bar.style.display = "";
+
+  // Кнопки створюються лише при зміні кількості варіантів (інакше кожне
+  // опитування знищувало б фокус із натиснутої кнопки)
+  if (bar.dataset.options !== String(count)) {
+    bar.dataset.options = String(count);
+    bar.replaceChildren();
+    for (let i = 0; i < count; i += 1) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "test-answer-btn";
+      btn.dataset.variant = String(i);
+      btn.textContent = TESTING_VARIANT_LETTERS[i];
+      bar.append(btn);
+    }
+  }
+  for (const btn of bar.querySelectorAll(".test-answer-btn")) {
+    const index = Number(btn.dataset.variant);
+    const isSelected = index === selected;
+    btn.classList.toggle("is-selected", isSelected);
+    btn.setAttribute("aria-pressed", String(isSelected));
+  }
+}
+
+/**
+ * Бейдж із власним вибраного варіанта у куті глядача — на слайді-відповіді
+ * (непарний номер більший за 1). Псевдоелемент #viewer[data-test-answer]::after
+ * переживає перестворення вмісту глядача при зміні слайда.
+ */
+function updateViewerTestBadge() {
+  const viewer = $("viewer");
+  if (!viewer) return;
+  const page = sharedState && sharedState.file ? Number(sharedState.page) || 1 : 1;
+  const onAnswerSlide = Boolean(sharedState && sharedState.file) && page > 1 && page % 2 === 1;
+  const show = role === "student" && onAnswerSlide && testingState &&
+    testingState.status !== "idle" && Number.isInteger(testingState.yourAnswer);
+  if (show) {
+    viewer.setAttribute(
+      "data-test-answer",
+      TESTING_VARIANT_LETTERS[testingState.yourAnswer] || ""
+    );
+  } else {
+    viewer.removeAttribute("data-test-answer");
+  }
+}
+
+/** POST із PIN-заголовком для операцій вчителя; помилки — текст із сервера */
+async function testingApiCall(url, body) {
+  const headers = { "Content-Type": "application/json" };
+  if (pin) headers["X-Portal-Pin"] = pin;
+  const response = await api(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body || {})
+  });
+  return response.json();
+}
+
+/** Натискання кнопки варіанта учнем (кнопки створюються динамічно) */
+async function submitTestAnswer(index) {
+  if (role !== "student" || testingBusy) return;
+  const view = testingState;
+  if (!view || view.status !== "active" || view.accepting !== true) return;
+  const limit = view.options === 4 ? 4 : 3;
+  if (!Number.isInteger(index) || index < 0 || index >= limit) return;
+  testingBusy = true;
+  try {
+    const data = await testingApiCall("/api/testing/answer", { variant: index });
+    applyTestingState(data && data.testing, true);
+  } catch (error) {
+    showToast("⚠️ " + (error.message || "Не вдалося надіслати відповідь"), "warning");
+  } finally {
+    testingBusy = false;
+  }
+}
+
+/** Кнопка «Тестування / Завершити тестування / Нове тестування» (викладач) */
+async function handleTestToggle() {
+  if (role !== "teacher" || testingBusy) return;
+  const status = testingState ? testingState.status : "idle";
+  const starting = status !== "active";
+  const toggle = $("testToggleBtn");
+  testingBusy = true;
+  if (toggle) toggle.disabled = true;
+  try {
+    const data = starting
+      ? await testingApiCall("/api/testing/start", { options: testOptionCount })
+      : await testingApiCall("/api/testing/finish", {});
+    applyTestingState(data && data.testing, true);
+    renderStudentsList(lastStudentsList);
+  } catch (error) {
+    showToast("⚠️ " + (error.message || "Не вдалося виконати дію"), "warning");
+  } finally {
+    testingBusy = false;
+    if (toggle) toggle.disabled = false;
+  }
+}
+
+/** Вибір кількості варіантів (3 | 4) — лише коли тестування не активне */
+function setTestOptions(count) {
+  if (role !== "teacher" || testingBusy) return;
+  if (testingState && testingState.status === "active") return;
+  testOptionCount = count === 4 ? 4 : 3;
+  renderTestingPanel();
+}
+
+document.addEventListener("click", (event) => {
+  if (!event.target || !event.target.closest) return;
+  const btn = event.target.closest("#testAnswerBar .test-answer-btn");
+  if (!btn) return;
+  void submitTestAnswer(Number(btn.dataset.variant));
+});
+
+document.addEventListener("DOMContentLoaded", () => {
+  for (const id of ["testOpt3", "testOpt4"]) {
+    const btn = $(id);
+    if (btn) btn.addEventListener("click", () => setTestOptions(Number(btn.dataset.options)));
+  }
+  if ($("testToggleBtn")) $("testToggleBtn").addEventListener("click", () => void handleTestToggle());
 });
 
 // ---------------------------------------------------------------------------
@@ -2376,6 +2683,13 @@ async function pollStateCore(force = false) {
     const state = await response.json();
     const prev = sharedState;
     sharedState = state;
+
+    // Issue #83: персональний стан тестування — одразу після присвоєння
+    // sharedState: бейдж на слайді-відповіді залежить від номера слайда, а
+    // кнопки учня — від того, чи сервер відкрив приймання (після показу
+    // «!state.file» тут не повертаємось, тому панель оновиться і на зупинці)
+    applyTestingState(state.testing);
+    updateViewerTestBadge();
 
     // Issue #75: розгорнутий режим показу на пристрої учня — за тим самим
     // серверним станом (початок показу розгортає, зупинка повертає звичайний

@@ -8,6 +8,9 @@ const presenceService = require("./presenceService");
 const fileService = require("./fileService");
 // Issue #79: активні сигнали учням очищаються разом зі зупинкою показу
 const signalService = require("./signalService");
+// Issue #83: вказівник «поточне запитання» тестування оновлюється при зміні
+// слайда показу; відповіді учнів при цьому не змінюються (див. testingService)
+const testingService = require("./testingService");
 
 class StateService {
   constructor() {
@@ -144,6 +147,14 @@ class StateService {
 
     this.shared.updated = Date.now();
     this.revision++;
+
+    // Issue #83: файл і номер слайда вже оновлено — переносимо вказівник
+    // «поточне запитання» тестування. Викликається на КОЖНЕ оновлення стану
+    // (також для відео-синхронізації), сервіс сам ігнорує незмінений слайд.
+    // Явна зупинка (stop) і автозупинка при виході вчителя проходять іншим
+    // шляхом (stopShared) і вказівник НЕ чіпають — результати останнього
+    // запитання мають лишитися доступними вчителю (Issue #83 §5, §9).
+    testingService.syncSlide(this.shared.file, this.shared.page);
 
     return { ok: true, revision: this.revision };
   }

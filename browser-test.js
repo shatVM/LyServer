@@ -749,6 +749,148 @@ async function main() {
     finalStop && pdfAfterStop === 404 && slidesAfterStop === 404,
     JSON.stringify({ finalStop, pdfAfterStop, slidesAfterStop }));
 
+  // ---------------- Сценарій 7: тестування під час демонстрації (Issue #83) --
+  // Відео-показ: номер сторінки керує ЛИШЕ логікою запитання (парний слайд =
+  // питання), сам медіа-контент від номера не залежить — глядачі не бачать
+  // хибних 404. Повний цикл: старт → відповіді → автозачинення → повернення →
+  // перезавантаження сторінки учня → ручне завершення → збереження результатів.
+  const t83HistExpr =
+    `[...document.querySelectorAll('#testHistogram .test-hist-row')]` +
+    `.map(r => r.querySelector('.test-hist-count').textContent.trim()).join(',')`;
+  const t83BarExpr = (visible, count) =>
+    `(() => { const b = document.getElementById('testAnswerBar');` +
+    ` return !!b && b.style.display ${visible ? "!== 'none'" : "=== 'none'"}` +
+    (count ? ` && b.querySelectorAll('.test-answer-btn').length === ${count}` : "") +
+    `; })()`;
+  const t83SetPage = (page) =>
+    fetch(BASE + "/api/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin: PIN, file: wavId, kind: "video", page })
+    });
+
+  await t83SetPage(2);
+  const t83DemoStarted = await waitDemoFile(wavId, true);
+
+  // 7.1 Панель вчителя: вибір 4 варіантів і старт одним натисканням
+  const t83Panel = await waitFor(T,
+    `(() => { const p = document.getElementById('testPanel');` +
+    ` return !!p && p.offsetParent !== null && !!document.getElementById('testToggleBtn'); })()`, 10000);
+  await evaluate(T, `document.getElementById('testOpt4').click(); true;`);
+  const t83Opt4 = await waitFor(T,
+    `document.getElementById('testOpt4').getAttribute('aria-pressed') === 'true' &&
+      document.getElementById('testOpt3').getAttribute('aria-pressed') === 'false'`, 5000);
+  await evaluate(T, `document.getElementById('testToggleBtn').click(); true;`);
+  const t83Active = await waitFor(T,
+    `(() => { const b = document.getElementById('testToggleBtn');` +
+    ` return !!b && /Завершити тестування/.test(b.textContent); })()`, 10000);
+  const t83Status = await waitFor(T,
+    `(() => { const s = document.getElementById('testStatus');` +
+    ` return !!s && /Приймання відкрито/.test(s.textContent) && /слайд 2/.test(s.textContent); })()`, 10000);
+  check("Сценарій 7: панель вчителя — 4 варіанти вибрано, старт «Тестування» відкриває приймання на слайді 2",
+    t83DemoStarted && t83Panel && t83Opt4 && t83Active && t83Status,
+    JSON.stringify({ t83DemoStarted, t83Panel, t83Opt4, t83Active, t83Status }));
+
+  // 7.2 Обидва учні бачать 4 кнопки варіантів ПІД глядачем (без перезавантаження)
+  const s1Bar = await waitFor(S1, t83BarExpr(true, 4) + " && window.__mark === 42", 10000);
+  const s2Bar = await waitFor(S2, t83BarExpr(true, 4) + " && window.__mark === 42", 10000);
+  check("Сценарій 7: обидва учні бачать чотири кнопки відповіді під глядачем",
+    s1Bar && s2Bar, JSON.stringify({ s1Bar, s2Bar }));
+
+  // 7.3 Перший слайд (вступний) без запитання: кнопки в учнів зникають,
+  //     а повернення на парний слайд відкриває приймання знову (без завершення)
+  await t83SetPage(1);
+  const s1BarFirst = await waitFor(S1,
+    t83BarExpr(false) + " && window.__mark === 42", 10000);
+  await t83SetPage(2);
+  const s1BarReopen = await waitFor(S1,
+    t83BarExpr(true, 4) + " && window.__mark === 42", 10000);
+  const s2BarReopen = await waitFor(S2,
+    t83BarExpr(true, 4) + " && window.__mark === 42", 10000);
+  check("Сценарій 7: перший слайд без кнопок, повернення на запитання відкриває приймання знову",
+    s1BarFirst && s1BarReopen && s2BarReopen,
+    JSON.stringify({ s1BarFirst, s1BarReopen, s2BarReopen }));
+
+  // 7.4 Відповіді з UI: S1 обирає «Б», S2 обирає «В»
+  const s1Clicked = await evaluate(S1,
+    `(() => { const b = [...document.querySelectorAll('#testAnswerBar .test-answer-btn')]` +
+    `.find(x => x.textContent.trim() === 'Б'); if (b) b.click(); return !!b; })()`);
+  const s2Clicked = await evaluate(S2,
+    `(() => { const b = [...document.querySelectorAll('#testAnswerBar .test-answer-btn')]` +
+    `.find(x => x.textContent.trim() === 'В'); if (b) b.click(); return !!b; })()`);
+  const s1Selected = await waitFor(S1,
+    `(() => { const b = [...document.querySelectorAll('#testAnswerBar .test-answer-btn')]` +
+    `.find(x => x.textContent.trim() === 'Б');` +
+    ` return !!b && b.classList.contains('is-selected') && b.getAttribute('aria-pressed') === 'true'; })()`,
+    10000);
+  const s2Selected = await waitFor(S2,
+    `(() => { const b = [...document.querySelectorAll('#testAnswerBar .test-answer-btn')]` +
+    `.find(x => x.textContent.trim() === 'В');` +
+    ` return !!b && b.classList.contains('is-selected'); })()`, 10000);
+  check("Сценарій 7: обидва учні відповіли, інтерфейс позначає їхній вибір",
+    s1Clicked && s2Clicked && s1Selected && s2Selected,
+    JSON.stringify({ s1Clicked, s2Clicked, s1Selected, s2Selected }));
+
+  // 7.5 У викладача в реальному часі (без перезавантаження): гістограма
+  //     і обраний варіант біля імені кожного учня
+  const t83Hist = await waitFor(T,
+    `(() => { const c = ${t83HistExpr};` +
+    ` return c === '0,1,1,0'; })()`, 10000);
+  const t83Labels = await waitFor(T,
+    `(() => { const letters = [...document.querySelectorAll('.student-row')]` +
+    `.map(r => (r.querySelector('.student-test-answer') || {}).textContent || '')` +
+    `.map(t => t.trim()).filter(Boolean);` +
+    ` return letters.includes('Б') && letters.includes('В'); })()`, 10000);
+  check("Сценарій 7: вчитель бачить гістограму (0,1,1,0) і вибір кожного учня поруч з ім'ям",
+    t83Hist && t83Labels, JSON.stringify({ t83Hist, t83Labels }));
+
+  // 7.6 Слайд-відповідь (непарний): приймання зачиняється, у учня на глядачі
+  //     видно його вибір (бейдж), гістограма вчителя не змінюється
+  await t83SetPage(3);
+  const s1BarOdd = await waitFor(S1,
+    t83BarExpr(false) + " && window.__mark === 42", 10000);
+  const s1Badge = await waitFor(S1,
+    `(() => { const v = document.getElementById('viewer');` +
+    ` return !!v && v.getAttribute('data-test-answer') === 'Б'; })() && window.__mark === 42`, 10000);
+  const t83HistOdd = await waitFor(T, `${t83HistExpr} === '0,1,1,0'`, 10000);
+  check("Сценарій 7: на слайді-відповіді кнопки зачинені, вибір видно бейджем, результати збережені",
+    s1BarOdd && s1Badge && t83HistOdd,
+    JSON.stringify({ s1BarOdd, s1Badge, t83HistOdd }));
+
+  // 7.7 Перезавантаження сторінки учня: вибір відновлюється зі стану сервера
+  await t83SetPage(2);
+  await gotoS(S2, "/materials");
+  const s2Restored = await waitFor(S2,
+    `(() => { const b = [...document.querySelectorAll('#testAnswerBar .test-answer-btn')]` +
+    `.find(x => x.classList.contains('is-selected'));` +
+    ` return !!b && b.textContent.trim() === 'В'; })() && window.__mark === 42`, 20000);
+  check("Сценарій 7: після перезавантаження сторінки учень бачить свій збережений вибір",
+    s2Restored, "s2Restored=" + s2Restored);
+
+  // 7.8 Ручне завершення вчителем: кнопки в учнів зникають, а в викладача
+  //     результати та напис про завершення лишаються
+  await evaluate(T, `document.getElementById('testToggleBtn').click(); true;`);
+  const t83Finished = await waitFor(T,
+    `(() => { const b = document.getElementById('testToggleBtn');` +
+    ` return !!b && /Нове тестування/.test(b.textContent); })()`, 10000);
+  const t83FinishedStatus = await waitFor(T,
+    `/завершено вручну/i.test(document.getElementById('testStatus').textContent) &&
+      ${t83HistExpr} === '0,1,1,0'`, 10000);
+  const s1BarFinished = await waitFor(S1,
+    t83BarExpr(false) + " && window.__mark === 42", 10000);
+  check("Сценарій 7: ручне завершення — у викладача статус і результати, в учнів кнопок немає",
+    t83Finished && t83FinishedStatus && s1BarFinished,
+    JSON.stringify({ t83Finished, t83FinishedStatus, s1BarFinished }));
+
+  // 7.9 Зупинка показу НЕ знищує результати: вказівник запитання «заморожено»
+  await evaluate(T, "document.getElementById('stopDemo').click(); true;");
+  const t83Stopped = await waitDemoFile(wavId, false);
+  const t83AfterStop = await waitFor(T,
+    `${t83HistExpr} === '0,1,1,0' &&
+      /слайд 2/.test(document.getElementById('testStatus').textContent)`, 10000);
+  check("Сценарій 7: після зупинки показу вчитель бачить результати останнього запитання",
+    t83Stopped && t83AfterStop, JSON.stringify({ t83Stopped, t83AfterStop }));
+
   // сесія викладача скасовується при виході
   await evaluate(T, "document.getElementById('btnSwitchRole').click(); true;");
   await delay(800);

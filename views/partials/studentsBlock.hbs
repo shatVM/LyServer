@@ -15,4 +15,23 @@
   <div id="studentsSideList" class="students-list js-students-list">
     <div class="empty">Завантаження списку учнів…</div>
   </div>
+
+  <!-- Issue #83: блок керування тестуванням — безпосередньо ПІД списком учнів.
+       Перемикач кількості варіантів (3 → А/Б/В, 4 → А/Б/В/Г) і кнопка
+       «Тестування»; після запуску кнопка стає «Завершити тестування», а нижче
+       з'являються статус приймання та гістограма відповідей. Блок усередині
+       studentsSideBlock (teacher-only), тому учням не показується; дані — із
+       персонального поля state.testing опитування /api/state (app.js) -->
+  <div id="testPanel" class="test-panel">
+    <div class="row test-toolbar">
+      <span class="test-options-label" id="testOptionsLabel">Варіантів:</span>
+      <div class="test-options" role="group" aria-labelledby="testOptionsLabel">
+        <button id="testOpt3" type="button" data-options="3" aria-pressed="true">3</button>
+        <button id="testOpt4" type="button" data-options="4" aria-pressed="false">4</button>
+      </div>
+      <button id="testToggleBtn" type="button" class="btn-sm">Тестування</button>
+    </div>
+    <div id="testStatus" class="hint test-status" role="status"></div>
+    <div id="testHistogram" class="test-histogram" style="display:none"></div>
+  </div>
 </aside>
