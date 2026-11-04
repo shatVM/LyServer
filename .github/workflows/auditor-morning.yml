@@ -34,6 +34,7 @@ jobs:
           GH_API_URL: ${{ github.api_url }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          AUDITOR_ISSUE_NUMBER: "73"
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         shell: bash
         run: |
@@ -42,6 +43,7 @@ jobs:
           import datetime
           import json
           import os
+          import urllib.error
           import urllib.parse
           import urllib.request
 
@@ -49,6 +51,13 @@ jobs:
           repo = os.environ["GH_REPOSITORY"]
           token = os.environ["GH_TOKEN"]
           today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+          issue_number_raw = os.environ.get("AUDITOR_ISSUE_NUMBER", "").strip()
+          if not issue_number_raw.isdigit() or int(issue_number_raw) < 1:
+              raise SystemExit(
+                  "ERROR: AUDITOR_ISSUE_NUMBER must be a positive integer; "
+                  f"received {issue_number_raw!r}."
+              )
+          issue_number = int(issue_number_raw)
 
           def request(url, method="GET", payload=None):
               headers = {
@@ -60,14 +69,25 @@ jobs:
               if data is not None:
                   headers["Content-Type"] = "application/json"
               req = urllib.request.Request(url, data=data, headers=headers, method=method)
-              with urllib.request.urlopen(req, timeout=20) as response:
-                  raw = response.read()
-                  return json.loads(raw.decode("utf-8")) if raw else {}
+              try:
+                  with urllib.request.urlopen(req, timeout=20) as response:
+                      raw = response.read()
+                      return json.loads(raw.decode("utf-8")) if raw else {}
+              except urllib.error.HTTPError as error:
+                  details = error.read().decode("utf-8", errors="replace")[:2000]
+                  raise RuntimeError(
+                      f"GitHub API request failed: {method} {url} "
+                      f"returned HTTP {error.code}. Response: {details or '(empty body)'}"
+                  ) from None
+              except urllib.error.URLError as error:
+                  raise RuntimeError(
+                      f"GitHub API request failed: {method} {url}. Network error: {error.reason}"
+                  ) from None
 
           def gh(path):
               return request(f"{api}/repos/{repo}/{path}")
 
-          issue_comments = gh("issues/73/comments?per_page=100")
+          issue_comments = gh(f"issues/{issue_number}/comments?per_page=100")
           marker = f"## Ранковий аудит — {today}"
           if any(marker in c.get("body", "") and c.get("user", {}).get("type") == "Bot"
                  for c in issue_comments):
@@ -143,11 +163,11 @@ jobs:
               raise RuntimeError("Report role marker or date heading is invalid.")
 
           posted = request(
-              f"{api}/repos/{repo}/issues/73/comments",
+              f"{api}/repos/{repo}/issues/{issue_number}/comments",
               method="POST",
               payload={"body": body},
           )
-          comment_url = posted.get("html_url", f"https://github.com/{repo}/issues/73")
+          comment_url = posted.get("html_url", f"https://github.com/{repo}/issues/{issue_number}")
           print("Auditor report published: " + comment_url)
 
           bot = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
