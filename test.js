@@ -2130,6 +2130,535 @@ async function main() {
         body: JSON.stringify({ pin: PIN })
       });
 
+      // === Issue #85: персональні облікові записи викладачів + розділ «Викладачі» ===
+      // Критерії: створення/список без PIN і хешів, вхід за персональним PIN
+      // (визначення облікового запису), дозволи demo/materials на сервері,
+      // негайне відкликання сесій при зміні прав/деактивації/заміні PIN,
+      // ліміт спроб за обліковим записом, відсутність адмін-доступу в
+      // викладача/учня, випадковий PIN без PORTAL_PIN (лише термінал).
+      const t85Fs = require("node:fs");
+      const t85Path = require("node:path");
+      const t85ConfigSrc = t85Fs.readFileSync(t85Path.join(__dirname, "src", "config", "index.js"), "utf-8");
+      const t85Readme = t85Fs.readFileSync(t85Path.join(__dirname, "README.md"), "utf-8");
+      const t85Nav = t85Fs.readFileSync(t85Path.join(__dirname, "views", "partials", "nav.hbs"), "utf-8");
+      const t85View = t85Fs.readFileSync(t85Path.join(__dirname, "views", "teachers.hbs"), "utf-8");
+      const t85PanelJs = t85Fs.readFileSync(t85Path.join(__dirname, "public", "js", "teachers.js"), "utf-8");
+      const t85AppJs = t85Fs.readFileSync(t85Path.join(__dirname, "public", "js", "app.js"), "utf-8");
+      const t85Gitignore = t85Fs.readFileSync(t85Path.join(__dirname, ".gitignore"), "utf-8");
+      const t85StoreFile = t85Path.join(__dirname, "materials", ".teachers.json");
+
+      check(
+        "Issue #85: конфігурація без PIN за замовчуванням (2468 прибрано)",
+        !t85ConfigSrc.includes('"2468"')
+      );
+      check(
+        "Issue #85: README не рекламує PIN за замовчуванням і описує PORTAL_PIN",
+        !t85Readme.includes("2468") && t85Readme.includes("PORTAL_PIN")
+      );
+      check("Issue #85: materials/ поза Git (.gitignore)", t85Gitignore.includes("materials/"));
+      check(
+        "Issue #85: пункт меню «Викладачі» з класом admin-only",
+        t85Nav.includes('class="nav-link admin-only') && t85Nav.includes('href="/teachers"')
+      );
+      check(
+        "Issue #85: сторінка панелі наявна, без PIN/хешів у розмітці",
+        t85View.includes('id="teachersList"') &&
+          t85View.includes("/js/teachers.js") &&
+          !t85View.includes("pinHash")
+      );
+      check(
+        "Issue #85: панель керує /api/teachers і не містить PIN-заголовків",
+        t85PanelJs.includes("/api/teachers/create") &&
+          t85PanelJs.includes("/api/teachers/set-pin") &&
+          !t85PanelJs.includes("X-Portal-Pin")
+      );
+      check(
+        "Issue #85: клієнт шле X-Portal-Teacher разом із PIN і ховає меню для не-адміна",
+        t85AppJs.includes('"X-Portal-Teacher"') &&
+          t85AppJs.includes("function applyAuthHeaders") &&
+          t85AppJs.includes("admin-only")
+      );
+
+      const t85AdminHeaders = { "X-Portal-Pin": PIN };
+      const t85Name = "Issue85 Тестовий Викладач";
+      const t85Pin = "1357"; // персональний PIN (не збігається з адміністративним)
+      const t85NewPin = "4682"; // після заміни
+      const t85Pin2 = "9753"; // другий запис (тест ліміту спроб)
+      let t85Id = "";
+      let t85Id2 = "";
+      let t85CatId = "";
+
+      /** Вхід за PIN: статус, JSON і cookie нової сесії (учитель/адмін) */
+      const t85Verify = async (pinValue) => {
+        const resp = await fetch(base + "/api/auth/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: pinValue })
+        });
+        let data = null;
+        try { data = await resp.json(); } catch { /* відповідь не JSON */ }
+        return { status: resp.status, data, cookie: extractSessionCookie(resp) };
+      };
+      const t85TeacherHeaders = (pinValue, id) => ({
+        "Content-Type": "application/json",
+        "X-Portal-Pin": pinValue,
+        "X-Portal-Teacher": id
+      });
+      const t85JsonHeaders = { "Content-Type": "application/json" };
+      /** Безпечне представлення відповіді: жодних полів pin/pinHash */
+      const t85NoSecrets = (value) => {
+        const text = JSON.stringify(value);
+        return !text.includes("pinHash") && !text.includes('"pin"');
+      };
+
+      try {
+        // --- Створення облікового запису адміністратором ---
+        r = await fetch(base + "/api/teachers/create", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+          body: JSON.stringify({ fullName: t85Name, pin: t85Pin })
+        });
+        let t85Body = await r.json().catch(() => null);
+        check(
+          "Issue #85: створення запису адміністратором → 201, ПІБ і права за замовчуванням",
+          r.status === 201 && t85Body && t85Body.teacher &&
+            t85Body.teacher.fullName === t85Name &&
+            t85Body.teacher.active === true &&
+            Array.isArray(t85Body.teacher.permissions) &&
+            t85Body.teacher.permissions.includes("demo") &&
+            t85Body.teacher.permissions.includes("materials"),
+          `status=${r.status}`
+        );
+        t85Id = t85Body && t85Body.teacher ? t85Body.teacher.id : "";
+        check(
+          "Issue #85: відповідь створення без PIN/хеша",
+          Boolean(t85Id) && t85NoSecrets(t85Body)
+        );
+
+        // --- Список: наслідки дій для адміністратора, без секретів ---
+        r = await fetch(base + "/api/teachers", { headers: t85AdminHeaders });
+        t85Body = await r.json().catch(() => null);
+        const t85Row = t85Body && Array.isArray(t85Body.teachers)
+          ? t85Body.teachers.find((item) => item.id === t85Id)
+          : null;
+        check(
+          "Issue #85: список записів із наслідками (сесії/історія) і без PIN/хеша",
+          r.status === 200 && Boolean(t85Row) &&
+            Number.isInteger(t85Row.activeSessions) &&
+            Number.isInteger(t85Row.historicalLinks) &&
+            t85NoSecrets(t85Body),
+          `status=${r.status}`
+        );
+
+        // --- Вхід викладача за персональним PIN: система називає обліковий запис ---
+        let t85Login = await t85Verify(t85Pin);
+        const t85Cookie1 = t85Login.cookie;
+        check(
+          "Issue #85: вхід за персональним PIN → 200, teacherId і ПІБ, без admin",
+          t85Login.status === 200 && t85Login.data && t85Login.data.ok === true &&
+            t85Login.data.role === "teacher" &&
+            t85Login.data.teacherId === t85Id &&
+            t85Login.data.fullName === t85Name &&
+            !t85Login.data.admin &&
+            t85NoSecrets(t85Login.data) &&
+            t85Cookie1.length >= 32,
+          `status=${t85Login.status}`
+        );
+
+        // --- Невірний PIN (лічильник IP; надалі скидається успішними входами) ---
+        t85Login = await t85Verify("9999");
+        check("Issue #85: невірний PIN викладача → 403", t85Login.status === 403, `status=${t85Login.status}`);
+
+        // --- Викладач не адмін: сесія сама по собі і власні PIN+ід — не адмін ---
+        r = await fetch(base + "/api/teachers", { headers: { Cookie: "ly_session=" + t85Cookie1 } });
+        check("Issue #85: сесія викладача не читає список облікових записів → 403", r.status === 403, `status=${r.status}`);
+        r = await fetch(base + "/api/teachers/set-pin", {
+          method: "POST",
+          headers: Object.assign({ Cookie: "ly_session=" + t85Cookie1 }, t85JsonHeaders),
+          body: JSON.stringify({ id: t85Id, pin: t85Pin2 })
+        });
+        check("Issue #85: викладач не може змінити власний PIN через сесію → 403", r.status === 403, `status=${r.status}`);
+        r = await fetch(base + "/api/teachers/create", {
+          method: "POST",
+          headers: t85TeacherHeaders(t85Pin, t85Id),
+          body: JSON.stringify({ fullName: "Самопризначення", pin: "1111" })
+        });
+        check("Issue #85: викладач не може створити запис власним PIN → 403", r.status === 403, `status=${r.status}`);
+        r = await fetch(base + "/teachers", { headers: { Cookie: "ly_session=" + t85Cookie1 } });
+        check("Issue #85: сторінка /teachers для викладача → 403", r.status === 403, `status=${r.status}`);
+
+        // --- Операції викладача з персональним PIN + ідентифікатор ---
+        r = await fetch(base + "/api/presence/teacher", {
+          method: "POST",
+          headers: t85TeacherHeaders(t85Pin, t85Id),
+          body: JSON.stringify({})
+        });
+        check("Issue #85: heartbeat викладача (право demo) → 200", r.status === 200, `status=${r.status}`);
+        const t85CatName = "Issue85Категорія" + Date.now();
+        r = await fetch(base + "/api/categories", {
+          method: "POST",
+          headers: t85TeacherHeaders(t85Pin, t85Id),
+          body: JSON.stringify({ name: t85CatName })
+        });
+        t85Body = await r.json().catch(() => null);
+        check(
+          "Issue #85: створення категорії викладачем (право materials) → 201",
+          (r.status === 201 || r.status === 200) && t85Body && t85Body.category && t85Body.category.id,
+          `status=${r.status}`
+        );
+        if (t85Body && t85Body.category) t85CatId = t85Body.category.id;
+
+        // --- Відкликання права materials: перевірка на кожному запиті ---
+        r = await fetch(base + "/api/teachers/update", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+          body: JSON.stringify({ id: t85Id, permissions: ["demo"] })
+        });
+        check("Issue #85: адміністратор відкликав право materials → 200", r.status === 200, `status=${r.status}`);
+        r = await fetch(base + "/api/categories", {
+          method: "POST",
+          headers: t85TeacherHeaders(t85Pin, t85Id),
+          body: JSON.stringify({ name: t85CatName + "2" })
+        });
+        check("Issue #85: без materials створення категорії → 403", r.status === 403, `status=${r.status}`);
+        r = await fetch(base + "/api/presence/teacher", {
+          method: "POST",
+          headers: t85TeacherHeaders(t85Pin, t85Id),
+          body: JSON.stringify({})
+        });
+        check("Issue #85: право demo після зміни прав збережене → 200", r.status === 200, `status=${r.status}`);
+        r = await fetch(base + "/api/state", { headers: { Cookie: "ly_session=" + t85Cookie1 } });
+        check("Issue #85: сесію відкликано після зміни прав → 401", r.status === 401, `status=${r.status}`);
+
+        // --- Повторний вхід після відкликання працює (це не бан) ---
+        t85Login = await t85Verify(t85Pin);
+        const t85Cookie2 = t85Login.cookie;
+        check(
+          "Issue #85: повторний вхід після зміни прав → 200 і нова сесія",
+          t85Login.status === 200 && t85Login.data && t85Login.data.teacherId === t85Id && t85Cookie2.length >= 32,
+          `status=${t85Login.status}`
+        );
+        r = await fetch(base + "/api/state", { headers: { Cookie: "ly_session=" + t85Cookie2 } });
+        check("Issue #85: нова сесія викладача читає стан → 200", r.status === 200, `status=${r.status}`);
+
+        // --- Деактивація: вхід і операції неможливі, сесії відкликано ---
+        r = await fetch(base + "/api/teachers/update", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+          body: JSON.stringify({ id: t85Id, active: false })
+        });
+        check("Issue #85: деактивація запису → 200", r.status === 200, `status=${r.status}`);
+        t85Login = await t85Verify(t85Pin);
+        check("Issue #85: вхід деактивованого викладача → 403", t85Login.status === 403, `status=${t85Login.status}`);
+        r = await fetch(base + "/api/presence/teacher", {
+          method: "POST",
+          headers: t85TeacherHeaders(t85Pin, t85Id),
+          body: JSON.stringify({})
+        });
+        check("Issue #85: операція деактивованого запису → 403", r.status === 403, `status=${r.status}`);
+        r = await fetch(base + "/api/state", { headers: { Cookie: "ly_session=" + t85Cookie2 } });
+        check("Issue #85: сесію відкликано після деактивації → 401", r.status === 401, `status=${r.status}`);
+
+        // --- Повне відновлення запису (адмін-запити скидають ліміт IP) ---
+        r = await fetch(base + "/api/teachers/update", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+          body: JSON.stringify({ id: t85Id, active: true, permissions: ["demo", "materials"] })
+        });
+        check("Issue #85: повторна активація з повними правами → 200", r.status === 200, `status=${r.status}`);
+
+        // --- Заміна PIN: старий PIN помирає, сесії відкликано, хеш у файлі ---
+        t85Login = await t85Verify(t85Pin);
+        const t85Cookie3 = t85Login.cookie;
+        check("Issue #85: вхід старим PIN перед заміною → 200", t85Login.status === 200, `status=${t85Login.status}`);
+        r = await fetch(base + "/api/teachers/set-pin", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+          body: JSON.stringify({ id: t85Id, pin: t85NewPin })
+        });
+        check("Issue #85: заміна PIN адміністратором → 200", r.status === 200, `status=${r.status}`);
+        r = await fetch(base + "/api/state", { headers: { Cookie: "ly_session=" + t85Cookie3 } });
+        check("Issue #85: сесію відкликано після заміни PIN → 401", r.status === 401, `status=${r.status}`);
+        t85Login = await t85Verify(t85Pin);
+        check("Issue #85: старий PIN після заміни → 403", t85Login.status === 403, `status=${t85Login.status}`);
+        t85Login = await t85Verify(t85NewPin);
+        check(
+          "Issue #85: новий PIN після заміни → 200 і той самий обліковий запис",
+          t85Login.status === 200 && t85Login.data && t85Login.data.teacherId === t85Id,
+          `status=${t85Login.status}`
+        );
+
+        // --- Без PIN-ідентифікатора персональний PIN не діє (без fallback) ---
+        r = await fetch(base + "/api/presence/teacher", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Portal-Pin": t85NewPin },
+          body: JSON.stringify({})
+        });
+        check("Issue #85: персональний PIN без X-Portal-Teacher → 403", r.status === 403, `status=${r.status}`);
+        r = await fetch(base + "/api/presence/teacher", {
+          method: "POST",
+          headers: t85TeacherHeaders(t85NewPin, "deadbeefdeadbeef"),
+          body: JSON.stringify({})
+        });
+        check("Issue #85: PIN з невідомим ідентифікатором запису → 403", r.status === 403, `status=${r.status}`);
+
+        // --- Формат PIN: рівно 4 цифри ---
+        r = await fetch(base + "/api/teachers/create", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+          body: JSON.stringify({ fullName: "Issue85 Формат1", pin: "12ab" })
+        });
+        check("Issue #85: PIN не з 4 цифр (букви) → 400", r.status === 400, `status=${r.status}`);
+        r = await fetch(base + "/api/teachers/create", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+          body: JSON.stringify({ fullName: "Issue85 Формат2", pin: "12345" })
+        });
+        check("Issue #85: PIN не з 4 цифр (5 цифр) → 400", r.status === 400, `status=${r.status}`);
+
+        // --- Ліміт спроб ЗА ОБЛІКОВИМ ЗАПИСОМ (3 невдачі → блок, і PIN-відповідність не рятує) ---
+        r = await fetch(base + "/api/teachers/create", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+          body: JSON.stringify({ fullName: "Issue85 Другий", pin: t85Pin2 })
+        });
+        t85Body = await r.json().catch(() => null);
+        t85Id2 = t85Body && t85Body.teacher ? t85Body.teacher.id : "";
+        check("Issue #85: створено другий запис для тесту ліміту", r.status === 201 && Boolean(t85Id2), `status=${r.status}`);
+        for (let attempt = 0; attempt < 3; attempt++) {
+          await fetch(base + "/api/presence/teacher", {
+            method: "POST",
+            headers: t85TeacherHeaders("0000", t85Id2),
+            body: JSON.stringify({})
+          });
+        }
+        r = await fetch(base + "/api/presence/teacher", {
+          method: "POST",
+          headers: t85TeacherHeaders(t85Pin2, t85Id2),
+          body: JSON.stringify({})
+        });
+        check(
+          "Issue #85: після 3 невдач обліковий запис блокується (429 навіть з правильним PIN)",
+          r.status === 429,
+          `status=${r.status}`
+        );
+        t85Login = await t85Verify(t85Pin2);
+        check("Issue #85: вхід заблокованого облікового запису → 429", t85Login.status === 429, `status=${t85Login.status}`);
+        r = await fetch(base + "/api/teachers", { headers: t85AdminHeaders });
+        check("Issue #85: адміністратор не залежить від ліміту запису → 200", r.status === 200, `status=${r.status}`);
+
+        // --- Видалення: лише з підтвердженням ---
+        r = await fetch(base + "/api/teachers/delete", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+          body: JSON.stringify({ id: t85Id2 })
+        });
+        check("Issue #85: видалення без confirm → 400", r.status === 400, `status=${r.status}`);
+        r = await fetch(base + "/api/teachers/delete", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+          body: JSON.stringify({ id: t85Id2, confirm: true })
+        });
+        check("Issue #85: видалення з confirm → 200", r.status === 200, `status=${r.status}`);
+        t85Id2 = "";
+        r = await fetch(base + "/api/teachers", { headers: t85AdminHeaders });
+        t85Body = await r.json().catch(() => null);
+        check(
+          "Issue #85: видалений запис зник зі списку",
+          r.status === 200 && Array.isArray(t85Body.teachers) &&
+            !t85Body.teachers.some((item) => item.fullName === "Issue85 Другий")
+        );
+
+        // --- Учень і гість без адмін-доступу ---
+        r = await fetch(base + "/api/teachers", { headers: sess() });
+        check("Issue #85: сесія учня не читає список → 403", r.status === 403, `status=${r.status}`);
+        r = await fetch(base + "/api/teachers/create", {
+          method: "POST",
+          headers: Object.assign({}, sess(), t85JsonHeaders),
+          body: JSON.stringify({ fullName: "Issue85 Учень", pin: "2222" })
+        });
+        check("Issue #85: сесія учня не створює записи → 403", r.status === 403, `status=${r.status}`);
+        r = await fetch(base + "/teachers", { headers: sess() });
+        check("Issue #85: сторінка /teachers для учня → 403", r.status === 403, `status=${r.status}`);
+        r = await fetch(base + "/api/teachers");
+        check("Issue #85: запит без входу до /api/teachers → 401", r.status === 401, `status=${r.status}`);
+
+        // --- Файл записів: лише хеш scrypt, жодного PIN у відкритому вигляді ---
+        const t85StoreRaw = t85Fs.readFileSync(t85StoreFile, "utf-8");
+        let t85Store = null;
+        try { t85Store = JSON.parse(t85StoreRaw); } catch { /* не JSON */ }
+        check(
+          "Issue #85: materials/.teachers.json містить лише хеши scrypt, без PIN",
+          Boolean(t85Store) && Array.isArray(t85Store.teachers) &&
+            t85StoreRaw.includes("scrypt$") &&
+            t85Store.teachers.every((item) =>
+              typeof item.pinHash === "string" && item.pinHash.startsWith("scrypt$") && !("pin" in item)) &&
+            !t85StoreRaw.includes('"' + t85Pin + '"') &&
+            !t85StoreRaw.includes('"' + t85NewPin + '"') &&
+            !t85StoreRaw.includes('"' + t85Pin2 + '"')
+        );
+
+        // --- Архівація: м'яке видалення, каталог матеріалів не змінюється ---
+        r = await fetch(base + "/api/files", { headers: t85AdminHeaders });
+        const t85FilesBefore = r.status === 200 ? (await r.json()).length : -1;
+        r = await fetch(base + "/api/teachers/archive", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+          body: JSON.stringify({ id: t85Id })
+        });
+        check("Issue #85: архівація запису → 200", r.status === 200, `status=${r.status}`);
+        r = await fetch(base + "/api/files", { headers: t85AdminHeaders });
+        const t85FilesAfter = r.status === 200 ? (await r.json()).length : -2;
+        check(
+          "Issue #85: архівація не видаляє матеріали (кількість файлів лишилася)",
+          t85FilesBefore >= 0 && t85FilesBefore === t85FilesAfter,
+          `before=${t85FilesBefore}, after=${t85FilesAfter}`
+        );
+        r = await fetch(base + "/api/teachers", { headers: t85AdminHeaders });
+        t85Body = await r.json().catch(() => null);
+        const t85Archived = t85Body && Array.isArray(t85Body.teachers)
+          ? t85Body.teachers.find((item) => item.id === t85Id)
+          : null;
+        check(
+          "Issue #85: архівований запис у списку (archived=true, active=false)",
+          Boolean(t85Archived) && t85Archived.archived === true && t85Archived.active === false
+        );
+        t85Login = await t85Verify(t85NewPin);
+        check("Issue #85: вхід архівованого запису → 403", t85Login.status === 403, `status=${t85Login.status}`);
+
+        // --- Сторінка /teachers для адміністратора (сесія за PORTAL_PIN) ---
+        t85Login = await t85Verify(PIN);
+        const t85AdminCookie = t85Login.cookie;
+        check(
+          "Issue #85: вхід за PORTAL_PIN → admin:true",
+          t85Login.status === 200 && t85Login.data && t85Login.data.admin === true && t85Login.data.role === "teacher",
+          `status=${t85Login.status}`
+        );
+        r = await fetch(base + "/teachers", { headers: { Cookie: "ly_session=" + t85AdminCookie } });
+        const t85PageHtml = await r.text();
+        check(
+          "Issue #85: адміністратор відкриває /teachers (панель без PIN/хешів)",
+          r.status === 200 &&
+            t85PageHtml.includes('id="teachersList"') &&
+            t85PageHtml.includes("Викладачі") &&
+            !t85PageHtml.includes("pinHash"),
+          `status=${r.status}`
+        );
+        r = await fetch(base + "/teachers");
+        check("Issue #85: сторінка /teachers без входу → 403", r.status === 403, `status=${r.status}`);
+
+        // --- Прибирання власних тестових даних (не чужі записи) ---
+        r = await fetch(base + "/api/teachers/delete", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+          body: JSON.stringify({ id: t85Id, confirm: true })
+        });
+        check("Issue #85: прибирання — видалення тестового запису → 200", r.status === 200, `status=${r.status}`);
+        if (t85CatId) {
+          await fetch(base + "/api/categories/delete", {
+            method: "POST",
+            headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+            body: JSON.stringify({ categoryId: t85CatId })
+          });
+        }
+        r = await fetch(base + "/api/teachers", { headers: t85AdminHeaders });
+        t85Body = await r.json().catch(() => null);
+        check(
+          "Issue #85: після прибирання тестові записи відсутні у файлі",
+          r.status === 200 && Array.isArray(t85Body.teachers) &&
+            !t85Body.teachers.some((item) => item.id === t85Id || item.fullName === t85Name)
+        );
+
+        // --- Екземпляр БЕЗ PORTAL_PIN: випадковий PIN лише в терміналі ---
+        const GEN_PORT = PORT + 3;
+        const genBase = "http://127.0.0.1:" + GEN_PORT;
+        const genEnv = Object.assign({}, process.env, { PORT: String(GEN_PORT), CI: "" });
+        delete genEnv.PORTAL_PIN;
+        const gen = spawn(process.execPath, ["server.js"], {
+          env: genEnv,
+          stdio: ["ignore", "pipe", "pipe"]
+        });
+        let genLog = "";
+        gen.stdout.on("data", (chunk) => { genLog += chunk; });
+        gen.stderr.on("data", (chunk) => { genLog += chunk; });
+        try {
+          const genUp = await waitForHealth(genBase);
+          check("Issue #85: екземпляр без PORTAL_PIN запущено", genUp, "port=" + GEN_PORT);
+          if (genUp) {
+            check(
+              "Issue #85: без PORTAL_PIN PIN згенеровано і надруковано один раз у терміналі",
+              genLog.includes("Адміністративний PIN: згенеровано випадково") &&
+                /PIN для цього запуску: \d{6}/.test(genLog)
+            );
+            const genPinMatch = genLog.match(/PIN для цього запуску: (\d{6})/);
+            const genPin = genPinMatch ? genPinMatch[1] : "";
+            check(
+              "Issue #85: згенерований PIN — рівно 6 цифр і не тестовий PIN",
+              genPin.length === 6 && genPin !== PIN
+            );
+            if (genPin) {
+              const genLogin = await (await fetch(genBase + "/api/auth/verify", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ pin: genPin })
+              })).json().catch(() => null);
+              check(
+                "Issue #85: згенерований PIN дає адмін-сесію",
+                Boolean(genLogin) && genLogin.ok === true && genLogin.admin === true
+              );
+              const genWrong = await fetch(genBase + "/api/auth/verify", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ pin: PIN })
+              });
+              check("Issue #85: тестовий PIN на екземплярі без PORTAL_PIN → 403", genWrong.status === 403, `status=${genWrong.status}`);
+              // Значення PIN не потрапляє у відповіді HTTP (лише термінал)
+              const genRoot = await (await fetch(genBase + "/")).text();
+              const genHealth = await (await fetch(genBase + "/health")).text();
+              const genDemo = await (await fetch(genBase + "/demonstration")).text();
+              check(
+                "Issue #85: згенерований PIN відсутній у відповідях HTTP",
+                !genRoot.includes(genPin) && !genHealth.includes(genPin) && !genDemo.includes(genPin)
+              );
+            }
+          }
+        } finally {
+          gen.kill();
+        }
+
+        check(
+          "Issue #85: основний екземпляр не друкує значення заданого PIN",
+          SERVER_LOG.includes("PIN викладача: задано через змінну PORTAL_PIN") &&
+            !SERVER_LOG.includes("PIN для цього запуску")
+        );
+      } finally {
+        // Прибирання навіть за помилки: видаляємо лише записи, створені ТУТ
+        try {
+          const t85CleanupHeaders = Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders);
+          if (t85Id) {
+            await fetch(base + "/api/teachers/delete", {
+              method: "POST",
+              headers: t85CleanupHeaders,
+              body: JSON.stringify({ id: t85Id, confirm: true })
+            });
+          }
+          if (t85Id2) {
+            await fetch(base + "/api/teachers/delete", {
+              method: "POST",
+              headers: t85CleanupHeaders,
+              body: JSON.stringify({ id: t85Id2, confirm: true })
+            });
+          }
+          if (t85CatId) {
+            await fetch(base + "/api/categories/delete", {
+              method: "POST",
+              headers: t85CleanupHeaders,
+              body: JSON.stringify({ categoryId: t85CatId })
+            });
+          }
+        } catch { /* прибирання не валить тест */ }
+      }
+
       // Issue #63: автозупинка демонстрації, коли вчитель пішов. Окремий
       // екземпляр із коротким тайм-аутом присутності — щоб не впливати на
       // інші тести; той самий каталог матеріалів на диску (fileId існує на
