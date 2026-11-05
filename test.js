@@ -2148,12 +2148,12 @@ async function main() {
       const t85StoreFile = t85Path.join(__dirname, "materials", ".teachers.json");
 
       check(
-        "Issue #85: конфігурація без PIN за замовчуванням (2468 прибрано)",
-        !t85ConfigSrc.includes('"2468"')
+        "Issue #85: конфігурація з мінімальним стандартним PIN (PORTAL_PIN або 2468)",
+        t85ConfigSrc.includes('process.env.PORTAL_PIN || "2468"')
       );
       check(
-        "Issue #85: README не рекламує PIN за замовчуванням і описує PORTAL_PIN",
-        !t85Readme.includes("2468") && t85Readme.includes("PORTAL_PIN")
+        "Issue #85: README описує PORTAL_PIN поточним стандартним 2468",
+        t85Readme.includes("PORTAL_PIN") && t85Readme.includes("2468")
       );
       check("Issue #85: materials/ поза Git (.gitignore)", t85Gitignore.includes("materials/"));
       check(
@@ -2569,7 +2569,10 @@ async function main() {
             !t85Body.teachers.some((item) => item.id === t85Id || item.fullName === t85Name)
         );
 
-        // --- Екземпляр БЕЗ PORTAL_PIN: випадковий PIN лише в терміналі ---
+        // --- Екземпляр БЕЗ PORTAL_PIN: стандартний PIN і захищений запуск ---
+        // Issue #85 (05-11-2026, рішення власника після рядка «стандартний 2468»):
+        // випадкова генерація PIN прибрана — сервер має працювати без ручного
+        // втручання після кожного перезапуску, PIN = PORTAL_PIN або 2468.
         const GEN_PORT = PORT + 3;
         const genBase = "http://127.0.0.1:" + GEN_PORT;
         const genEnv = Object.assign({}, process.env, { PORT: String(GEN_PORT), CI: "" });
@@ -2583,44 +2586,31 @@ async function main() {
         gen.stderr.on("data", (chunk) => { genLog += chunk; });
         try {
           const genUp = await waitForHealth(genBase);
-          check("Issue #85: екземпляр без PORTAL_PIN запущено", genUp, "port=" + GEN_PORT);
+          check("Issue #85: екземпляр без PORTAL_PIN запущено (стандартний PIN)", genUp, "port=" + GEN_PORT);
           if (genUp) {
+            const genLogin = await (await fetch(genBase + "/api/auth/verify", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ pin: PIN })
+            })).json().catch(() => null);
             check(
-              "Issue #85: без PORTAL_PIN PIN згенеровано і надруковано один раз у терміналі",
-              genLog.includes("Адміністративний PIN: згенеровано випадково") &&
-                /PIN для цього запуску: \d{6}/.test(genLog)
+              "Issue #85: без PORTAL_PIN стандартний 4-значний PIN дає адмін-сесію",
+              Boolean(genLogin) && genLogin.ok === true && genLogin.admin === true
             );
-            const genPinMatch = genLog.match(/PIN для цього запуску: (\d{6})/);
-            const genPin = genPinMatch ? genPinMatch[1] : "";
+            const genWrong = await fetch(genBase + "/api/auth/verify", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ pin: "9999" })
+            });
+            check("Issue #85: чужий PIN на екземплярі без PORTAL_PIN → 403", genWrong.status === 403, `status=${genWrong.status}`);
+            // Значення PIN не потрапляє у відповіді HTTP
+            const genRoot = await (await fetch(genBase + "/")).text();
+            const genHealth = await (await fetch(genBase + "/health")).text();
+            const genDemo = await (await fetch(genBase + "/demonstration")).text();
             check(
-              "Issue #85: згенерований PIN — рівно 6 цифр і не тестовий PIN",
-              genPin.length === 6 && genPin !== PIN
+              "Issue #85: стандартний PIN відсутній у відповідях HTTP",
+              !genRoot.includes(PIN) && !genHealth.includes(PIN) && !genDemo.includes(PIN)
             );
-            if (genPin) {
-              const genLogin = await (await fetch(genBase + "/api/auth/verify", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ pin: genPin })
-              })).json().catch(() => null);
-              check(
-                "Issue #85: згенерований PIN дає адмін-сесію",
-                Boolean(genLogin) && genLogin.ok === true && genLogin.admin === true
-              );
-              const genWrong = await fetch(genBase + "/api/auth/verify", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ pin: PIN })
-              });
-              check("Issue #85: тестовий PIN на екземплярі без PORTAL_PIN → 403", genWrong.status === 403, `status=${genWrong.status}`);
-              // Значення PIN не потрапляє у відповіді HTTP (лише термінал)
-              const genRoot = await (await fetch(genBase + "/")).text();
-              const genHealth = await (await fetch(genBase + "/health")).text();
-              const genDemo = await (await fetch(genBase + "/demonstration")).text();
-              check(
-                "Issue #85: згенерований PIN відсутній у відповідях HTTP",
-                !genRoot.includes(genPin) && !genHealth.includes(genPin) && !genDemo.includes(genPin)
-              );
-            }
           }
         } finally {
           gen.kill();
@@ -2628,8 +2618,7 @@ async function main() {
 
         check(
           "Issue #85: основний екземпляр не друкує значення заданого PIN",
-          SERVER_LOG.includes("PIN викладача: задано через змінну PORTAL_PIN") &&
-            !SERVER_LOG.includes("PIN для цього запуску")
+          SERVER_LOG.includes("PIN викладача: задано через змінну PORTAL_PIN")
         );
       } finally {
         // Прибирання навіть за помилки: видаляємо лише записи, створені ТУТ
