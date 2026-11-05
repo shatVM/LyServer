@@ -12,9 +12,32 @@
  * 6653554595). Атрибуція спроб за обліковим записом можлива лише тоді,
  * коли запит містить ідентифікатор викладача (X-Portal-Teacher) — тоді
  * невірний PIN зараховується саме цьому запису.
+ *
+ * Issue #85 (додаткове, за зауваженням аудиту PR #86): ТРЕТИЙ лімітатор —
+ * за відбитком спробованого PIN (ключ — HMAC-відбиток PIN, секрет лише у
+ * пам'яті сервера). PIN одночасно є ідентифікатором входу, тому до
+ * ідентифікації облікового запису його неможливо зараховувати саме запису;
+ * відбиток дозволяє обмежити серії невдалих спроб входу за конкретним PIN
+ * навіть без X-Portal-Teacher, не розкриваючи сам PIN і не створюючи
+ * можливості масового блокування всіх записів (до ключа доступу лише при
+ * введенні саме цього PIN). Сам PIN і звичайний незахищений хеш PIN не
+ * зберігаються.
  */
 
+const crypto = require("node:crypto");
 const config = require("../config");
+
+/** Серверний секрет для відбитків спроб PIN — тільки в пам'яті процесу;
+ *  після перезапуску сервера лімітери скидаються (разом із сесіями). */
+const attemptSecret = crypto.randomBytes(32);
+
+/**
+ * Захищений відбиток спроби PIN: HMAC, зворотний хід неможливий без
+ * серверного секрету. Не є PIN ani його хешем.
+ */
+function pinFingerprint(pin) {
+  return crypto.createHmac("sha256", attemptSecret).update(String(pin || "")).digest("hex");
+}
 
 /**
  * Фабрика лімітатора спроб.
@@ -100,4 +123,19 @@ const accountLimiter = createLimiter(
   config.pinBlockMs
 );
 
-module.exports = { ...ipLimiter, createLimiter, accountLimiter };
+// Issue #85 (додаткове): ліміт спроб входу за відбиток PIN (ключ — HMAC-відбиток).
+// Діє до ідентифікації облікового запису — не дає перебирати 4-значні PIN
+// безмежно, навіть змінюючи IP (ключ за відбиток PIN, а не за IP).
+const pinAttemptLimiter = createLimiter(
+  config.pinMaxAttempts,
+  config.pinWindowMs,
+  config.pinBlockMs
+);
+
+module.exports = {
+  ...ipLimiter,
+  createLimiter,
+  accountLimiter,
+  pinAttemptLimiter,
+  pinFingerprint
+};

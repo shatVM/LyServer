@@ -26,7 +26,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const config = require("../config");
 const { hashPin, verifyPin, isValidPin } = require("../utils/pinHash");
-const { accountLimiter } = require("../utils/pinLimiter");
+const { accountLimiter, pinAttemptLimiter, pinFingerprint } = require("../utils/pinLimiter");
 const sessionService = require("./sessionService");
 
 /** Дозволені для призначення дозволи (фіксований набір, без «конструктора прав») */
@@ -175,6 +175,22 @@ class TeacherService {
     const pinValue = validatePin(pin);
     const perms = normalizePermissions(permissions) || [...PERMISSIONS];
     const now = Date.now();
+
+    // Унікальність PIN: не може належати іншому активному обліковому запису
+    // і не може збігатися з адміністративним PORTAL_PIN (включно зі
+    // стандартним значенням, якщо змінна не задано). Перевірка серверним
+    // сервісом — одною синхронною операцією читання+запису (Node
+    // однопоточний, тому в-process гонки немає).
+    const existingWithSamePin = readStore().teachers.find(
+      (record) => record.active && !record.archived && verifyPin(pinValue, record.pinHash)
+    );
+    if (existingWithSamePin) {
+      throw badRequest("Такий PIN уже використовується іншим обліковим записом викладача");
+    }
+    if (pinValue === config.portalPin) {
+      throw badRequest("Персональний PIN не може збігатися з адміністративним PIN");
+    }
+
     const record = {
       id: crypto.randomBytes(9).toString("hex"),
       fullName: name,
@@ -233,6 +249,20 @@ class TeacherService {
     const store = readStore();
     const record = store.teachers.find((item) => item.id === String(id));
     if (!record) throw notFound("Викладача не знайдено");
+
+    // Унікальності PIN: не може належати іншому активному обліковому запису
+    // і не може збігатися з адміністративним PORTAL_PIN.
+    const existingWithSamePin = store.teachers.find(
+      (r) =>
+        r.id !== record.id && r.active && !r.archived && verifyPin(pinValue, r.pinHash)
+    );
+    if (existingWithSamePin) {
+      throw badRequest("Такий PIN уже використовується іншим обліковим записом викладача");
+    }
+    if (pinValue === config.portalPin) {
+      throw badRequest("Персональний PIN не може збігатися з адміністративним PIN");
+    }
+
     record.pinHash = hashPin(pinValue);
     record.updatedAt = Date.now();
     writeStore(store);
@@ -284,8 +314,13 @@ class TeacherService {
     const record = this.getRecord(id);
     if (!record) return { error: "notfound" };
     if (accountLimiter.isBlocked(record.id)) return { error: "locked" };
-    if (!verifyPin(pin, record.pinHash)) return { error: "wrong" };
+    const fingerprint = pinFingerprint(pin);
+    if (!verifyPin(pin, record.pinHash)) {
+      pinAttemptLimiter.registerFailure(fingerprint);
+      return { error: "wrong" };
+    }
     if (!record.active || record.archived) return { error: "inactive" };
+    pinAttemptLimiter.reset(fingerprint);
     accountLimiter.reset(record.id);
     return { teacher: record };
   }
@@ -294,18 +329,28 @@ class TeacherService {
    * Вхід за персональним PIN без ідентифікатора (POST /api/auth/verify):
    * система сама визначає, якому викладачеві належить PIN, і повертає ПІБ.
    * Невдалий вхід атрибутувати конкретному запису неможливо (PIN і є
-   * ідентифікатором), тому його лімітує IP-лімітатор (див. DECISIONS.md).
+   * ідентифікатором), тому його лімітує IP-лімітатор і новий лімітатор за
+   * захищеним відбитком PIN (див. utils/pinLimiter.js pinAttemptLimiter).
+   * Спроби за конкретним відбитком PIN блокуються після pinMaxAttempts
+   * невдалих спроб — це не дає перебирати 4-значні PIN безмежно, навіть
+   * змінюючи IP, і не дає одній помилковій спробі заблокувати всі записи.
+   * У сховищі лімітера залишається лише HMAC-відбиток, а не сам PIN.
    * @returns {{teacher?: object, error?: "notfound"|"locked"}}
    */
   login(pin) {
+    const fingerprint = pinFingerprint(pin);
+    if (pinAttemptLimiter.isBlocked(fingerprint)) return { error: "locked" };
+
     const store = readStore();
     for (const record of store.teachers) {
       if (record.archived || !record.active) continue;
       if (!verifyPin(pin, record.pinHash)) continue;
       if (accountLimiter.isBlocked(record.id)) return { error: "locked" };
+      pinAttemptLimiter.reset(fingerprint);
       accountLimiter.reset(record.id);
       return { teacher: record };
     }
+    pinAttemptLimiter.registerFailure(fingerprint);
     return { error: "notfound" };
   }
 }
