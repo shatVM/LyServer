@@ -22,7 +22,7 @@ const testingService = require("../services/testingService");
 class TestingController {
   /** POST /api/testing/start { options: 3|4 } — запуск тестування вчителем */
   start(req, res) {
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "demo")) return;
     presenceService.markTeacherSeen();
     const body = req.body || {};
     try {
@@ -36,7 +36,7 @@ class TestingController {
 
   /** POST /api/testing/finish — дострокове ручне завершення приймання */
   finish(req, res) {
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "demo")) return;
     presenceService.markTeacherSeen();
     try {
       const state = stateService.getState();

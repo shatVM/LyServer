@@ -51,6 +51,29 @@ class ViewController {
     });
   }
 
+  /**
+   * Issue #85: адміністративний розділ «Викладачі» (створення облікових
+   * записів, дозволи, заміна PIN, деактивація/архівація/видалення).
+   *
+   * Доступ перевіряється СЕРВЕРОМ, а не приховуванням меню: потрібна чинна
+   * сесія з access "admin" (що видається лише за адміністративним PORTAL_PIN).
+   * Викладач (персональний PIN), учень і гість отримують 403 без розкриття
+   * даних розділу; HTML-розмітка не містить ні PIN, ні хешів (їх немає й у
+   * відповідях /api/teachers).
+   */
+  renderTeachers(req, res) {
+    const session = auth.readSession(req);
+    if (!session || session.access !== "admin") {
+      return res.status(403).send("Доступ до розділу «Викладачі» має лише адміністратор");
+    }
+    res.render("teachers", {
+      title: "Викладачі",
+      activeMenu: "teachers",
+      description: "Облікові записи викладачів, їхні дозволи та персональні PIN",
+      port: config.port
+    });
+  }
+
   healthCheck(req, res) {
     res.json({ status: "ok" });
   }
