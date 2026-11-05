@@ -19,8 +19,9 @@
 const crypto = require("node:crypto");
 const config = require("../config");
 const pinLimiter = require("./pinLimiter");
-// Issue #85: лімітатор спроб за обліковим записом викладача (ключ — teacherId)
-const { accountLimiter } = require("./pinLimiter");
+// Issue #85: лімітатори спроб за обліковим записом (ключ — teacherId) і за
+// захищеним відбитком PIN (до ідентифікації облікового запису)
+const { accountLimiter, pinAttemptLimiter, pinFingerprint } = require("./pinLimiter");
 const sessionService = require("../services/sessionService");
 // Issue #85: персональні облікові записи викладачів (PIN → хеш → права)
 const teacherService = require("../services/teacherService");
@@ -212,33 +213,40 @@ function clientKey(req) {
  *  3. PIN збігається з PORTAL_PIN → { ok, access: "admin" } (повні права);
  *  4. є ідентифікатор облікового запису → перевірка САМЕ цього запису:
  *     - обліковий запис заблоковано лімітатором спроб → { error: "account-blocked" };
- *     - запис не існує → { error: "wrong" } (+ спроба зараховується за IP);
- *     - невірний PIN → { error: "wrong" } (+ IP і обліковий запис);
+ *     - запис не існує → { error: "wrong" } (+ спроба зараховується за IP і відбиток PIN);
+ *     - невірний PIN → { error: "wrong" } (+ IP, відбиток PIN і обліковий запис);
  *     - правильний PIN, але запис неактивний/архівований → { error: "inactive" }
  *       (спроба НЕ зараховується: PIN уже відомий власникові);
  *     - чинний запис → { ok, access: "teacher", teacher: record };
  *  5. PIN не адміністративний і ідентифікатора немає → { error: "wrong" }
  *     (невдалий перебір за персональним PIN атрибутувати неможливо — PIN і є
- *     ідентифікатором, тому його лімітує лише IP-лімітатор).
+ *     ідентифікатором, тому його лімітує IP-лімітатор і лімітер відбитка PIN).
  *
  * Лічильник спроб за обліковим записом ведеться тут (accountLimiter), щоб
  * атрибуція була в одному місці; скидання — після кожної успішної перевірки.
+ * Лімітер відбитка PIN (pinAttemptLimiter) ведеться за захищеним HMAC-відбитком
+ * введеного PIN — діє до ідентифікації облікового запису і не дозволяє
+ * безмежного перебору 4-значних PIN.
  */
 function evaluatePin(req) {
   const pin = extractPin(req);
   const key = clientKey(req);
+  const fingerprint = pinFingerprint(pin);
 
   if (!pin) return { error: "empty" };
   if (pinLimiter.isBlocked(key)) return { error: "ip-blocked" };
+  if (pinAttemptLimiter.isBlocked(fingerprint)) return { error: "pin-blocked" };
 
   if (safeEqual(pin, config.portalPin)) {
     pinLimiter.reset(key);
+    pinAttemptLimiter.reset(fingerprint);
     return { ok: true, access: "admin" };
   }
 
   const teacherId = extractTeacherId(req);
   if (!teacherId) {
     pinLimiter.registerFailure(key);
+    pinAttemptLimiter.registerFailure(fingerprint);
     return { error: "wrong" };
   }
 
@@ -246,6 +254,7 @@ function evaluatePin(req) {
   if (outcome.error === "locked") return { error: "account-blocked" };
   if (outcome.error === "notfound") {
     pinLimiter.registerFailure(key);
+    pinAttemptLimiter.registerFailure(fingerprint);
     return { error: "wrong" };
   }
   if (outcome.error === "wrong") {
@@ -255,8 +264,8 @@ function evaluatePin(req) {
   }
   if (outcome.error === "inactive") return { error: "inactive" };
 
-  // Успішна перевірка викладача — скидаємо й IP, і лічильник облікового запису
-  // (verifyFor уже скинув accountLimiter; тут — для надійності разом з IP)
+  // Успішна перевірка викладача — скидаємо лічильники (verifyFor вже скинув
+  // accountLimiter та pinAttemptLimiter; тут — для надійності разом з IP)
   pinLimiter.reset(key);
   accountLimiter.reset(teacherId);
   return { ok: true, access: "teacher", teacher: outcome.teacher };
@@ -296,6 +305,10 @@ function requirePerm(req, res, perm) {
     res.status(429).send("Забагато спроб введення PIN. Спробуйте пізніше.");
     return null;
   }
+  if (result.error === "pin-blocked") {
+    res.status(429).send("Забагато спроб введення PIN. Спробуйте пізніше.");
+    return null;
+  }
   if (result.error === "account-blocked") {
     res.status(429).send("Забагато спроб введення PIN для облікового запису. Спробуйте пізніше.");
     return null;
@@ -330,7 +343,7 @@ function requireAdmin(req, res) {
   const pin = extractPin(req);
   if (pin) {
     const result = evaluatePin(req);
-    if (result.error === "ip-blocked" || result.error === "account-blocked") {
+    if (result.error === "ip-blocked" || result.error === "pin-blocked" || result.error === "account-blocked") {
       res.status(429).send("Забагато спроб введення PIN. Спробуйте пізніше.");
       return null;
     }

@@ -2425,6 +2425,74 @@ async function main() {
         t85Body = await r.json().catch(() => null);
         t85Id2 = t85Body && t85Body.teacher ? t85Body.teacher.id : "";
         check("Issue #85: створено другий запис для тесту ліміту", r.status === 201 && Boolean(t85Id2), `status=${r.status}`);
+
+        // --- Унікальність PIN: не може належати іншому активному обліковому запису
+        // --- і не може збігатися з адміністративним PORTAL_PIN ---
+        r = await fetch(base + "/api/teachers/create", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+          body: JSON.stringify({ fullName: "Issue85 Конфлікт PIN", pin: t85Pin2 })
+        });
+        check("Issue #85: другий викладач із PIN першого → 400", r.status === 400, `status=${r.status}`);
+        r = await fetch(base + "/api/teachers/set-pin", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+          body: JSON.stringify({ id: t85Id, pin: t85Pin2 })
+        });
+        check("Issue #85: заміна PIN на зайнятий іншим записом → 400", r.status === 400, `status=${r.status}`);
+        r = await fetch(base + "/api/teachers/create", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+          body: JSON.stringify({ fullName: "Issue85 Конфлікт Адмін", pin: PIN })
+        });
+        check("Issue #85: PIN рівний адміністративному PORTAL_PIN → 400", r.status === 400, `status=${r.status}`);
+        r = await fetch(base + "/api/teachers/set-pin", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+          body: JSON.stringify({ id: t85Id2, pin: PIN })
+        });
+        check("Issue #85: заміна PIN на PORTAL_PIN → 400", r.status === 400, `status=${r.status}`);
+        // Конкурентне створення з однаковим PIN — лише одне успішне (сервер однопоточний,
+        // читання+запис синхронні, тому гонки всередині процесу неможливі)
+        const pinC = "7777";
+        const resultsC = await Promise.all([
+          fetch(base + "/api/teachers/create", {
+            method: "POST",
+            headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+            body: JSON.stringify({ fullName: "Issue85 Конкурент 1", pin: pinC })
+          }),
+          fetch(base + "/api/teachers/create", {
+            method: "POST",
+            headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+            body: JSON.stringify({ fullName: "Issue85 Конкурент 2", pin: pinC })
+          })
+        ]);
+        const statusesC = resultsC.map((r) => r.status);
+        check(
+          "Issue #85: конкурентне створення з однаковим PIN — лише одне успішне",
+          statusesC.includes(201) && statusesC.filter((s) => s === 201).length === 1,
+          JSON.stringify(statusesC)
+        );
+        const succC = await (resultsC[statusesC.indexOf(201)]).json().catch(() => null);
+        if (succC && succC.teacher && succC.teacher.id) {
+          await fetch(base + "/api/teachers/delete", {
+            method: "POST",
+            headers: Object.assign({ "Content-Type": "application/json" }, t85AdminHeaders),
+            body: JSON.stringify({ id: succC.teacher.id, confirm: true })
+          });
+        }
+        // CLI-інструмент власника теж відхиляє зайнятий PIN
+        const { execSync } = require("node:child_process");
+        let cliExit = 0;
+        try {
+          execSync("node tools\\teachers.js create --name \"Issue85 CLIКонфлікт\"", {
+            env: Object.assign({}, process.env, { TEACHER_PIN: t85Pin2 }),
+            stdio: ["ignore", "pipe", "pipe"]
+          });
+        } catch (error) {
+          cliExit = error.status || 1;
+        }
+        check("Issue #85: CLI відхиляє зайнятий PIN (не нульовий вихідний код)", cliExit !== 0);
         for (let attempt = 0; attempt < 3; attempt++) {
           await fetch(base + "/api/presence/teacher", {
             method: "POST",
@@ -2569,7 +2637,51 @@ async function main() {
             !t85Body.teachers.some((item) => item.id === t85Id || item.fullName === t85Name)
         );
 
-        // --- Екземпляр БЕЗ PORTAL_PIN: стандартний PIN і захищений запуск ---
+        // --- Захист входу за персональним PIN від перебору (лімітер за IP +
+        // --- захищеним відбитком PIN, діє до ідентифікації облікового запису) ---
+        const PL = require(t85Path.join(__dirname, "src", "utils", "pinLimiter"));
+
+        // Помилки входу не розкривають існування облікового запису: невірний PIN
+        // існуючого (архівованого) запису та PIN неіснуючого запису — одна помилка.
+        const rwExist = await t85Verify("4681"); // невірний PIN запису t85Id (зараз 4682)
+        const rwNone = await t85Verify("0000"); // PIN, що не належить жодному запису
+        check(
+          "Issue #85: помилка входу однакова для існуючого та неіснуючого PIN",
+          rwExist.status === 403 && rwNone.status === 403 &&
+            JSON.stringify(rwExist.data) === JSON.stringify(rwNone.data),
+          `exist=${rwExist.status} none=${rwNone.status}`
+        );
+        // Адміністративний запит скидає лічильник IP перед серією спроб входу
+        r = await fetch(base + "/api/teachers", { headers: t85AdminHeaders });
+        check("Issue #85: адміністративний запит між тестами лімітера → 200", r.status === 200, `status=${r.status}`);
+
+        // Серія неправильних PIN під час входу: лічильник працює, одна спроба не блокує
+        for (let i = 0; i < 4; i++) {
+          const rw = await t85Verify("9999");
+          check("Issue #85: невдала спроба входу → 403, не блокує після однієї", rw.status === 403, `attempt=${i + 1}`);
+        }
+
+        // Одиниця: лімітер за відбиток PIN блокує після 5 невдалих, один PIN не блокує інший
+        const fpA = PL.pinFingerprint("11111111");
+        const fpB = PL.pinFingerprint("22222222");
+        for (let i = 0; i < 5; i++) PL.pinAttemptLimiter.registerFailure(fpA);
+        check("Issue #85: лімітер відбитка PIN блокує після 5 невдалих спроб", PL.pinAttemptLimiter.isBlocked(fpA));
+        PL.pinAttemptLimiter.registerFailure(fpB);
+        check("Issue #85: один PIN не блокує вхід іншим PIN", !PL.pinAttemptLimiter.isBlocked(fpB));
+        check("Issue #85: відбиток PIN — хешоподібне значення, а не сам PIN",
+          typeof PL.pinFingerprint === "function" && PL.pinFingerprint("x").length === 64 &&
+            PL.pinFingerprint("x") !== "x");
+
+        // Статичний перевірка: ключ лімітера входу — відбиток PIN (HMAC), а не IP;
+        // зміна IP не скидає лічильник спроб за конкретним PIN.
+        const pinLimiterSrc = t85Fs.readFileSync(t85Path.join(__dirname, "src", "utils", "pinLimiter.js"), "utf-8");
+        check("Issue #85: лімітер входу використовує захищений відбиток PIN (createHmac/pinFingerprint)",
+          pinLimiterSrc.includes("createHmac") && pinLimiterSrc.includes("pinFingerprint") &&
+            pinLimiterSrc.includes("pinAttemptLimiter"));
+        // PIN не зберігається у лімітері ani у логах сервера
+        check("Issue #85: введені PIN не потрапили у журнали сервера",
+          !SERVER_LOG.includes("9999") && !SERVER_LOG.includes("4681") && !SERVER_LOG.includes("0000"));
+
         // Issue #85 (05-11-2026, рішення власника після рядка «стандартний 2468»):
         // випадкова генерація PIN прибрана — сервер має працювати без ручного
         // втручання після кожного перезапуску, PIN = PORTAL_PIN або 2468.
