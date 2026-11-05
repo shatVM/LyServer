@@ -28,7 +28,7 @@ class FileController {
     // Issue #4: приховані файли недоступні учням.
     // Issue #63 (доробка): виняток — матеріал, який зараз демонструється
     // (перевірка на сервері при кожному запиті, див. mediaAccess)
-    if (!canViewMedia(name, isTeacher)) {
+    if (!canViewMedia(name, isTeacher, identity.teacherId)) {
       return res.status(404).send("Файл не знайдено");
     }
 

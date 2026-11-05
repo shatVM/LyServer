@@ -189,9 +189,11 @@ function requireViewer(req, res) {
  * Без входу — 401; далі право на конкретний файл вирішує mediaAccess.
  */
 function mediaIdentity(req, res) {
-  if (extractPin(req) && isTeacher(req)) return { isTeacher: true };
   const session = readSession(req);
-  if (session) return { isTeacher: session.role === "teacher", session };
+  if (extractPin(req) && isTeacher(req)) {
+    return { isTeacher: true, teacherId: session ? session.teacherId : null };
+  }
+  if (session) return { isTeacher: session.role === "teacher", session, teacherId: session.role === "teacher" ? session.teacherId : null };
   res.status(401).send("Сесію не знайдено — увійдіть заново");
   return null;
 }

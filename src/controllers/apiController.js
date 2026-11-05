@@ -13,6 +13,13 @@ const slideService = require("../services/slideService");
 const pinLimiter = require("../utils/pinLimiter");
 const teacherService = require("../services/teacherService");
 
+/** Отримати teacherId з чинної серверної сесії (не з тіла/заголовка запиту) */
+function teacherIdFromSession(req) {
+  const session = auth.readSession(req);
+  if (!session || session.role !== "teacher") return null;
+  return session.teacherId || null;
+}
+
 /**
  * Issue #63 (доробка §2): безпечний набір полів категорії.
  * У відповідь віддаються ЛИШЕ id/name/order/createdAt — ніяких даних про
@@ -186,9 +193,11 @@ class ApiController {
     if (!originalName) return res.status(400).send("Не вказано ім'я файлу");
     const description = typeof req.query.description === "string" ? req.query.description : "";
     const categoryId = typeof req.query.categoryId === "string" ? req.query.categoryId : "";
+    const folderId = typeof req.query.folderId === "string" ? req.query.folderId : "";
+    const teacherId = teacherIdFromSession(req);
 
     try {
-      const result = await fileService.saveFileStream(req, originalName, description, categoryId);
+      const result = await fileService.saveFileStream(req, originalName, description, categoryId, teacherId || null, folderId || null);
       const ext = path.extname(result.id).toLowerCase();
       let conversionStatus = "not-required";
       if (config.slideExtensions.has(ext)) {
@@ -301,9 +310,10 @@ class ApiController {
 
   renameFile(req, res) {
     if (!auth.requirePerm(req, res, "materials")) return;
+    const teacherId = teacherIdFromSession(req);
     try {
       const body = req.body || {};
-      res.json(fileService.renameFile(body.file, body.name));
+      res.json(fileService.renameFile(teacherId, body.file, body.name));
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Не вдалося перейменувати матеріал");
     }
@@ -311,9 +321,10 @@ class ApiController {
 
   setFileCategory(req, res) {
     if (!auth.requirePerm(req, res, "materials")) return;
+    const teacherId = teacherIdFromSession(req);
     try {
       const body = req.body || {};
-      const result = fileService.moveFileToCategory(body.file, body.categoryId);
+      const result = fileService.moveFileToCategory(teacherId, body.file, body.categoryId);
       // Issue #63 (доробка §2): склад категорій змінився — групування каталогу
       // в учнів оновлюється на наступному опитуванні стану
       stateService.touch();
@@ -325,19 +336,20 @@ class ApiController {
 
   reorderFile(req, res) {
     if (!auth.requirePerm(req, res, "materials")) return;
+    const teacherId = teacherIdFromSession(req);
     try {
       const body = req.body || {};
-      res.json(fileService.reorderFile(body.file, body.direction));
+      res.json(fileService.reorderFile(teacherId, body.file, body.direction));
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Не вдалося змінити порядок");
     }
   }
   toggleHide(req, res) {
-    const { pin, file, hidden } = req.body || {};
     if (!auth.requirePerm(req, res, "materials")) return;
-
+    const teacherId = teacherIdFromSession(req);
+    const { file, hidden } = req.body || {};
     try {
-      const result = fileService.toggleHide(file, Boolean(hidden));
+      const result = fileService.toggleHide(teacherId, file, Boolean(hidden));
       // Issue #63 (Етап 4): ревізія /api/state зростає — усі учнівські клієнти
       // на черговому опитуванні перечитують каталог і бачать прихований матеріал
       // зниклим (а опублікований — знову доступним) без перезавантаження
@@ -349,11 +361,11 @@ class ApiController {
   }
 
   deleteFile(req, res) {
-    const { pin, file } = req.body || {};
     if (!auth.requirePerm(req, res, "materials")) return;
-
+    const teacherId = teacherIdFromSession(req);
+    const { file } = req.body || {};
     try {
-      const result = fileService.deleteFile(file);
+      const result = fileService.deleteFile(teacherId, file);
       stateService.resetIfFileMatches(file);
       // Also delete cached slides
       slideService.clearSlides(file);
@@ -409,7 +421,7 @@ class ApiController {
     // Issue #63 (аудит кешування): відповідь про приватний ресурс не кешується
     res.set("Cache-Control", "no-store");
     const isTeacher = identity.isTeacher;
-    if (!canViewMedia(file, isTeacher)) {
+    if (!canViewMedia(file, isTeacher, identity.teacherId)) {
       return res.status(404).json({ ready: false });
     }
     const manifest = slideService.getManifest(file);

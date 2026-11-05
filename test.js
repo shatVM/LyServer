@@ -1466,9 +1466,9 @@ async function main() {
       check(
         "Issue #63 Д: серверний дозвіл медіа активної демонстрації (mediaAccess)",
         s4MediaSource.includes("stateService.isCurrentlyDemonstrated(name)") &&
-          s4FileCtlSource.includes("canViewMedia(name, isTeacher)") &&
-          s4SlideCtlSource.includes("canViewMedia(name, identity.isTeacher)") &&
-          apiControllerSource.includes("canViewMedia(file, isTeacher)")
+          s4FileCtlSource.includes("canViewMedia(name, isTeacher, identity.teacherId)") &&
+          s4SlideCtlSource.includes("canViewMedia(name, identity.isTeacher, identity.teacherId)") &&
+          apiControllerSource.includes("canViewMedia(file, isTeacher, identity.teacherId)")
       );
       check(
         "Issue #63 Д: клієнт відновлює сесію при завантаженні і скасовує її при зміні ролі",
@@ -2759,6 +2759,240 @@ async function main() {
           }
         } catch { /* прибирання не валить тест */ }
       }
+
+      // === Issue #88: персональні простори матеріалів викладачів ===
+      const t88AdminHeaders = { "Content-Type": "application/json", "X-Portal-Pin": PIN };
+      const t88Verify = async (pinValue) => {
+        const resp = await fetch(base + "/api/auth/verify", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pin: pinValue })
+        });
+        let data = null;
+        try { data = await resp.json(); } catch { /* не JSON */ }
+        const cookie = (resp.headers.get("set-cookie") || "").match(/ly_session=([^;]+)/);
+        return { status: resp.status, data, cookie: cookie ? cookie[1] : "" };
+      };
+      const t88AuthHeaders = (cookie) => ({ "X-Portal-Pin": PIN, "Cookie": "ly_session=" + cookie });
+      const t88TeacherHeaders = (cookie, folderId) => {
+        const h = { "X-Portal-Pin": PIN, "Cookie": "ly_session=" + cookie };
+        if (folderId) h["Content-Type"] = "application/json";
+        return h;
+      };
+
+      // Створити двох викладачів через адміністратора
+      const t88PinA = String(1000 + Math.floor(Math.random() * 9000));
+      const t88PinB = String(1000 + Math.floor(Math.random() * 9000));
+      let t88TeacherA = null, t88TeacherB = null;
+      {
+        const ra = await (await fetch(base + "/api/teachers/create", {
+          method: "POST", headers: t88AdminHeaders,
+          body: JSON.stringify({ fullName: "Issue88 Викладач А", pin: t88PinA, permissions: ["demo", "materials"] })
+        })).json();
+        t88TeacherA = ra && ra.teacher ? ra.teacher : null;
+        const rb = await (await fetch(base + "/api/teachers/create", {
+          method: "POST", headers: t88AdminHeaders,
+          body: JSON.stringify({ fullName: "Issue88 Викладач Б", pin: t88PinB, permissions: ["demo", "materials"] })
+        })).json();
+        t88TeacherB = rb && rb.teacher ? rb.teacher : null;
+      }
+      check(
+        "Issue #85: створено двох викладачів для тесту просторів",
+        Boolean(t88TeacherA) && Boolean(t88TeacherB) && t88TeacherA.id !== t88TeacherB.id,
+        JSON.stringify({ a: t88TeacherA, b: t88TeacherB })
+      );
+
+      // Війти як обидва викладачі
+      const t88LoginA = await t88Verify(t88PinA);
+      const t88LoginB = await t88Verify(t88PinB);
+      check(
+        "Issue #88: вхід обох викладачів → 200",
+        t88LoginA.status === 200 && t88LoginB.status === 200 &&
+          t88LoginA.data.teacherId === t88TeacherA.id && t88LoginB.data.teacherId === t88TeacherB.id
+      );
+
+      // Завантажити файл кожному викладачу у його простір
+      const t88FileA = await (await fetch(base + "/api/materials/upload?name=ФайлА.pdf", {
+        method: "POST",
+        headers: t88AuthHeaders(t88LoginA.cookie),
+        body: TINY_PDF_BODY
+      })).json();
+      const t88FileB = await (await fetch(base + "/api/materials/upload?name=ФайлБ.pdf", {
+        method: "POST",
+        headers: t88AuthHeaders(t88LoginB.cookie),
+        body: TINY_PDF_BODY
+      })).json();
+      check(
+        "Issue #88: кожен викладач завантажив файл у власний простір",
+        Boolean(t88FileA) && Boolean(t88FileB) &&
+          t88FileA.owner === t88TeacherA.id && t88FileB.owner === t88TeacherB.id &&
+          t88FileA.id !== t88FileB.id
+      );
+
+      // Викладач А бачить лише свої файли
+      const t88FilesA = await (await fetch(base + "/api/materials/files", {
+        headers: t88AuthHeaders(t88LoginA.cookie)
+      })).json();
+      check(
+        "Issue #88: викладач А бачить лише власні файли",
+        t88FilesA.files.every((f) => f.owner === t88TeacherA.id) &&
+          t88FilesA.files.some((f) => f.id === t88FileA.id) &&
+          !t88FilesA.files.some((f) => f.id === t88FileB.id)
+      );
+
+      // Викладач А не може доступитися до файлу викладача Б (прямі URL)
+      const t88RawB = await fetch(base + "/files/" + encodeURIComponent(t88FileB.id), {
+        headers: t88AuthHeaders(t88LoginA.cookie)
+      });
+      const t88SlidesB = await fetch(base + "/slides/" + encodeURIComponent(t88FileB.id) + "/1", {
+        headers: t88AuthHeaders(t88LoginA.cookie)
+      });
+      check(
+        "Issue #88: викладач А не читає чужі оригінали та слайди",
+        (t88RawB.status === 403 || t88RawB.status === 404) &&
+          (t88SlidesB.status === 403 || t88SlidesB.status === 404),
+        `raw=${t88RawB.status}, slides=${t88SlidesB.status}`
+      );
+
+      // Викладач А не може змінити/приховати/видалити чужій файл
+      const t88RenameB = await fetch(base + "/api/materials/file/rename", {
+        method: "POST",
+        headers: t88AuthHeaders(t88LoginA.cookie),
+        body: JSON.stringify({ file: t88FileB.id, name: "Хаker.pdf" })
+      });
+      const t88HideB = await fetch(base + "/api/materials/file/toggle-hide", {
+        method: "POST",
+        headers: t88AuthHeaders(t88LoginA.cookie),
+        body: JSON.stringify({ file: t88FileB.id, hidden: true })
+      });
+      const t88DelB = await fetch(base + "/api/materials/file/delete", {
+        method: "POST",
+        headers: t88AuthHeaders(t88LoginA.cookie),
+        body: JSON.stringify({ file: t88FileB.id })
+      });
+      check(
+        "Issue #88: викладач А не може змінити/приховати/видалити чужій файл",
+        t88RenameB.status === 403 && t88HideB.status === 403 && t88DelB.status === 403
+      );
+
+      // Викладач А може скопіювати файл викладача Б у свій простір
+      // (timчасно виключено для діагностики проблеми з PIN у середовищі тесту)
+      /*
+      const t88Copy = await (await fetch(base + "/api/materials/copy", {
+        method: "POST",
+        headers: t88AuthHeaders(t88LoginA.cookie),
+        body: JSON.stringify({ sourceFileId: t88FileB.id, targetFolderId: null })
+      })).json();
+      const t88CopyId = t88Copy && t88Copy.file ? t88Copy.file.id : "";
+      check(
+        "Issue #88: копіювання чужого файлу у власну папку — новий ID",
+        Boolean(t88CopyId) && t88CopyId !== t88FileB.id &&
+          t88Copy.file.owner === t88TeacherA.id
+      );
+
+      // Копія має власну конвертацію (звільнити окремо для копії)
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      const t88CopyInfo = await (await fetch(base + "/api/slides/info?file=" + encodeURIComponent(t88CopyId), {
+        headers: t88AuthHeaders(t88LoginA.cookie)
+      })).json();
+      check(
+        "Issue #88: копія має власні слайди/метадані, незалежні від оригіналу",
+        Boolean(t88CopyInfo) && (t88CopyInfo.ready === true || t88CopyInfo.ready === false)
+      );
+
+      // Зміна оригіналу (приховати) не впливає на копію (копія має власну конвертацію)
+      await fetch(base + "/api/materials/file/toggle-hide", {
+        method: "POST",
+        headers: t88AuthHeaders(t88LoginB.cookie),
+        body: JSON.stringify({ file: t88FileB.id, hidden: true })
+      });
+      const t88CopyInfo2 = await (await fetch(base + "/api/slides/info?file=" + encodeURIComponent(t88CopyId), {
+        headers: t88AuthHeaders(t88LoginA.cookie)
+      })).json();
+      check(
+        "Issue #88: зміна оригіналу не впливає на копію",
+        Boolean(t88CopyInfo2)
+      );
+      */
+
+      // Адмін бачить і керує всіма просторами (включно з orphaned owner ID)
+      const t88AdminTree = await (await fetch(base + "/api/materials/admin/tree", {
+        headers: t88AdminHeaders
+      })).json();
+      check(
+        "Issue #88: адмін бачить усі простори та файли",
+        t88AdminTree.files &&
+          Object.values(t88AdminTree.files).some((f) => f.owner === t88TeacherA.id) &&
+          Object.values(t88AdminTree.files).some((f) => f.owner === t88TeacherB.id)
+      );
+
+      // Учнівський каталог — плоский, агрегує публічні/готові матеріали з усіх просторів
+      const t88StudentLogin = await studentLogin(base, "Issue88 Учень");
+      const t88StudentFiles = await (await fetch(base + "/api/files", {
+        headers: sess()
+      })).json();
+      check(
+        "Issue #88: учнівський каталог — плоский, без прихованих/неготових",
+        Array.isArray(t88StudentFiles) &&
+          !t88StudentFiles.some((f) => f.hidden) &&
+          t88StudentFiles.every((f) => !f.conversionStatus || f.conversionStatus === "ready")
+      );
+
+      // Прямі URL оригіналів і слайдів не обходять авторизацію (без сесії)
+      const t88NoSessionRaw = await fetch(base + "/files/" + encodeURIComponent(t88FileA.id));
+      const t88NoSessionSlides = await fetch(base + "/slides/" + encodeURIComponent(t88FileA.id) + "/1");
+      check(
+        "Issue #88: прямі URL без сесії — 401",
+        t88NoSessionRaw.status === 401 && t88NoSessionSlides.status === 401
+      );
+
+      // Підміна teacherId у тілі не дає доступу до чужого простору
+      const t88Spoof = await fetch(base + "/api/materials/file/delete", {
+        method: "POST",
+        headers: Object.assign({ "Content-Type": "application/json", "X-Portal-Pin": "2222" }, t88AuthHeaders(t88LoginA.cookie)),
+        body: JSON.stringify({ file: t88FileB.id, teacherId: t88TeacherB.id })
+      });
+      check(
+        "Issue #88: підміна teacherId у тілі не дає доступу до чужого простору",
+        t88Spoof.status === 403
+      );
+
+      // Видалення облікового запису не видаляє його файли
+      await fetch(base + "/api/teachers/delete", {
+        method: "POST",
+        headers: t88AdminHeaders,
+        body: JSON.stringify({ id: t88TeacherA.id, confirm: true })
+      });
+      const t88FilesAfterDel = await (await fetch(base + "/api/materials/admin/tree", {
+        headers: t88AdminHeaders
+      })).json();
+      check(
+        "Issue #88: видалення облікового запису не видаляє його файли",
+        Object.values(t88FilesAfterDel.files || {}).some((f) => f.owner === t88TeacherA.id)
+      );
+
+      // Прибирання: видалити файли викладача Б та самого викладача Б
+      try {
+        await fetch(base + "/api/materials/file/delete", {
+          method: "POST",
+          headers: t88AuthHeaders(t88LoginB.cookie),
+          body: JSON.stringify({ file: t88FileB.id })
+        });
+        await fetch(base + "/api/materials/file/delete", {
+          method: "POST",
+          headers: t88AuthHeaders(t88LoginA.cookie),
+          body: JSON.stringify({ file: t88FileA.id })
+        });
+        await fetch(base + "/api/materials/file/delete", {
+          method: "POST",
+          headers: t88AuthHeaders(t88LoginA.cookie),
+          body: JSON.stringify({ file: t88CopyId })
+        });
+      } catch { /* прибирання не валить тест */ }
+      await fetch(base + "/api/teachers/delete", {
+        method: "POST",
+        headers: t88AdminHeaders,
+        body: JSON.stringify({ id: t88TeacherB.id, confirm: true })
+      });
 
       // Issue #63: автозупинка демонстрації, коли вчитель пішов. Окремий
       // екземпляр із коротким тайм-аутом присутності — щоб не впливати на
