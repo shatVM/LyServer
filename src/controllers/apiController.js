@@ -9,6 +9,9 @@ const signalService = require("../services/signalService");
 // Issue #83: стан тестування для конкретного запитувача (state.testing)
 const testingService = require("../services/testingService");
 const slideService = require("../services/slideService");
+// Issue #85: перевірка персонального PIN викладача при вході
+const pinLimiter = require("../utils/pinLimiter");
+const teacherService = require("../services/teacherService");
 
 /**
  * Issue #63 (доробка §2): безпечний набір полів категорії.
@@ -25,14 +28,65 @@ function safeCategory(category) {
 }
 
 class ApiController {
+  /**
+   * POST /api/auth/verify { pin } — вхід на портал (Issue #85).
+   *
+   * Один формат входу для двох типів облікових даних:
+   *  - адміністративний PORTAL_PIN → сесія з access "admin" (повний доступ,
+   *    зокрема розділ «Викладачі»); відповідь містить admin: true;
+   *  - персональний PIN викладача → система сама визначає обліковий запис,
+   *    повертає його ідентифікатор і ПІБ (без PIN/хеша), сесія access "teacher".
+   * Невірний PIN → 403 з лічильником спроб (IP-лімітатор); PIN неактивного
+   * викладача → 403; заблокований обліковий запис → 429.
+   * PIN у відповідь не повертається ніколи.
+   */
   verifyAuth(req, res) {
-    if (!auth.requirePinJson(req, res)) return;
-    // Вхід учителя = присутність на зв'язку (автозупинка показу при виході)
+    const pin = auth.extractPin(req);
+    const key = auth.clientKey(req);
+
+    if (pinLimiter.isBlocked(key)) {
+      return res.status(429).json({ ok: false, message: "Забагато спроб введення PIN. Спробуйте пізніше." });
+    }
+    if (!pin) {
+      pinLimiter.registerFailure(key);
+      return res.status(403).json({ ok: false, message: "Невірний PIN викладача" });
+    }
+
+    // 1) Адміністративний PIN (PORTAL_PIN) — як і раніше, головний механізм
+    if (auth.safeEqual(pin, config.portalPin)) {
+      pinLimiter.reset(key);
+      // Вхід на портал = присутність на зв'язку (автозупинка показу при виході)
+      presenceService.markTeacherSeen();
+      auth.issueSession(req, res, "teacher", "", { access: "admin" });
+      return res.json({ ok: true, role: "teacher", admin: true });
+    }
+
+    // 2) Персональний PIN викладача — запис визначається сам сервером
+    let outcome;
+    try {
+      outcome = teacherService.login(pin);
+    } catch (error) {
+      return res.status(500).json({ ok: false, message: "Не вдалося перевірити облікові записи: " + error.message });
+    }
+    if (outcome.error === "locked") {
+      return res.status(429).json({ ok: false, message: "Забагато спроб введення PIN. Спробуйте пізніше." });
+    }
+    if (outcome.error === "notfound") {
+      pinLimiter.registerFailure(key);
+      return res.status(403).json({ ok: false, message: "Невірний PIN викладача" });
+    }
+
+    pinLimiter.reset(key);
+    const teacher = outcome.teacher;
     presenceService.markTeacherSeen();
-    // Issue #63 (Етап 5): вхід фіксується серверною сесією (HttpOnly cookie),
-    // тому після перезапуску сервера старі cookie не відновлюють доступ
-    auth.issueSession(req, res, "teacher");
-    res.json({ ok: true, role: "teacher" });
+    auth.issueSession(req, res, "teacher", "", {
+      access: "teacher",
+      teacherId: teacher.id,
+      fullName: teacher.fullName
+    });
+    // Ідентифікатор облікового запису клієнт надсилає далі разом із PIN
+    // (X-Portal-Teacher), щоб операції керування зараховувалися за цим записом
+    res.json({ ok: true, role: "teacher", teacherId: teacher.id, fullName: teacher.fullName });
   }
 
   /**
@@ -112,7 +166,8 @@ class ApiController {
 
   updateControl(req, res) {
     const { pin, ...data } = req.body || {};
-    if (!auth.requirePin(req, res)) return;
+    // Issue #85: керування показом належить дозволу demo
+    if (!auth.requirePerm(req, res, "demo")) return;
     // Будь-яке успішне керування показом — вчитель на зв'язку (Issue #63)
     presenceService.markTeacherSeen();
 
@@ -125,7 +180,8 @@ class ApiController {
   }
 
   async uploadFile(req, res) {
-    if (!auth.requirePin(req, res)) return;
+    // Issue #85: робота з матеріалами належить дозволу materials
+    if (!auth.requirePerm(req, res, "materials")) return;
     const originalName = req.query.name;
     if (!originalName) return res.status(400).send("Не вказано ім'я файлу");
     const description = typeof req.query.description === "string" ? req.query.description : "";
@@ -193,7 +249,7 @@ class ApiController {
   }
 
   createCategory(req, res) {
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "materials")) return;
     try {
       const category = fileService.createCategory(req.body && req.body.name);
       // Issue #63 (доробка §2): ревізія стану зростає — клієнти учнів
@@ -207,7 +263,7 @@ class ApiController {
   }
 
   deleteCategory(req, res) {
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "materials")) return;
     try {
       const result = fileService.deleteCategory(req.body && req.body.categoryId);
       // Issue #63 (доробка §2): ревізія стану — клієнти учнів перечитують
@@ -220,7 +276,7 @@ class ApiController {
   }
 
   renameCategory(req, res) {
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "materials")) return;
     try {
       const body = req.body || {};
       const result = fileService.renameCategory(body.categoryId, body.name);
@@ -232,7 +288,7 @@ class ApiController {
   }
 
   reorderCategory(req, res) {
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "materials")) return;
     try {
       const body = req.body || {};
       const result = fileService.reorderCategory(body.categoryId, body.direction);
@@ -244,7 +300,7 @@ class ApiController {
   }
 
   renameFile(req, res) {
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "materials")) return;
     try {
       const body = req.body || {};
       res.json(fileService.renameFile(body.file, body.name));
@@ -254,7 +310,7 @@ class ApiController {
   }
 
   setFileCategory(req, res) {
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "materials")) return;
     try {
       const body = req.body || {};
       const result = fileService.moveFileToCategory(body.file, body.categoryId);
@@ -268,7 +324,7 @@ class ApiController {
   }
 
   reorderFile(req, res) {
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "materials")) return;
     try {
       const body = req.body || {};
       res.json(fileService.reorderFile(body.file, body.direction));
@@ -278,7 +334,7 @@ class ApiController {
   }
   toggleHide(req, res) {
     const { pin, file, hidden } = req.body || {};
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "materials")) return;
 
     try {
       const result = fileService.toggleHide(file, Boolean(hidden));
@@ -294,7 +350,7 @@ class ApiController {
 
   deleteFile(req, res) {
     const { pin, file } = req.body || {};
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "materials")) return;
 
     try {
       const result = fileService.deleteFile(file);
@@ -313,7 +369,7 @@ class ApiController {
    * The conversion is async — client may need to poll if it takes time.
    */
   async prepareSlides(req, res) {
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "materials")) return;
     const { file } = req.body || {};
     if (!file) return res.status(400).send("Не вказано file");
     try {

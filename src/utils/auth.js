@@ -19,7 +19,11 @@
 const crypto = require("node:crypto");
 const config = require("../config");
 const pinLimiter = require("./pinLimiter");
+// Issue #85: лімітатор спроб за обліковим записом викладача (ключ — teacherId)
+const { accountLimiter } = require("./pinLimiter");
 const sessionService = require("../services/sessionService");
+// Issue #85: персональні облікові записи викладачів (PIN → хеш → права)
+const teacherService = require("../services/teacherService");
 
 /** Ім'я HttpOnly cookie сесії входу (викладач або учень) */
 const SESSION_COOKIE = "ly_session";
@@ -55,6 +59,23 @@ function extractPin(req) {
   return "";
 }
 
+/**
+ * Issue #85: ідентифікатор облікового запису викладача.
+ *
+ * Клієнт надсилає його разом із персональним PIN (заголовок X-Portal-Teacher
+ * або поле `teacherId` в тілі запиту). Це дозволяє серверу зараховувати невдалі
+ * спроби саме за обліковим записом (додатковий до IP ліміт спроб) і не
+ * плутати персональний PIN викладача з адміністративним PORTAL_PIN.
+ */
+function extractTeacherId(req) {
+  const header = req.headers && req.headers["x-portal-teacher"];
+  if (header !== undefined && header !== null && String(header) !== "") {
+    return String(header).slice(0, 64);
+  }
+  if (req.body && req.body.teacherId) return String(req.body.teacherId).slice(0, 64);
+  return "";
+}
+
 /** Простий парсер Cookie-заголовка (без залежностей від cookie-parser) */
 function parseCookies(req) {
   const header = req.headers && req.headers.cookie;
@@ -83,15 +104,29 @@ function readSession(req) {
  * Issue #63 (Етап 5): видача HttpOnly cookie сесії.
  * Повторний вхід тієї самої ролі ПЕРЕВИКОРИСТОВУЄ наявну сесію (сторінку
  * викладача перезавантажують часто), а зміна ролі скасовує попередню.
+ *
+ * Issue #85: `meta` несе контекст доступу — access ("admin"|"teacher"|"student"),
+ * teacherId (персональний обліковий запис) і ПІБ. Сесія адміністратора і викладача
+ * має role "teacher" (чинна логіка клієнта), але різний access. Перевертаємо
+ * сесію, якщо змінився сам обліковий запис (інакше вхід іншого викладача
+ * перевикористав би чужу cookie).
  */
-function issueSession(req, res, role, name = "") {
+function issueSession(req, res, role, name = "", meta = {}) {
+  const access = meta.access || role;
+  const teacherId = meta.teacherId || "";
   const existing = readSession(req);
-  if (existing && existing.role === role && (!name || existing.name === name)) {
+  const reusable =
+    existing &&
+    existing.role === role &&
+    (existing.access || existing.role) === access &&
+    (existing.teacherId || "") === teacherId &&
+    (!name || existing.name === name);
+  if (reusable) {
     res.cookie(SESSION_COOKIE, existing.id, sessionCookieOptions(req));
     return existing;
   }
   if (existing) sessionService.destroy(existing.id);
-  const session = sessionService.create(role, name);
+  const session = sessionService.create(role, name, { access, teacherId, fullName: meta.fullName || "" });
   res.cookie(SESSION_COOKIE, session.id, sessionCookieOptions(req));
   return session;
 }
@@ -169,31 +204,164 @@ function clientKey(req) {
 }
 
 /**
+ * Issue #85: спільна перевірка PIN-запиту (адміністративний або персональний).
+ *
+ * Порядок:
+ *  1. PIN відсутній → { error: "empty" } (сам викликав вирішує, чи рахувати);
+ *  2. IP заблоковано лімітатором → { error: "ip-blocked" };
+ *  3. PIN збігається з PORTAL_PIN → { ok, access: "admin" } (повні права);
+ *  4. є ідентифікатор облікового запису → перевірка САМЕ цього запису:
+ *     - обліковий запис заблоковано лімітатором спроб → { error: "account-blocked" };
+ *     - запис не існує → { error: "wrong" } (+ спроба зараховується за IP);
+ *     - невірний PIN → { error: "wrong" } (+ IP і обліковий запис);
+ *     - правильний PIN, але запис неактивний/архівований → { error: "inactive" }
+ *       (спроба НЕ зараховується: PIN уже відомий власникові);
+ *     - чинний запис → { ok, access: "teacher", teacher: record };
+ *  5. PIN не адміністративний і ідентифікатора немає → { error: "wrong" }
+ *     (невдалий перебір за персональним PIN атрибутувати неможливо — PIN і є
+ *     ідентифікатором, тому його лімітує лише IP-лімітатор).
+ *
+ * Лічильник спроб за обліковим записом ведеться тут (accountLimiter), щоб
+ * атрибуція була в одному місці; скидання — після кожної успішної перевірки.
+ */
+function evaluatePin(req) {
+  const pin = extractPin(req);
+  const key = clientKey(req);
+
+  if (!pin) return { error: "empty" };
+  if (pinLimiter.isBlocked(key)) return { error: "ip-blocked" };
+
+  if (safeEqual(pin, config.portalPin)) {
+    pinLimiter.reset(key);
+    return { ok: true, access: "admin" };
+  }
+
+  const teacherId = extractTeacherId(req);
+  if (!teacherId) {
+    pinLimiter.registerFailure(key);
+    return { error: "wrong" };
+  }
+
+  const outcome = teacherService.verifyFor(teacherId, pin);
+  if (outcome.error === "locked") return { error: "account-blocked" };
+  if (outcome.error === "notfound") {
+    pinLimiter.registerFailure(key);
+    return { error: "wrong" };
+  }
+  if (outcome.error === "wrong") {
+    pinLimiter.registerFailure(key);
+    accountLimiter.registerFailure(teacherId);
+    return { error: "wrong" };
+  }
+  if (outcome.error === "inactive") return { error: "inactive" };
+
+  // Успішна перевірка викладача — скидаємо й IP, і лічильник облікового запису
+  // (verifyFor уже скинув accountLimiter; тут — для надійності разом з IP)
+  pinLimiter.reset(key);
+  accountLimiter.reset(teacherId);
+  return { ok: true, access: "teacher", teacher: outcome.teacher };
+}
+
+/**
  * Мовчазна перевірка ролі «викладач» (для розділених ресурсів: список файлів,
  * стрімінг, слайди). Невдалий PIN з урахуванням ліміту спроб зараховується,
  * але відповідь не змінюється — для клієнта це просто «не викладач».
  * Відсутність PIN не зараховується як спроба (інакше анонімні GET-запити
  * вичерпували б лімітатор і блокували роботу вчителя з того самого IP).
+ *
+ * Issue #85: працює і з адміністративним PIN (PORTAL_PIN), і з персональним
+ * PIN викладача (із заголовком X-Portal-Teacher).
  */
 function isTeacher(req) {
   const pin = extractPin(req);
   if (!pin) return false;
-
-  const key = clientKey(req);
-  if (pinLimiter.isBlocked(key)) return false;
-
-  if (safeEqual(pin, config.portalPin)) {
-    pinLimiter.reset(key);
-    return true;
-  }
-
-  pinLimiter.registerFailure(key);
-  return false;
+  return Boolean(evaluatePin(req).ok);
 }
 
 /**
- * Строга перевірка PIN для операцій керування. У разі помилки сам надсилає
- * відповідь (429 — забагато спроб, 403 — невірний PIN) і повертає false.
+ * Issue #85: перевірка права `perm` ("demo"|"materials") для операцій керування.
+ *
+ * Сесія НЕ авторизує ці операції (збережено чинний захист Issue #63: cookie не
+ * дає права на POST /api/*) — потрібен PIN у запиті:
+ *  - адміністративний PORTAL_PIN → повні права, без обмеження дозволів;
+ *  - персональний PIN викладача (X-Portal-Pin + X-Portal-Teacher) → лише ті
+ *    дозволи, які надано обліковому запису (перевіряються на сервері щоразу,
+ *    тому відкликання дозволу діє негайно).
+ * У разі помилки сам надсилає відповідь і повертає null.
+ */
+function requirePerm(req, res, perm) {
+  const result = evaluatePin(req);
+
+  if (result.error === "ip-blocked") {
+    res.status(429).send("Забагато спроб введення PIN. Спробуйте пізніше.");
+    return null;
+  }
+  if (result.error === "account-blocked") {
+    res.status(429).send("Забагато спроб введення PIN для облікового запису. Спробуйте пізніше.");
+    return null;
+  }
+  if (result.error === "empty" || result.error === "wrong") {
+    res.status(403).send("Неправильний PIN");
+    return null;
+  }
+  if (result.error === "inactive") {
+    res.status(403).send("Обліковий запис викладача недоступний");
+    return null;
+  }
+
+  if (result.access === "admin") return { access: "admin" };
+
+  const permissions = Array.isArray(result.teacher.permissions) ? result.teacher.permissions : [];
+  if (!permissions.includes(perm)) {
+    res.status(403).send("Недостатньо прав доступу");
+    return null;
+  }
+  return { access: "teacher", teacher: result.teacher };
+}
+
+/**
+ * Issue #85: доступ лише для адміністратора (розділ «Викладачі» / API).
+ *
+ * Приймає адміністративний PIN у запиті або чинну сесію з access "admin".
+ * Сесія викладача/учня → 403; без входу → 401 (як для інших сесійних API).
+ * PIN викладача навіть за наявності ідентифікатора не дає адмін-доступу.
+ */
+function requireAdmin(req, res) {
+  const pin = extractPin(req);
+  if (pin) {
+    const result = evaluatePin(req);
+    if (result.error === "ip-blocked" || result.error === "account-blocked") {
+      res.status(429).send("Забагато спроб введення PIN. Спробуйте пізніше.");
+      return null;
+    }
+    if (result.ok && result.access === "admin") return { access: "admin" };
+    if (result.ok) {
+      res.status(403).send("Доступ має лише адміністратор");
+      return null;
+    }
+    if (result.error === "inactive") {
+      res.status(403).send("Обліковий запис викладача недоступний");
+      return null;
+    }
+    res.status(403).send("Неправильний PIN");
+    return null;
+  }
+
+  const session = readSession(req);
+  if (session && session.access === "admin") return session;
+  if (session) {
+    res.status(403).send("Доступ має лише адміністратор");
+    return null;
+  }
+  res.status(401).send("Сесію не знайдено — увійдіть заново");
+  return null;
+}
+
+/**
+ * Строга перевірка АДМІНІСТРАТИВНОГО PIN (PORTAL_PIN) для операцій керування.
+ * У разі помилки сам надсилає відповідь (429 — забагато спроб, 403 — невірний
+ * PIN) і повертає false. Issue #85: персональні PIN викладачів тут НЕ
+ * приймаються — для них є requirePerm разом із заголовком X-Portal-Teacher.
  */
 function requirePin(req, res) {
   const key = clientKey(req);
@@ -238,11 +406,15 @@ function requirePinJson(req, res) {
 module.exports = {
   safeEqual,
   extractPin,
+  extractTeacherId,
   clientKey,
+  evaluatePin,
   isTeacher,
   catalogIdentity,
   requirePin,
   requirePinJson,
+  requirePerm,
+  requireAdmin,
   issueSession,
   clearSession,
   readSession,

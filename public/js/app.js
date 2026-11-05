@@ -3,6 +3,13 @@ const $ = id => document.getElementById(id);
 // Role & Session PIN management
 let role = localStorage.getItem("portalRole") || "";
 let pin = sessionStorage.getItem("portalPin") || "";
+// Issue #85: ідентифікатор облікового запису персонального PIN викладача та
+// прапорець адміністратора (відповідь POST /api/auth/verify). Потрібні для
+// заголовка X-Portal-Teacher (сервер зараховує спроби за обліковим записом)
+// і для показу адміністративного розділу «Викладачі». Сам PIN у відповідь
+// не повертається, у сесію теж не потрапляє.
+let teacherId = sessionStorage.getItem("portalTeacherId") || "";
+let isAdmin = sessionStorage.getItem("portalAdmin") === "1";
 let files = [];
 let categories = [];
 
@@ -65,10 +72,56 @@ let sharedViewerCleared = false;
 const isDemoPage = Boolean(window.location.pathname.includes("demonstration"));
 const isUploadPage = Boolean(window.location.pathname.includes("upload"));
 const isStudentsPage = Boolean(window.location.pathname.includes("students"));
-const isMaterialsPage = Boolean(!isDemoPage && !isUploadPage && !isStudentsPage);
+// Issue #85: адміністративний розділ «Викладачі» — окрема сторінка, яку не
+// можна плутати з «Переглядом матеріалів» (інакше викладача перенаправило б
+// на /demonstration і статус каталогу не оновлювався б тут)
+const isTeachersPage = Boolean(window.location.pathname.includes("teachers"));
+const isMaterialsPage = Boolean(!isDemoPage && !isUploadPage && !isStudentsPage && !isTeachersPage);
 
 // Extensions treated as slides (PNG images, not iframes or video)
 const SLIDE_EXTS = new Set([".pdf", ".ppt", ".pptx"]);
+
+// ---------------------------------------------------------------------------
+// Issue #85: авторизація запитів викладача (персональний PIN облікового запису)
+// ---------------------------------------------------------------------------
+
+/**
+ * Авторизаційні заголовки для захищених запитів керування:
+ *  - X-Portal-Pin — сам PIN (адміністративний PORTAL_PIN або персональний);
+ *  - X-Portal-Teacher — ідентифікатор облікового запису викладача. Він потрібен
+ *    серверу, щоб перевіряти САМЕ цей запис (активність, ліміт спроб) і не
+ *    приймати персональний PIN за адміністративний. Для адміністратора
+ *    (після входу за PORTAL_PIN) цього заголовка немає — він і раніше
+ *    авторизувався лише X-Portal-Pin.
+ */
+function applyAuthHeaders(headers) {
+  if (pin) headers["X-Portal-Pin"] = pin;
+  if (teacherId) headers["X-Portal-Teacher"] = teacherId;
+  return headers;
+}
+
+/**
+ * Обробка відповіді входу POST /api/auth/verify: сервер або підтверджує
+ * адміністратора (admin: true), або називає обліковий запис викладача
+ * (teacherId + fullName). Обидва випадки — role "teacher" для клієнта;
+ * PIN у відповідь не приходить (лише зберігається з форми входу).
+ */
+function applyLoginResponse(data) {
+  teacherId = data && data.teacherId ? String(data.teacherId) : "";
+  isAdmin = Boolean(data && data.admin);
+  if (teacherId) sessionStorage.setItem("portalTeacherId", teacherId);
+  else sessionStorage.removeItem("portalTeacherId");
+  if (isAdmin) sessionStorage.setItem("portalAdmin", "1");
+  else sessionStorage.removeItem("portalAdmin");
+}
+
+/** Issue #85: очищення контексту облікового запису (вихід або вхід як учень) */
+function clearLoginContext() {
+  teacherId = "";
+  isAdmin = false;
+  sessionStorage.removeItem("portalTeacherId");
+  sessionStorage.removeItem("portalAdmin");
+}
 
 function setStatus(text) {
   if ($("status")) {
@@ -192,7 +245,7 @@ async function sendTeacherHeartbeat() {
   try {
     await fetch("/api/presence/teacher", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Portal-Pin": pin },
+      headers: applyAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({})
     });
   } catch { /* silent */ }
@@ -222,7 +275,7 @@ function stopTeacherHeartbeat() {
  */
 function reportTeacherLeave() {
   if (role !== "teacher" || !pin) return;
-  const body = JSON.stringify({ pin, stop: true });
+  const body = JSON.stringify({ pin, teacherId, stop: true });
   try {
     if (navigator.sendBeacon &&
         navigator.sendBeacon("/api/control", new Blob([body], { type: "application/json" }))) {
@@ -275,7 +328,7 @@ async function pollPresence() {
   if (role !== "teacher") return;
   try {
     const headers = {};
-    if (pin) headers["X-Portal-Pin"] = pin;
+    applyAuthHeaders(headers);
     const response = await api("/api/presence/students", { headers });
     const list = await response.json();
 
@@ -410,7 +463,7 @@ async function loadSignalConfig() {
   if (role !== "teacher" || !pin) return;
   try {
     const headers = {};
-    if (pin) headers["X-Portal-Pin"] = pin;
+    applyAuthHeaders(headers);
     const response = await api("/api/signals", { headers });
     const data = await response.json();
     signalConfig = Array.isArray(data.signals) ? data.signals : [];
@@ -521,7 +574,7 @@ async function handleSignalButtonClick(signalId, target) {
   const action = active && active.untilDismiss ? "dismiss" : "send";
   try {
     const headers = { "Content-Type": "application/json" };
-    if (pin) headers["X-Portal-Pin"] = pin;
+    applyAuthHeaders(headers);
     const response = await api("/api/signals/" + action, {
       method: "POST",
       headers,
@@ -657,7 +710,7 @@ function closeSignalForm() {
 /** POST-запит викладача зі заголовком PIN; повертає data або null + тост */
 async function signalApiCall(url, payload) {
   const headers = { "Content-Type": "application/json" };
-  if (pin) headers["X-Portal-Pin"] = pin;
+  applyAuthHeaders(headers);
   const response = await api(url, { method: "POST", headers, body: JSON.stringify(payload) });
   const data = await response.json();
   if (!response.ok) {
@@ -953,7 +1006,7 @@ function updateViewerTestBadge() {
 /** POST із PIN-заголовком для операцій вчителя; помилки — текст із сервера */
 async function testingApiCall(url, body) {
   const headers = { "Content-Type": "application/json" };
-  if (pin) headers["X-Portal-Pin"] = pin;
+  applyAuthHeaders(headers);
   const response = await api(url, {
     method: "POST",
     headers,
@@ -1212,7 +1265,7 @@ async function prepareAndShowSlides(name, page, onReady, target) {
       // сервер відповідав 403 і приватний перегляд слайдів показував помилку
       const res = await api("/api/slides/prepare", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-Portal-Pin": pin },
+        headers: applyAuthHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ file: name })
       });
       pageCount = (await res.json()).pageCount;
@@ -1326,7 +1379,10 @@ function updateRoleUI() {
 
   // Role label shows name for students
   if ($("roleLabel")) {
-    if (isTeacher) $("roleLabel").textContent = "🎓 Викладач";
+    // Issue #85: адміністратор (вхід за PORTAL_PIN) відрізняється від
+    // викладача з персональним PIN — у ролі ті самі права + розділ «Викладачі»
+    if (isTeacher && isAdmin) $("roleLabel").textContent = "🎓 Адміністратор";
+    else if (isTeacher) $("roleLabel").textContent = "🎓 Викладач";
     else if (isStudent && studentDisplayName) $("roleLabel").textContent = "👤 " + studentDisplayName;
     else $("roleLabel").textContent = "👤 Учень";
   }
@@ -1337,6 +1393,14 @@ function updateRoleUI() {
 
   document.querySelectorAll(".teacher-only").forEach(el => {
     el.style.display = isTeacher ? "" : "none";
+  });
+
+  // Issue #85: розділ «Викладачі» (пункт меню та інші admin-only елементи)
+  // бачить лише адміністратор. Приховування — зручність: реальний доступ
+  // перевіряє сервер (GET /teachers і /api/teachers відхиляють усіх, крім
+  // адміністративної сесії або запиту з PORTAL_PIN).
+  document.querySelectorAll(".admin-only").forEach(el => {
+    el.style.display = (isTeacher && isAdmin) ? "" : "none";
   });
 
   // Issue #63 (§3 + доробка §1): єдиний робочий простір вчителя — «Демонстрація»
@@ -1427,6 +1491,8 @@ function setRole(newRole, newPin = "", newName = "") {
   } else if (newRole === "student") {
     pin = "";
     sessionStorage.removeItem("portalPin");
+    // Issue #85: учень не має контексту облікового запису викладача/адміністратора
+    clearLoginContext();
     if (newName) {
       studentDisplayName = newName;
       localStorage.setItem("portalStudentName", newName);
@@ -1442,11 +1508,14 @@ function setRole(newRole, newPin = "", newName = "") {
       fetch("/api/control", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pin, stop: true })
+        body: JSON.stringify({ pin, teacherId, stop: true })
       }).catch(() => {});
     }
     pin = "";
     sessionStorage.removeItem("portalPin");
+    // Issue #85: вихід прибирає ідентифікатор запису та адмін-прапорець —
+    // наступний вхід (інший викладач або адміністратор) встановить свої заново
+    clearLoginContext();
     studentDisplayName = "";
     localStorage.removeItem("portalStudentName");
     localStorage.removeItem("portalStudentId");
@@ -1534,11 +1603,16 @@ if ($("btnChooseTeacher")) {
       return;
     }
     try {
-      await api("/api/auth/verify", {
+      const response = await api("/api/auth/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pin: inputPin })
       });
+      // Issue #85: сервер називає обліковий запис (teacherId/ПІБ) або
+      // підтверджує адміністратора (admin) — це визначає подальші заголовки
+      // запитів і видимість розділу «Викладачі»
+      const data = await response.json().catch(() => ({}));
+      applyLoginResponse(data);
       setRole("teacher", inputPin);
     } catch {
       if ($("modalPinError")) { $("modalPinError").textContent = "Невірний PIN викладача."; $("modalPinError").style.display = "block"; }
@@ -1582,7 +1656,7 @@ async function refreshFiles() {
   }
   try {
     const headers = {};
-    if (pin) headers["X-Portal-Pin"] = pin;
+    applyAuthHeaders(headers);
     const response = await api("/api/files", { headers });
     files = await response.json();
     // Категорії: обидві ролі отримують УСІ створені категорії (Issue #63,
@@ -1629,7 +1703,7 @@ async function createCategory() {
     await api("/api/categories", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pin, name })
+      body: JSON.stringify({ pin, teacherId, name })
     });
     await refreshFiles();
     const created = categories.find(category => category.name.toLocaleLowerCase("uk") === name.trim().toLocaleLowerCase("uk"));
@@ -1658,7 +1732,7 @@ async function deleteCategory(category) {
     const result = await api("/api/categories/delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pin, categoryId: category.id })
+      body: JSON.stringify({ pin, teacherId, categoryId: category.id })
     });
     await refreshFiles();
     setStatus("Категорію видалено. Матеріалів збережено: " + (result.affectedFiles || 0) + ".");
@@ -1670,7 +1744,7 @@ async function setFileCategory(fileId, categoryId) {
     await api("/api/files/category", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pin, file: fileId, categoryId })
+      body: JSON.stringify({ pin, teacherId, file: fileId, categoryId })
     });
     await refreshFiles();
   } catch (error) { alert("Не вдалося перемістити матеріал: " + error.message); }
@@ -1686,7 +1760,7 @@ async function renameCategory(category) {
     await api("/api/categories/rename", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pin, categoryId: category.id, name: name.trim() })
+      body: JSON.stringify({ pin, teacherId, categoryId: category.id, name: name.trim() })
     });
     await refreshFiles();
     setStatus("Категорію перейменовано: «" + name.trim() + "».");
@@ -1700,7 +1774,7 @@ async function reorderCategory(category, direction) {
     await api("/api/categories/reorder", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pin, categoryId: category.id, direction })
+      body: JSON.stringify({ pin, teacherId, categoryId: category.id, direction })
     });
     await refreshFiles();
   } catch (error) { alert("Не вдалося змінити порядок категорій: " + error.message); }
@@ -1716,7 +1790,7 @@ async function renameMaterial(fileId, currentName) {
     await api("/api/files/rename", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pin, file: fileId, name: name.trim() })
+      body: JSON.stringify({ pin, teacherId, file: fileId, name: name.trim() })
     });
     await refreshFiles();
     setStatus("Матеріал перейменовано: «" + name.trim() + "».");
@@ -1728,7 +1802,7 @@ async function reorderMaterial(fileId, direction) {
     await api("/api/files/reorder", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pin, file: fileId, direction })
+      body: JSON.stringify({ pin, teacherId, file: fileId, direction })
     });
     await refreshFiles();
   } catch (error) { alert("Не вдалося змінити порядок: " + error.message); }
@@ -2086,7 +2160,7 @@ async function toggleHideFile(name, currentHidden) {
     await api("/api/files/toggle-hide", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pin, file: name, hidden: !currentHidden })
+      body: JSON.stringify({ pin, teacherId, file: name, hidden: !currentHidden })
     });
     setStatus(currentHidden ? "Файл показано учням: " + name : "Файл приховано від учнів: " + name);
     await refreshFiles();
@@ -2101,7 +2175,7 @@ async function deleteFile(fileId, displayName) {
     await api("/api/files/delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pin, file: fileId })
+      body: JSON.stringify({ pin, teacherId, file: fileId })
     });
     setStatus("Файл видалено: " + shownName);
     if (localCurrentFile === fileId && $("viewer")) {
@@ -2493,7 +2567,7 @@ async function postControl(data) {
   const response = await api("/api/control", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pin, ...data })
+    body: JSON.stringify({ pin, teacherId, ...data })
   });
   return response.json();
 }
@@ -2822,7 +2896,7 @@ async function waitForSlideConversion(fileId, maxAttempts = 180) {
 async function prepareSlidesBg(fileId) {
   const response = await api("/api/slides/prepare", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Portal-Pin": pin },
+    headers: applyAuthHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ file: fileId })
   });
   const manifest = await response.json();
@@ -3017,7 +3091,7 @@ if ($("upload") && $("uploadFile")) {
         try {
           const response = await api(url, {
             method: "POST",
-            headers: { "Content-Type": "application/octet-stream", "X-Portal-Pin": pin },
+            headers: applyAuthHeaders({ "Content-Type": "application/octet-stream" }),
             body: item.file
           });
           const result = await response.json();
@@ -3100,7 +3174,17 @@ async function bootstrapSession() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pin })
     });
-    if (!response.ok) handleSessionExpired();
+    if (response.ok) {
+      // Issue #85: відновлюємо контекст облікового запису (teacherId/admin) —
+      // він потрібен для заголовка X-Portal-Teacher у подальших запитах
+      const data = await response.json().catch(() => ({}));
+      applyLoginResponse(data);
+    } else {
+      // Вхід більше не дійсний (PIN замінено, запис деактивовано або
+      // обліковий запис заблоковано) — контекст не тримаємо
+      clearLoginContext();
+      handleSessionExpired();
+    }
   } catch {
     /* сервер недоступний — стан опитування повідомить про помилку зв'язку */
   }

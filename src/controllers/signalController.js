@@ -30,7 +30,7 @@ function normalizeTarget(value) {
 class SignalController {
   /** GET /api/signals — конфігурація сигналів + доступний набір іконок */
   getConfig(req, res) {
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "demo")) return;
     res.set("Cache-Control", "no-store");
     res.json({
       signals: signalService.listConfig(),
@@ -40,7 +40,7 @@ class SignalController {
 
   /** POST /api/signals/create — створення сигналу з параметрами */
   create(req, res) {
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "demo")) return;
     try {
       const signal = signalService.create(req.body || {});
       res.status(201).json({ ok: true, signal });
@@ -54,7 +54,7 @@ class SignalController {
 
   /** POST /api/signals/update — редагування переданих полів (часткове) */
   update(req, res) {
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "demo")) return;
     const body = req.body || {};
     const signalId = typeof body.signalId === "string" ? body.signalId : "";
     try {
@@ -70,7 +70,7 @@ class SignalController {
 
   /** POST /api/signals/delete — видалення сигналу з конфігурації */
   remove(req, res) {
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "demo")) return;
     const body = req.body || {};
     const signalId = typeof body.signalId === "string" ? body.signalId : "";
     try {
@@ -86,7 +86,7 @@ class SignalController {
 
   /** POST /api/signals/reorder — зміна порядку (up/down, межа списку без змін) */
   reorder(req, res) {
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "demo")) return;
     const body = req.body || {};
     const signalId = typeof body.signalId === "string" ? body.signalId : "";
     const direction = body.direction === "up" ? "up" : "down";
@@ -107,7 +107,7 @@ class SignalController {
    * і перезапускає таймер; для сигналу «до зняття» клієнт натомість шле dismiss.
    */
   send(req, res) {
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "demo")) return;
     // Взаємодія вчителя зі станом показу — він на зв'язку (як POST /api/control)
     presenceService.markTeacherSeen();
 
@@ -145,7 +145,7 @@ class SignalController {
    * (сигнал «Показувати до зняття»); ідемпотентне, якщо запису немає.
    */
   dismiss(req, res) {
-    if (!auth.requirePin(req, res)) return;
+    if (!auth.requirePerm(req, res, "demo")) return;
     presenceService.markTeacherSeen();
 
     const body = req.body || {};
