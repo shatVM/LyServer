@@ -15,6 +15,12 @@
       <a href="/students" class="nav-link teacher-only {{isActive activeMenu 'students'}}" id="navStudentsLink">
         <span class="nav-icon">👥</span> Учні
       </a>
+      <!-- Issue #85: адміністративний розділ. Клас admin-only приховує пункт
+           для всіх, крім адміністратора (вхід за PORTAL_PIN); реальний доступ
+           до сторінки й API все одно перевіряє сервер -->
+      <a href="/teachers" class="nav-link admin-only {{isActive activeMenu 'teachers'}}" id="navTeachersLink" style="display:none">
+        <span class="nav-icon">🧑‍🏫</span> Викладачі
+      </a>
     </div>
 
     <div class="nav-right">
