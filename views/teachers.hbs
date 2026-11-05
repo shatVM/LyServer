@@ -1,0 +1,64 @@
+<div class="page-title-area">
+  <h2>🧑‍🏫 Викладачі</h2>
+  <p class="hint">
+    Облікові записи викладачів: персональний PIN (4 цифри), дозволи та стан доступу.
+    PIN зберігається на сервері лише у вигляді криптографічного хешу з сіллю —
+    ані PIN, ані хеш система не показує, а заміна PIN відкликає чинні сесії викладача.
+  </p>
+</div>
+
+<div class="panel" id="teacherCreatePanel">
+  <div class="panel-header-row">
+    <h3>Створити обліковий запис</h3>
+  </div>
+  <form id="teacherCreateForm" class="teacher-form">
+    <label class="teacher-field">
+      <span>ПІБ викладача</span>
+      <input id="teacherFullName" type="text" maxlength="120" placeholder="Напр. Шатківський Віталій Миколайович" autocomplete="off" required>
+    </label>
+    <label class="teacher-field">
+      <span>Персональний PIN (4 цифри)</span>
+      <input id="teacherPin" type="password" inputmode="numeric" pattern="\d{4}" maxlength="4" autocomplete="new-password" required>
+    </label>
+    <fieldset class="teacher-perms">
+      <legend>Права за замовчуванням</legend>
+      <label><input type="checkbox" id="permDemo" checked> Демонстрація (<code>demo</code>)</label>
+      <label><input type="checkbox" id="permMaterials" checked> Матеріали (<code>materials</code>)</label>
+    </fieldset>
+    <p class="hint">Право <code>teachers</code> (керування викладачами) призначається лише адміністратору через саму роль — викладачеві його не дати.</p>
+    <button type="submit" class="btn-teacher">Створити запис</button>
+    <div id="teacherFormError" class="modal-error" style="display:none"></div>
+  </form>
+</div>
+
+<div class="panel" id="teacherListPanel">
+  <div class="panel-header-row">
+    <h3>Облікові записи</h3>
+    <button id="teacherReloadBtn" class="btn-ghost" type="button">Оновити список</button>
+  </div>
+  <div id="teachersList" class="teachers-list">
+    <div class="empty">Завантаження списку…</div>
+  </div>
+  <div id="teacherListError" class="modal-error" style="display:none"></div>
+</div>
+
+<div class="panel" id="teacherPinPanel">
+  <div class="panel-header-row">
+    <h3>Замінити PIN</h3>
+  </div>
+  <form id="teacherPinForm" class="teacher-form">
+    <label class="teacher-field">
+      <span>Обліковий запис</span>
+      <select id="teacherPinSelect"></select>
+    </label>
+    <label class="teacher-field">
+      <span>Новий PIN (4 цифри)</span>
+      <input id="teacherNewPin" type="password" inputmode="numeric" pattern="\d{4}" maxlength="4" autocomplete="new-password" required>
+    </label>
+    <button type="submit" class="btn-teacher">Замінити PIN</button>
+    <div id="teacherPinError" class="modal-error" style="display:none"></div>
+    <p class="hint">Старий PIN не зберігається у відкритому вигляді, тому показати його неможливо — лише замінити. Після заміни всі чинні сесії викладача відкликаються.</p>
+  </form>
+</div>
+
+<script src="/js/teachers.js"></script>

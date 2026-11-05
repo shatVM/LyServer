@@ -1,12 +1,31 @@
 const path = require("node:path");
+const crypto = require("node:crypto");
 
+/**
+ * Issue #85: адміністративний PIN = `PORTAL_PIN`, заданий у середовищі.
+ * Без заданої змінної використовується стандартне значення, яке веде
+ * проєкт від самого початку (видиме в README); власник може перевизначити
+ * його через `PORTAL_PIN`. Генерація випадкового PIN прибрано: сервер має
+ * працювати без ручного втручання після кожного перезапуску.
+ *
+ * Щоб уникнути вливання у Git історії реального PIN: персональні PIN
+ * викладачів і їхні хеші лежать у `materials/.teachers.json` (каталог
+ * у .gitignore), CLI та панель ніколи не показують PIN і хеш у відповідях.
+ */
 const config = {
   port: Number(process.env.PORT) || 3000,
   host: process.env.HOST || "0.0.0.0",
+  // Issue #85: адміністративний PIN — заданий через PORTAL_PIN, або стандартний
   portalPin: process.env.PORTAL_PIN || "2468",
   dataDir: path.join(__dirname, "..", "..", "materials"),
   slidesDir: path.join(__dirname, "..", "..", "materials", ".slides"),
   metadataFile: path.join(__dirname, "..", "..", "materials", ".metadata.json"),
+  // Issue #85: облікові записи викладачів (лежать у materials/ — поза Git)
+  teachersFile: path.join(__dirname, "..", "..", "materials", ".teachers.json"),
+  /** Issue #85: персональний PIN викладача — рівно 4 цифри */
+  teacherPinLength: 4,
+  /** Issue #85: ліміт спроб PIN за обліковим записом (додатковий до IP-ліміту) */
+  teacherPinMaxAttempts: Number(process.env.TEACHER_PIN_MAX_ATTEMPTS) || 3,
   maxUpload: 1024 * 1024 * 1024, // 1 GB
   // Issue #63 Етап 3: максимальна довжина необов'язкового опису матеріалу
   maxDescriptionLength: 500,

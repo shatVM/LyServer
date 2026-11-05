@@ -5,6 +5,9 @@ const presenceController = require("../controllers/presenceController");
 const signalController = require("../controllers/signalController");
 // Issue #83: MVP системи тестування під час демонстрації
 const testingController = require("../controllers/testingController");
+// Issue #85: адміністративне API облікових записів викладачів (усі операції —
+// лише адміністратор: PORTAL_PIN у запиті або сесія з access "admin")
+const teacherController = require("../controllers/teacherController");
 
 const router = express.Router();
 
@@ -54,5 +57,15 @@ router.post("/signals/dismiss", (req, res) => signalController.dismiss(req, res)
 router.post("/testing/start", (req, res) => testingController.start(req, res));
 router.post("/testing/finish", (req, res) => testingController.finish(req, res));
 router.post("/testing/answer", (req, res) => testingController.answer(req, res));
+
+// Issue #85: «Викладачі» — CRUD персональних облікових записів. Самому
+// викладачеві недоступно жодне з операцій (сервер перевіряє адмін-доступ;
+// у відповідях немає ні PIN, ні хеша, дії з наслідками потребують confirm).
+router.get("/teachers", (req, res) => teacherController.list(req, res));
+router.post("/teachers/create", (req, res) => teacherController.create(req, res));
+router.post("/teachers/update", (req, res) => teacherController.update(req, res));
+router.post("/teachers/set-pin", (req, res) => teacherController.setPin(req, res));
+router.post("/teachers/archive", (req, res) => teacherController.archive(req, res));
+router.post("/teachers/delete", (req, res) => teacherController.remove(req, res));
 
 module.exports = router;

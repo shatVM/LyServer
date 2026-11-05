@@ -30,17 +30,26 @@ class SessionService {
    * авторизує операції керування (для них потрібен справжній PIN).
    * @param {"teacher"|"student"} role
    * @param {string} [name] — показне ім'я учня (для журналів присутності)
+   * @param {object} [meta] — Issue #85: access ("admin"|"teacher"|"student"),
+   *   teacherId (персональний обліковий запис викладача), fullName (ПІБ).
+   *   У сесії НЕ зберігається сам PIN — лише його ідентифікатор.
    */
-  create(role, name = "") {
+  create(role, name = "", meta = {}) {
     const id = crypto.randomBytes(24).toString("hex");
     const now = Date.now();
     const session = {
       id,
       role,
       name: String(name || "").slice(0, 80),
+      // Issue #85: контекст доступу. Роль (role) залишається "teacher"/"student"
+      // для чинної логіки клієнта та розрізнення прав; access дозволяє
+      // відокремити адміністратора (PORTAL_PIN) від викладача (персональний PIN)
+      access: meta.access || role,
       createdAt: now,
       expiresAt: now + SESSION_TTL_MS
     };
+    if (meta.teacherId) session.teacherId = String(meta.teacherId);
+    if (meta.fullName) session.fullName = String(meta.fullName).slice(0, 120);
     this.sessions.set(id, session);
     return session;
   }
@@ -60,6 +69,36 @@ class SessionService {
   /** Індивідуальне скасування сесії (вихід викладача/учня) */
   destroy(id) {
     if (id) this.sessions.delete(id);
+  }
+
+  /**
+   * Issue #85: відкликання ВСІХ активних сесій конкретного викладача.
+   * Викликається після деактивації, архівації, видалення, зміни PIN або
+   * зміни прав облікового запису — нові умови застосовуються негайно, а
+   * cookie старої сесії вже не дає доступу до стану та медіа.
+   * @param {string} teacherId
+   * @returns {number} кількість скасованих сесій
+   */
+  destroyByTeacher(teacherId) {
+    if (!teacherId) return 0;
+    let removed = 0;
+    for (const [id, session] of this.sessions) {
+      if (session.teacherId === teacherId) {
+        this.sessions.delete(id);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
+  /** Issue #85: кількість активних сесій викладача (наслідки деактивації/видалення) */
+  countForTeacher(teacherId) {
+    if (!teacherId) return 0;
+    let count = 0;
+    for (const session of this.sessions.values()) {
+      if (session.teacherId === teacherId) count += 1;
+    }
+    return count;
   }
 
   /**

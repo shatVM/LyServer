@@ -1700,3 +1700,145 @@ body.demo-focus #viewer video {
   color: #8a94a6;
   font-weight: 500;
 }
+
+/* ---------------------------------------------------------------------------
+   Issue #85: адміністративний розділ «Викладачі» (форми, список записів,
+   бейджі стану). Пункт меню з класом admin-only ховається для всіх, крім
+   адміністратора (див. updateRoleUI у public/js/app.js).
+   --------------------------------------------------------------------------- */
+.teacher-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.teacher-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #173d6b;
+}
+
+.teacher-field input,
+.teacher-field select {
+  padding: 8px 10px;
+  border: 1px solid #bcd4ef;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 400;
+  background: #fff;
+}
+
+.teacher-perms {
+  border: 1px solid #d6e4f5;
+  border-radius: 8px;
+  padding: 8px 12px;
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 14px;
+}
+
+.teacher-perms legend {
+  font-size: 13px;
+  font-weight: 700;
+  color: #173d6b;
+  padding: 0 6px;
+}
+
+.teachers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.teacher-row {
+  border: 1px solid #d6e4f5;
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #f8fbff;
+}
+
+.teacher-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.teacher-name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.teacher-name-input {
+  flex: 1 1 260px;
+  min-width: 200px;
+  padding: 7px 10px;
+  border: 1px solid #bcd4ef;
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.teacher-badge {
+  font-size: 12px;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+
+.teacher-badge.badge-on {
+  background: #e3f6e9;
+  color: #157347;
+  border: 1px solid #b7e4c7;
+}
+
+.teacher-badge.badge-off {
+  background: #fdf0d5;
+  color: #8f5b00;
+  border: 1px solid #fcd289;
+}
+
+.teacher-badge.badge-archived {
+  background: #f1f3f5;
+  color: #5b6470;
+  border: 1px solid #dee2e6;
+}
+
+.teacher-meta {
+  font-size: 13px;
+  color: #5b6470;
+}
+
+.teacher-perms-row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 14px;
+}
+
+.teacher-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+button.btn-ghost {
+  background: #fff;
+  color: #173d6b;
+  border: 1px solid #bcd4ef;
+  padding: 6px 12px;
+  font-size: 13px;
+  border-radius: 8px;
+}
+
+button.btn-ghost:hover {
+  background: #e7eef7;
+}

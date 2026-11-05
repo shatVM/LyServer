@@ -30,10 +30,7 @@ app.listen(config.port, config.host, () => {
         : "(немає підключених мережевих адаптерів)")
   );
   console.log("Каталог матеріалів: " + config.dataDir);
-  // Не друкуємо сам PIN у консоль (див. Issue #1) — лише джерело значення
-  if (process.env.PORTAL_PIN) {
-    console.log("PIN викладача: задано через змінну PORTAL_PIN");
-  } else {
-    console.log("PIN викладача: значення за замовчуванням (рекомендовано задати PORTAL_PIN)");
-  }
+  // Issue #85: адмін-PIN — змінна PORTAL_PIN або стандартне значення.
+  // Саме значення не друкується (див. Issue #1).
+  console.log("PIN викладача: задано через змінну PORTAL_PIN");
 });
