@@ -24,51 +24,100 @@ class MaterialsController {
     return session.teacherId || null;
   }
 
-  /** Перевірити, чи викладач може kerувати файлом (власник або адмін) */
-  static requireFileOwner(req, res, fileId) {
-    const teacherId = MaterialsController.teacherIdFromSession(req);
+  /**
+   * Авторизація операції з матеріалами (Issue #88, «повний доступ адміністратора»).
+   *
+   * Спочатку PIN-дозвіл (чинна модель Issue #63: сама cookie не авторизує
+   * операції API), далі — сесія для визначення власника простору:
+   *  - адмін-PIN (X-Portal-Pin = PORTAL_PIN) або адмін-сесія →
+   *    { isAdmin: true, teacherId: null } — повний доступ до всіх просторів,
+   *    включно з осиротілими (власник уже видалений) і legacy-файлами;
+   *  - персональний PIN викладача → { isAdmin: false, teacherId } —
+   *    лише власний простір; teacherId береться лише з сесії.
+   *
+   * У разі помилки сама надсилає відповідь і повертає null.
+   */
+  static authorize(req, res) {
+    const session = auth.readSession(req);
+    const isAdminSession = Boolean(session && session.access === "admin");
+    const pinPresent = Boolean(auth.extractPin(req));
+
+    if (pinPresent) {
+      const perm = auth.requirePerm(req, res, "materials");
+      if (!perm) return null;
+      if (perm.access === "admin") return { isAdmin: true, teacherId: null };
+    } else if (isAdminSession) {
+      return { isAdmin: true, teacherId: null };
+    } else if (!session) {
+      res.status(401).send("Сесію не знайдено — увійдіть заново");
+      return null;
+    } else {
+      // Cookie викладача без PIN не авторизує операції (захист Issue #63)
+      const perm = auth.requirePerm(req, res, "materials");
+      if (!perm) return null;
+    }
+
+    const teacherId = session && session.role === "teacher" ? (session.teacherId || null) : null;
     if (!teacherId) {
       res.status(401).send("Сесію не знайдено — увійдіть заново");
       return null;
     }
-    if (!fileService.isOwner(teacherId, fileId)) {
-      const owner = fileService.ownerOf(fileId);
-      if (!owner) {
-        res.status(403).send("Файл належить спільній бібліотеці — редагування заборонено");
-        return null;
-      }
-      res.status(403).send("Файл належить іншому викладачу");
-      return null;
-    }
-    return teacherId;
+    return { isAdmin: false, teacherId };
   }
 
-  /** GET /api/materials/tree — дерево папок власного простору викладача */
-  folderTree(req, res) {
-    const teacherId = MaterialsController.teacherIdFromSession(req);
-    if (!teacherId) {
-      return res.status(401).send("Сесію не знайдено — увійдіть заново");
+  /**
+   * Доступ до конкретного файла: адмін — до будь-якого (включно з legacy
+   * і осиротілими), викладач — лише до власного. У разі заборони надсилає 403
+   * і повертає false.
+   */
+  static ensureFileAccess(res, actor, fileId) {
+    if (actor.isAdmin) return true;
+    if (fileService.isOwner(actor.teacherId, fileId)) return true;
+    const owner = fileService.ownerOf(fileId);
+    if (!owner) {
+      res.status(403).send("Файл належить спільній бібліотеці — редагування заборонено");
+      return false;
     }
-    if (!auth.requirePerm(req, res, "materials")) return;
+    res.status(403).send("Файл належить іншому викладачу");
+    return false;
+  }
+
+  /**
+   * Простір (teacherId), у якому виконується операція з папкою.
+   * Викладач — завжди власний простір; адмін — простір, на який вказує
+   * body.teacherId, а за його відсутності — простір самого folderId.
+   */
+  static folderSpace(actor, body, folderId) {
+    if (!actor.isAdmin) return actor.teacherId;
+    const folder = folderId ? folderService.getFolder(folderId) : null;
+    if (folder) return folder.teacherId;
+    return body && body.teacherId ? String(body.teacherId) : "";
+  }
+
+  /** GET /api/materials/tree — дерево папок простору (свого або вказаного адміном) */
+  folderTree(req, res) {
+    const actor = MaterialsController.authorize(req, res);
+    if (!actor) return;
+    const spaceId = actor.isAdmin ? (req.query.teacherId || "") : actor.teacherId;
+    if (!spaceId) return res.status(400).send("Вкажіть teacherId простору");
     try {
       res.set("Cache-Control", "no-store");
-      res.json({ ok: true, tree: folderService.folderTree(teacherId) });
+      res.json({ ok: true, tree: folderService.folderTree(spaceId), teacherId: spaceId });
     } catch (error) {
       res.status(500).send("Не вдалося отримати дерево папок: " + error.message);
     }
   }
 
-  /** POST /api/materials/folder { name, parentId? } — створити папку */
+  /** POST /api/materials/folder { name, parentId?, teacherId? } — створити папку */
   createFolder(req, res) {
-    const teacherId = MaterialsController.teacherIdFromSession(req);
-    if (!teacherId) {
-      return res.status(401).send("Сесію не знайдено — увійдіть заново");
-    }
-    if (!auth.requirePerm(req, res, "materials")) return;
+    const actor = MaterialsController.authorize(req, res);
+    if (!actor) return;
     try {
       const body = req.body || {};
+      const spaceId = actor.isAdmin ? (body.teacherId || "") : actor.teacherId;
+      if (!spaceId) return res.status(400).send("Вкажіть teacherId простору");
       const folder = folderService.createFolder({
-        teacherId,
+        teacherId: spaceId,
         name: body.name,
         parentId: body.parentId
       });
@@ -78,78 +127,73 @@ class MaterialsController {
     }
   }
 
-  /** POST /api/materials/folder/rename { folderId, name } */
+  /** POST /api/materials/folder/rename { folderId, name, teacherId? } */
   renameFolder(req, res) {
-    const teacherId = MaterialsController.teacherIdFromSession(req);
-    if (!teacherId) {
-      return res.status(401).send("Сесію не знайдено — увійдіть заново");
-    }
-    if (!auth.requirePerm(req, res, "materials")) return;
+    const actor = MaterialsController.authorize(req, res);
+    if (!actor) return;
     try {
       const body = req.body || {};
-      const result = folderService.renameFolder({ teacherId, folderId: body.folderId, name: body.name });
+      const spaceId = MaterialsController.folderSpace(actor, body, body.folderId);
+      if (!spaceId) return res.status(400).send("Вкажіть teacherId простору");
+      const result = folderService.renameFolder({ teacherId: spaceId, folderId: body.folderId, name: body.name });
       res.json(result);
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Не вдалося перейменувати папку");
     }
   }
 
-  /** POST /api/materials/folder/move { folderId, parentId? } */
+  /** POST /api/materials/folder/move { folderId, parentId?, teacherId? } */
   moveFolder(req, res) {
-    const teacherId = MaterialsController.teacherIdFromSession(req);
-    if (!teacherId) {
-      return res.status(401).send("Сесію не знайдено — увійдіть заново");
-    }
-    if (!auth.requirePerm(req, res, "materials")) return;
+    const actor = MaterialsController.authorize(req, res);
+    if (!actor) return;
     try {
       const body = req.body || {};
-      const result = folderService.moveFolder({ teacherId, folderId: body.folderId, parentId: body.parentId });
+      const spaceId = MaterialsController.folderSpace(actor, body, body.folderId);
+      if (!spaceId) return res.status(400).send("Вкажіть teacherId простору");
+      const result = folderService.moveFolder({ teacherId: spaceId, folderId: body.folderId, parentId: body.parentId });
       res.json(result);
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Не вдалося перемістити папку");
     }
   }
 
-  /** POST /api/materials/folder/delete { folderId } — видалити порожню папку */
+  /** POST /api/materials/folder/delete { folderId, teacherId? } — видалити порожню папку */
   deleteFolder(req, res) {
-    const teacherId = MaterialsController.teacherIdFromSession(req);
-    if (!teacherId) {
-      return res.status(401).send("Сесію не знайдено — увійдіть заново");
-    }
-    if (!auth.requirePerm(req, res, "materials")) return;
+    const actor = MaterialsController.authorize(req, res);
+    if (!actor) return;
     try {
       const body = req.body || {};
-      const result = folderService.deleteFolder({ teacherId, folderId: body.folderId });
+      const spaceId = MaterialsController.folderSpace(actor, body, body.folderId);
+      if (!spaceId) return res.status(400).send("Вкажіть teacherId простору");
+      const result = folderService.deleteFolder({ teacherId: spaceId, folderId: body.folderId });
       res.json(result);
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Не вдалося видалити папку");
     }
   }
 
-  /** GET /api/materials/files?folderId= — власні файли в папці викладача */
+  /** GET /api/materials/files?folderId=&teacherId= — файли простору */
   listFiles(req, res) {
-    const teacherId = MaterialsController.teacherIdFromSession(req);
-    if (!teacherId) {
-      return res.status(401).send("Сесію не знайдено — увійдіть заново");
-    }
-    if (!auth.requirePerm(req, res, "materials")) return;
+    const actor = MaterialsController.authorize(req, res);
+    if (!actor) return;
+    const spaceId = actor.isAdmin ? (req.query.teacherId || "") : actor.teacherId;
+    if (!spaceId) return res.status(400).send("Вкажіть teacherId простору");
     try {
       const folderId = req.query.folderId || undefined;
-      const files = fileService.getFilesForTeacher(teacherId, folderId);
+      const files = fileService.getFilesForTeacher(spaceId, folderId);
       res.set("Cache-Control", "no-store");
-      res.json({ ok: true, files, teacherId, folderId });
+      res.json({ ok: true, files, teacherId: spaceId, folderId });
     } catch (error) {
       res.status(500).send("Не вдалося отримати список файлів: " + error.message);
     }
   }
 
-  /** POST /api/materials/upload?folderId= — завантаження файла у власну папку */
+  /** POST /api/materials/upload?folderId=&teacherId= — завантаження у простір */
   async uploadFile(req, res) {
-    const teacherId = MaterialsController.teacherIdFromSession(req);
-    if (!teacherId) {
-      return res.status(401).send("Сесію не знайдено — увійдіть заново");
-    }
-    if (!auth.requirePerm(req, res, "materials")) return;
+    const actor = MaterialsController.authorize(req, res);
+    if (!actor) return;
+    const spaceId = actor.isAdmin ? (req.query.teacherId || "") : actor.teacherId;
+    if (!spaceId) return res.status(400).send("Вкажіть teacherId простору");
     const folderId = req.query.folderId || "";
     const originalName = req.query.name;
     if (!originalName) return res.status(400).send("Не вказано ім'я файлу");
@@ -157,7 +201,7 @@ class MaterialsController {
     const categoryId = typeof req.query.categoryId === "string" ? req.query.categoryId : "";
     try {
       const result = await fileService.saveFileStream(
-        req, originalName, description, categoryId, teacherId, folderId || null
+        req, originalName, description, categoryId, spaceId, folderId || null
       );
       const ext = path.extname(result.id).toLowerCase();
       let conversionStatus = "not-required";
@@ -187,34 +231,43 @@ class MaterialsController {
     }
   }
 
-  /** GET /api/materials/shared — каталог чужих/shared матеріалів для копіювання */
+  /** GET /api/materials/shared — каталог чужих матеріалів для копіювання */
   sharedCatalog(req, res) {
-    const teacherId = MaterialsController.teacherIdFromSession(req);
-    if (!teacherId) {
-      return res.status(401).send("Сесію не знайдено — увійдіть заново");
-    }
-    if (!auth.requirePerm(req, res, "materials")) return;
+    const actor = MaterialsController.authorize(req, res);
+    if (!actor) return;
     try {
-      const files = fileService.getFilesForTeacher(null).filter((f) => f.owner && f.owner !== teacherId);
+      const data = fileService.getMetadata();
+      const spaceId = actor.isAdmin ? null : actor.teacherId;
+      const files = Object.entries(data.files || {})
+        .map(([id, record]) => ({ id, ...record }))
+        .filter((f) => f.owner && f.owner !== spaceId);
       res.set("Cache-Control", "no-store");
-      res.json({ ok: true, files, teacherId });
+      res.json({ ok: true, files, teacherId: spaceId });
     } catch (error) {
       res.status(500).send("Не вдалося отримати спільний каталог: " + error.message);
     }
   }
 
-  /** POST /api/materials/copy { sourceFileId, targetFolderId } — копіювати файл у власну папку */
+  /**
+   * POST /api/materials/copy { sourceFileId, targetFolderId, targetTeacherId? } —
+   * скопіювати файл. Викладач копіює завжди у власний простір (targetTeacherId
+   * із запиту ігнорується); адмін може вказати targetTeacherId — будь-який
+   * простір, включно з осиротілим.
+   */
   async copyFile(req, res) {
-    const teacherId = MaterialsController.teacherIdFromSession(req);
-    if (!teacherId) {
-      return res.status(401).send("Сесію не знайдено — увійдіть заново");
-    }
-    if (!auth.requirePerm(req, res, "materials")) return;
+    const actor = MaterialsController.authorize(req, res);
+    if (!actor) return;
     try {
       const body = req.body || {};
+      const targetTeacherId = actor.isAdmin
+        ? String(body.targetTeacherId || "")
+        : actor.teacherId;
+      if (!targetTeacherId) {
+        return res.status(400).send("Вкажіть targetTeacherId простору-приймача");
+      }
       const result = await fileService.copyFile({
         sourceFileId: body.sourceFileId,
-        targetTeacherId: teacherId,
+        targetTeacherId,
         targetFolderId: body.targetFolderId || null
       });
       res.status(201).json({ ok: true, file: result });
@@ -223,52 +276,64 @@ class MaterialsController {
     }
   }
 
-  /** POST /api/materials/file/rename { file, name } — перейменувати власний файл */
+  /**
+   * Спільна перевірка доступу до файлу для операцій редагування:
+   * адмін — до будь-якого файла, викладач — лише до власного.
+   * У разі заборони надсилає 403 і повертає null.
+   */
+  static fileActor(req, res, fileId) {
+    const actor = MaterialsController.authorize(req, res);
+    if (!actor) return null;
+    if (!MaterialsController.ensureFileAccess(res, actor, fileId)) return null;
+    return actor;
+  }
+
+  /** POST /api/materials/file/rename { file, name } — перейменувати файл */
   renameFile(req, res) {
-    const teacherId = MaterialsController.requireFileOwner(req, res, req.body && req.body.file);
-    if (!teacherId) return;
+    const actor = MaterialsController.fileActor(req, res, req.body && req.body.file);
+    if (!actor) return;
     try {
       const body = req.body || {};
-      const result = fileService.renameFile(teacherId, body.file, body.name);
+      const result = fileService.renameFile(actor.teacherId, body.file, body.name);
       res.json(result);
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Не вдалося перейменувати матеріал");
     }
   }
 
-  /** POST /api/materials/file/toggle-hide { file, hidden } — приховати/показати власний файл */
+  /** POST /api/materials/file/toggle-hide { file, hidden } — приховати/показати файл */
   toggleHide(req, res) {
-    const teacherId = MaterialsController.requireFileOwner(req, res, req.body && req.body.file);
-    if (!teacherId) return;
+    const actor = MaterialsController.fileActor(req, res, req.body && req.body.file);
+    if (!actor) return;
     try {
       const body = req.body || {};
-      const result = fileService.toggleHide(teacherId, body.file, Boolean(body.hidden));
+      const result = fileService.toggleHide(actor.teacherId, body.file, Boolean(body.hidden));
       res.json(result);
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Не вдалося змінити видимість");
     }
   }
 
-  /** POST /api/materials/file/delete { file } — видалити власний файл */
+  /** POST /api/materials/file/delete { file } — видалити файл */
   deleteFile(req, res) {
-    const teacherId = MaterialsController.requireFileOwner(req, res, req.body && req.body.file);
-    if (!teacherId) return;
+    const actor = MaterialsController.fileActor(req, res, req.body && req.body.file);
+    if (!actor) return;
     try {
       const body = req.body || {};
-      const result = fileService.deleteFile(teacherId, body.file);
+      const result = fileService.deleteFile(actor.teacherId, body.file);
       res.json(result);
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Не вдалося видалити файл");
     }
   }
 
-  /** POST /api/materials/file/category { file, categoryId } — категорія власного файла */
+  /** POST /api/materials/file/category { file, categoryId } — категорія файла */
   setFileCategory(req, res) {
-    const teacherId = MaterialsController.requireFileOwner(req, res, req.body && req.body.file);
-    if (!teacherId) return;
+    const actor = MaterialsController.fileActor(req, res, req.body && req.body.file);
+    if (!actor) return;
     try {
       const body = req.body || {};
-      const result = fileService.moveFileToCategory(teacherId, body.file, body.categoryId);
+      const result = fileService.moveFileToCategory(actor.teacherId, body.file, body.categoryId);
       res.json(result);
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Не вдалося перемістити матеріал");
