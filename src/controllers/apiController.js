@@ -119,6 +119,11 @@ class ApiController {
    */
   logoutMedia(req, res) {
     auth.clearSession(req, res);
+    // Issue #88 §4: забороняємо кешування сторінок після виходу, щоб
+    // back/reload не відкривав захищений вміст.
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
     res.json({ ok: true });
   }
 
@@ -138,7 +143,8 @@ class ApiController {
     }
     res.set("Cache-Control", "no-store");
     try {
-      const files = fileService.getFilesList(identity.role === "teacher");
+      const teacherId = teacherIdFromSession(req);
+      const files = fileService.getFilesList(identity.role === "teacher", teacherId);
       res.json(files);
     } catch (error) {
       res.status(500).send("Не вдалося отримати список файлів: " + error.message);

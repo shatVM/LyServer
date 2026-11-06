@@ -10,6 +10,7 @@ let pin = sessionStorage.getItem("portalPin") || "";
 // не повертається, у сесію теж не потрапляє.
 let teacherId = sessionStorage.getItem("portalTeacherId") || "";
 let isAdmin = sessionStorage.getItem("portalAdmin") === "1";
+let teacherFullName = sessionStorage.getItem("portalTeacherFullName") || "";
 let files = [];
 let categories = [];
 
@@ -109,8 +110,12 @@ function applyAuthHeaders(headers) {
 function applyLoginResponse(data) {
   teacherId = data && data.teacherId ? String(data.teacherId) : "";
   isAdmin = Boolean(data && data.admin);
+  // Зберігаємо ПІБ викладача/адміністратора для відображення біля кнопки «Вийти»
+  teacherFullName = data && data.fullName ? String(data.fullName) : "";
   if (teacherId) sessionStorage.setItem("portalTeacherId", teacherId);
   else sessionStorage.removeItem("portalTeacherId");
+  if (teacherFullName) sessionStorage.setItem("portalTeacherFullName", teacherFullName);
+  else sessionStorage.removeItem("portalTeacherFullName");
   if (isAdmin) sessionStorage.setItem("portalAdmin", "1");
   else sessionStorage.removeItem("portalAdmin");
 }
@@ -118,8 +123,10 @@ function applyLoginResponse(data) {
 /** Issue #85: очищення контексту облікового запису (вихід або вхід як учень) */
 function clearLoginContext() {
   teacherId = "";
+  teacherFullName = "";
   isAdmin = false;
   sessionStorage.removeItem("portalTeacherId");
+  sessionStorage.removeItem("portalTeacherFullName");
   sessionStorage.removeItem("portalAdmin");
 }
 
@@ -1377,12 +1384,24 @@ function updateRoleUI() {
   const isTeacher = role === "teacher";
   const isStudent = role === "student";
 
+  // Formatted teacher name: Прізвище І.П.
+  function formatTeacherName(fullName) {
+    if (!fullName) return "";
+    const parts = fullName.trim().split(/\s+/);
+    if (parts.length < 2) return fullName;
+    const surname = parts[0];
+    const initials = parts.slice(1).map(p => p.charAt(0).toUpperCase() + ".").join(" ");
+    return surname + " " + initials;
+  }
+
   // Role label shows name for students
   if ($("roleLabel")) {
     // Issue #85: адміністратор (вхід за PORTAL_PIN) відрізняється від
     // викладача з персональним PIN — у ролі ті самі права + розділ «Викладачі»
     if (isTeacher && isAdmin) $("roleLabel").textContent = "🎓 Адміністратор";
-    else if (isTeacher) $("roleLabel").textContent = "🎓 Викладач";
+    else if (isTeacher && teacherFullName) {
+      $("roleLabel").textContent = "🎓 " + formatTeacherName(teacherFullName);
+    } else if (isTeacher) $("roleLabel").textContent = "🎓 Викладач";
     else if (isStudent && studentDisplayName) $("roleLabel").textContent = "👤 " + studentDisplayName;
     else $("roleLabel").textContent = "👤 Учень";
   }
@@ -1523,6 +1542,12 @@ function setRole(newRole, newPin = "", newName = "") {
   }
   closeRoleModal();
   updateRoleUI();
+  // Issue #88 §4: після виходу повністю завершуємо сесію та повертаємося на
+  // головну сторінку з формою входу. Старий cookie не дає доступу,
+  // back/reload не відкриває захищений вміст.
+  if (prevRole && !newRole) {
+    window.location.replace("/");
+  }
   filesReady = refreshFiles();
   // Миттєвий старт опитування, якщо увійшли як викладач у поточній сесії
   // (раніше список оновлювався лише після перезавантаження сторінки)

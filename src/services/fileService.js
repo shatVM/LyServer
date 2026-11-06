@@ -202,7 +202,8 @@ class FileService {
       });
 
     if (teacherId) {
-      allFiles = allFiles.filter((f) => f.owner === teacherId);
+      // Викладач бачить свої файли + спільні/legacy (owner === null) для копіювання
+      allFiles = allFiles.filter((f) => f.owner === teacherId || f.owner === null);
     } else if (!isTeacher) {
       // Учням — лише публічні (не приховані) та готові
       allFiles = allFiles.filter((f) => !f.hidden && (!config.slideExtensions.has(f.ext) || f.conversionStatus === "ready"));
@@ -287,15 +288,18 @@ class FileService {
   // назва (originalName у метаданих); ідентифікатор файлу, шлях до вмісту,
   // опис і категорія не змінюються, тому наявні посилання не ламаються.
   // Issue #88: лише власник файла (або адмін на рівні викликача) може перейменувати.
-  // Legacy-файли (owner === null) та виклик без teacherId — перевірка власника не застосовується.
+  // Legacy-файли (owner === null) доступні викладачам лише для перегляду і
+  // копіювання — зміна/видалення заборонена.
   renameFile(teacherId, idOrName, rawName) {
     const safe = safeFilename(idOrName);
     const record = this.getFileRecord(safe);
     if (!record) {
       throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
     }
-    if (teacherId && record.owner && record.owner !== teacherId) {
-      throw forbidden("Файл належить іншому викладачу");
+    // TeacherId з сесії: null для адміна, інакше — ID викладача. Legacy-файли
+    // (owner === null) не підлягають зміні жодним викладачем.
+    if (teacherId && (!record.owner || record.owner !== teacherId)) {
+      throw forbidden("Файл належить іншому викладачу або є спільним — зміна заборонена");
     }
     const name = String(rawName || "").replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 120);
     if (!name) throw Object.assign(new Error("Некоректна назва матеріалу"), { status: 400 });
@@ -318,8 +322,9 @@ class FileService {
       error.status = 404;
       throw error;
     }
-    if (teacherId && record.owner && record.owner !== teacherId) {
-      throw forbidden("Файл належить іншому викладачу");
+    // Legacy-файли (owner === null) не підлягають зміні жодним викладачем.
+    if (teacherId && (!record.owner || record.owner !== teacherId)) {
+      throw forbidden("Файл належить іншому викладачу або є спільним — зміна заборонена");
     }
     const safe = safeFilename(idOrName);
     const metadata = this.getMetadata();
@@ -338,7 +343,7 @@ class FileService {
   }
 
   // Issue #63: видалення матеріалу; Issue #88: лише власник (або адмін на рівні викликача).
-  // Legacy-файли (owner === null) не підлягають перевірці власника.
+  // Legacy-файли (owner === null) не підлягають видаленню викладачем.
   deleteFile(teacherId, idOrName) {
     const record = this.getFileRecord(idOrName);
     if (!record) {
@@ -346,8 +351,9 @@ class FileService {
       error.status = 404;
       throw error;
     }
-    if (teacherId && record.owner && record.owner !== teacherId) {
-      throw forbidden("Файл належить іншому викладачу");
+    // Legacy-файли (owner === null) не підлягають видаленню жодним викладачем.
+    if (teacherId && (!record.owner || record.owner !== teacherId)) {
+      throw forbidden("Файл належить іншому викладачу або є спільним — видалення заборонене");
     }
     const safe = safeFilename(idOrName);
     const filePath = this.filePath(safe);
@@ -379,7 +385,8 @@ class FileService {
   moveFileToCategory(teacherId, idOrName, categoryId = "") {
     const record = this.getFileRecord(idOrName);
     if (!record) throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
-    if (teacherId && record.owner && record.owner !== teacherId) throw forbidden("Файл належить іншому викладачу");
+    // Legacy-файли (owner === null) не підлягають зміні жодним викладачем.
+    if (teacherId && (!record.owner || record.owner !== teacherId)) throw forbidden("Файл належить іншому викладачу або є спільним — зміна заборонена");
     const safe = safeFilename(idOrName);
     const validCategory = String(categoryId || "");
     if (validCategory && !this.getCategories().some(category => category.id === validCategory)) {
@@ -403,7 +410,8 @@ class FileService {
     }
     const record = this.getFileRecord(idOrName);
     if (!record) throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
-    if (teacherId && record.owner && record.owner !== teacherId) throw forbidden("Файл належить іншому викладачу");
+    // Legacy-файли (owner === null) не підлягають зміні жодним викладачем.
+    if (teacherId && (!record.owner || record.owner !== teacherId)) throw forbidden("Файл належить іншому викладачу або є спільним — зміна заборонена");
     const safe = safeFilename(idOrName);
     const metadata = this.getMetadata();
     const all = this.getFilesList(true);
@@ -429,9 +437,12 @@ class FileService {
     const record = metadata.files && metadata.files[fileId];
     if (!record) return null;
     if (record.owner && record.folderId) {
-      return folderService.filePhysicalPath(record.owner, record.folderId, record.originalName || fileId);
+      return folderService.filePhysicalPath(record.owner, record.folderId, fileId);
     }
-    // shared/legacy файл у корені materials/
+    if (record.owner) {
+      // Файл у корені персонального простору викладача (без папки)
+      return path.join(config.dataDir, record.owner, fileId);
+    }
     return path.join(config.dataDir, fileId);
   }
 
@@ -485,7 +496,8 @@ class FileService {
 
   getFileRecord(fileId) {
     const metadata = this.getMetadata();
-    return metadata.files && metadata.files[fileId] || null;
+    const record = metadata.files && metadata.files[fileId];
+    return record || null;
   }
 
   /** Видалити файл (лише власник або адмін — перевірка на рівні викликача) */
@@ -550,9 +562,19 @@ class FileService {
       throw error;
     }
 
-    const targetDir = teacherId && folderId
-      ? folderService.filePhysicalPath(teacherId, folderId, orig)
-      : config.dataDir;
+    // Issue #88: папка має належати викладачу; фізичний шлях — матеріали
+    // <teacherId>/<folderId> (папки створюються ліниво при першому файлі).
+    let targetDir;
+    if (teacherId && folderId) {
+      const folder = folderService.getFolder(folderId);
+      if (!folder) throw notFound("Папку не знайдено");
+      if (folder.teacherId !== teacherId) throw forbidden("Папка належить іншому викладачу");
+      targetDir = path.join(folderService.teacherRootPath(teacherId), String(folderId));
+    } else if (teacherId) {
+      targetDir = path.join(config.dataDir, teacherId);
+    } else {
+      targetDir = config.dataDir;
+    }
     if (!targetDir) {
       const error = new Error("Некоректний простір зберігання");
       error.status = 400;
