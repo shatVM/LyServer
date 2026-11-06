@@ -3056,6 +3056,55 @@ async function main() {
           t88StudentFiles.every((f) => !f.conversionStatus || f.conversionStatus === "ready")
       );
 
+      // === Повний доступ адміністратора до всіх просторів ===
+      // Адмін-PIN: дерево й файли чужого простору за ?teacherId=
+      const t88AdminTreeA = await (await fetch(base + "/api/materials/tree?teacherId=" + t88TeacherA.id, {
+        headers: t88AdminHeaders
+      })).json();
+      const t88AdminFilesA = await (await fetch(base + "/api/materials/files?teacherId=" + t88TeacherA.id, {
+        headers: t88AdminHeaders
+      })).json();
+      check(
+        "Issue #88: адмін відкриває дерево й файли чужого простору",
+        Array.isArray(t88AdminTreeA.tree) && t88AdminTreeA.tree.length >= 1 &&
+          Array.isArray(t88AdminFilesA.files) && t88AdminFilesA.files.some((f) => f.id === t88FileA.id),
+        JSON.stringify({ tree: (t88AdminTreeA.tree || []).length, files: (t88AdminFilesA.files || []).length })
+      );
+
+      // Адмін перейменовує чужий файл і завантажує файл у чужий простір
+      const t88AdminRenameB = await fetch(base + "/api/materials/file/rename", {
+        method: "POST",
+        headers: t88AdminHeaders,
+        body: JSON.stringify({ file: t88FileB.id, name: "АдмінПерейменував.pdf" })
+      });
+      // Без Content-Type: тіло — бінарне (як у t88UploadHeaders)
+      const t88AdminUploadResp = await fetch(
+        base + "/api/materials/upload?name=" + encodeURIComponent("АдмінФайл.pdf") +
+          "&teacherId=" + t88TeacherA.id,
+        { method: "POST", headers: { "X-Portal-Pin": PIN }, body: TINY_PDF_BODY }
+      );
+      let t88AdminUploadFile = null;
+      try { t88AdminUploadFile = await t88AdminUploadResp.json(); } catch { /* не JSON */ }
+      check(
+        "Issue #88: адмін перейменовує чужий файл і завантажує у чужий простір",
+        t88AdminRenameB.status === 200 && t88AdminUploadResp.status === 201 &&
+          Boolean(t88AdminUploadFile) && t88AdminUploadFile.owner === t88TeacherA.id,
+        `rename=${t88AdminRenameB.status}, upload=${t88AdminUploadResp.status}`
+      );
+
+      // Викладач не може відкрити чужий простір через ?teacherId= —
+      // teacherId береться лише з сесії, параметр ігнорується
+      const t88TeacherFilesSpoof = await (await fetch(base + "/api/materials/files?teacherId=" + t88TeacherB.id, {
+        headers: t88AuthHeaders(t88LoginA.cookie, t88PinA, t88TeacherA.id)
+      })).json();
+      check(
+        "Issue #88: викладач не відкриває чужий простір через ?teacherId",
+        Array.isArray(t88TeacherFilesSpoof.files) &&
+          t88TeacherFilesSpoof.files.every((f) => f.owner === t88TeacherA.id) &&
+          !t88TeacherFilesSpoof.files.some((f) => f.id === t88FileB.id),
+        JSON.stringify((t88TeacherFilesSpoof.files || []).map((f) => f.owner))
+      );
+
       // Прямі URL оригіналів і слайдів не обходять авторизацію (без сесії)
       const t88NoSessionRaw = await fetch(base + "/files/" + encodeURIComponent(t88FileA.id));
       const t88NoSessionSlides = await fetch(base + "/slides/" + encodeURIComponent(t88FileA.id) + "/1");
@@ -3105,23 +3154,44 @@ async function main() {
 
       // Обліковий запис А видалено вище (саме це і перевіряє вище — «файли
       // після видалення акаунта зберігаються»), його сесію скасовано. Тому
-      // тестові файли/папки його простору прибираємо напряму з диска — це
-      // дані, створені лише цим тестом.
+      // прибирання виконує адміністратор — повний доступ до всіх просторів,
+      // включно з осиротілим (власника вже немає). Це водночас перевіряє
+      // адмін-доступ: спочатку файли, потім порожні папки.
+      const t88AdminCleanupFiles = [];
+      for (const id of [t88FolderFileId, t88FileA.id, t88CopyId, t88AdminUploadFile && t88AdminUploadFile.id].filter(Boolean)) {
+        try {
+          const resp = await fetch(base + "/api/materials/file/delete", {
+            method: "POST",
+            headers: t88AdminHeaders,
+            body: JSON.stringify({ file: id })
+          });
+          t88AdminCleanupFiles.push(resp.status);
+        } catch { t88AdminCleanupFiles.push(0); }
+      }
+      // Порожні папки: спочатку дочірня, потім батьківська
+      const t88AdminCleanupFolders = [];
+      for (const id of [t88FolderAChildId, t88FolderAId].filter(Boolean)) {
+        try {
+          const resp = await fetch(base + "/api/materials/folder/delete", {
+            method: "POST",
+            headers: t88AdminHeaders,
+            body: JSON.stringify({ folderId: id })
+          });
+          t88AdminCleanupFolders.push(resp.status);
+        } catch { t88AdminCleanupFolders.push(0); }
+      }
+      check(
+        "Issue #88: адмін прибирає осиротілий простір (файли й папки)",
+        t88AdminCleanupFiles.length > 0 && t88AdminCleanupFiles.every((s) => s === 200) &&
+          t88AdminCleanupFolders.length > 0 && t88AdminCleanupFolders.every((s) => s === 200),
+        JSON.stringify({ files: t88AdminCleanupFiles, folders: t88AdminCleanupFolders })
+      );
+
+      // Порожні директорії просторів тестових викладачів прибираємо з диска
+      // (саме їх створив цей тест; метадані вже очищено адмін-операціями вище)
       try {
         const t88Fs = require("node:fs");
         const t88PathMod = require("node:path");
-        const t88MetaPath = t88PathMod.join(__dirname, "materials", ".metadata.json");
-        const t88Meta = JSON.parse(t88Fs.readFileSync(t88MetaPath, "utf-8"));
-        const t88RemoveIds = [t88FileA && t88FileA.id, t88FolderFileId, t88CopyId].filter(Boolean);
-        for (const id of t88RemoveIds) {
-          delete (t88Meta.files || {})[id];
-          if (Array.isArray(t88Meta.order)) t88Meta.order = t88Meta.order.filter((x) => x !== id);
-        }
-        if (Array.isArray(t88Meta.folders)) {
-          t88Meta.folders = t88Meta.folders.filter((f) => f.id !== t88FolderAId && f.id !== t88FolderAChildId);
-        }
-        t88Fs.writeFileSync(t88MetaPath, JSON.stringify(t88Meta, null, 2) + "\n");
-        // Усі простори тестових викладачів належать лише цьому тесту
         for (const id of [t88TeacherA.id, t88TeacherB.id]) {
           t88Fs.rmSync(t88PathMod.join(__dirname, "materials", id), { recursive: true, force: true });
         }

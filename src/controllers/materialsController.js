@@ -6,6 +6,11 @@
  * сесію (teacherId). Ніколи не довіряємо teacherId, folder ID або шляху,
  * переданому клієнтом, як доказу власності.
  *
+ * Повний доступ адміністратора (Issue #88): запит із адмін-PIN (X-Portal-Pin
+ * = PORTAL_PIN) або адмін-сесія керує всіма просторами, включно з осиротілими
+ * (власник видалений) і legacy-файлами; цільовий простір задається параметром
+ * teacherId (query/body). Викладач бачить і змінює лише власний простір.
+ *
  * UI на цьому етапі не змінюється; API призначене для наступного етапу інтерфейсу.
  */
 
@@ -17,13 +22,6 @@ const config = require("../config");
 const path = require("node:path");
 
 class MaterialsController {
-  /** Отримати teacherId з чинної серверної сесії (не з тіла/заголовка запиту) */
-  static teacherIdFromSession(req) {
-    const session = auth.readSession(req);
-    if (!session || session.role !== "teacher") return null;
-    return session.teacherId || null;
-  }
-
   /**
    * Авторизація операції з матеріалами (Issue #88, «повний доступ адміністратора»).
    *

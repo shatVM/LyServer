@@ -223,50 +223,6 @@ class FileService {
     return allFiles;
   }
 
-  moveFileToCategory(idOrName, categoryId = "") {
-    const safe = safeFilename(idOrName);
-    const filePath = getFilePath(safe);
-    if (!filePath || !fs.existsSync(filePath)) throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
-    const validCategory = String(categoryId || "");
-    if (validCategory && !this.getCategories().some(category => category.id === validCategory)) {
-      throw Object.assign(new Error("Категорію не знайдено"), { status: 404 });
-    }
-    const metadata = this.getMetadata();
-    if (!metadata.files || typeof metadata.files !== "object") metadata.files = {};
-    const current = metadata.files[safe];
-    metadata.files[safe] = {
-      ...(current && typeof current === "object" ? current : { originalName: typeof current === "string" ? current : safe }),
-      categoryId: validCategory
-    };
-    this.saveMetadata(metadata);
-    return { ok: true, file: safe, categoryId: validCategory };
-  }
-
-  reorderFile(idOrName, direction) {
-    if (direction !== "up" && direction !== "down") {
-      throw Object.assign(new Error("Напрямок має бути up або down"), { status: 400 });
-    }
-    const safe = safeFilename(idOrName);
-    const filePath = getFilePath(safe);
-    if (!filePath || !fs.existsSync(filePath)) throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
-    const metadata = this.getMetadata();
-    const all = this.getFilesList(true);
-    const current = all.find(item => item.id === safe);
-    if (!current) throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
-    const group = all.filter(item => item.categoryId === current.categoryId);
-    const currentIndex = group.findIndex(item => item.id === safe);
-    const targetIndex = currentIndex + (direction === "up" ? -1 : 1);
-    const ordered = all.map(item => item.id);
-    if (targetIndex >= 0 && targetIndex < group.length) {
-      const a = ordered.indexOf(group[currentIndex].id);
-      const b = ordered.indexOf(group[targetIndex].id);
-      [ordered[a], ordered[b]] = [ordered[b], ordered[a]];
-    }
-    metadata.order = ordered;
-    this.saveMetadata(metadata);
-    return { ok: true, order: ordered };
-  }
-
   setConversionStatus(idOrName, status, errorMessage = "") {
     const record = this.getFileRecord(idOrName);
     if (!record) return;
@@ -340,45 +296,6 @@ class FileService {
     this.saveMetadata(metadata);
 
     return { ok: true, name: safe, hidden: shouldHide };
-  }
-
-  // Issue #63: видалення матеріалу; Issue #88: лише власник (або адмін на рівні викликача).
-  // Legacy-файли (owner === null) не підлягають видаленню викладачем.
-  deleteFile(teacherId, idOrName) {
-    const record = this.getFileRecord(idOrName);
-    if (!record) {
-      const error = new Error("Файл не знайдено");
-      error.status = 404;
-      throw error;
-    }
-    // Legacy-файли (owner === null) не підлягають видаленню жодним викладачем.
-    if (teacherId && (!record.owner || record.owner !== teacherId)) {
-      throw forbidden("Файл належить іншому викладачу або є спільним — видалення заборонене");
-    }
-    const safe = safeFilename(idOrName);
-    const filePath = this.filePath(safe);
-    if (!filePath || !fs.existsSync(filePath)) {
-      const error = new Error("Файл не знайдено на диску");
-      error.status = 404;
-      throw error;
-    }
-
-    fs.unlinkSync(filePath);
-
-    // Clean up from metadata
-    const metadata = this.getMetadata();
-    const hiddenSet = new Set(metadata.hidden);
-    if (hiddenSet.has(safe)) {
-      hiddenSet.delete(safe);
-      metadata.hidden = Array.from(hiddenSet);
-    }
-    if (metadata.files && metadata.files[safe]) {
-      delete metadata.files[safe];
-    }
-    if (Array.isArray(metadata.order)) metadata.order = metadata.order.filter(id => id !== safe);
-    this.saveMetadata(metadata);
-
-    return { ok: true, name: safe };
   }
 
   // Issue #63: переміщення файла в категорію; Issue #88: лише власник
@@ -463,16 +380,6 @@ class FileService {
     return this.ownerOf(fileId) === teacherId;
   }
 
-  /** Файли викладача (за owner), опціонально в папці folderId */
-  getFilesForTeacher(teacherId, folderId) {
-    const metadata = this.getMetadata();
-    const files = Object.entries(metadata.files || {}).map(([fileId, info]) => ({
-      id: fileId,
-      ...(info && typeof info === "object" ? info : { originalName: typeof info === "string" ? info : fileId })
-    })).filter((f) => f.owner === teacherId && (folderId === undefined || f.folderId === folderId));
-    return files;
-  }
-
   /** Копіювання файла у власну папку іншого (או того самого) викладача.
    * Створює новий file ID, незалежний фізичний файл і власні метадані.
    * Оригінал не змінюється. Для PDF/PPT/PPTX створюється власний manifest/PNG-набір.
@@ -503,15 +410,23 @@ class FileService {
   /** Видалити файл (лише власник або адмін — перевірка на рівні викликача) */
   deleteFile(teacherId, idOrName) {
     const safe = safeFilename(idOrName);
-    const filePath = this.filePath(safe);
-    if (!filePath || !fs.existsSync(filePath)) {
+    const record = this.getFileRecord(safe);
+    if (!record) {
       const error = new Error("Файл не знайдено");
       error.status = 404;
       throw error;
     }
-    const record = this.getFileRecord(safe);
-    if (record && record.owner && record.owner !== teacherId) {
-      throw forbidden("Файл належить іншому викладачу");
+    // teacherId === null → адмін: доступ до будь-якого файла, включно з legacy.
+    // Викладач — лише власний файл; legacy-файли (owner === null) й чужі
+    // записи йому недоступні (додатково блокується на рівні контролера).
+    if (teacherId && (!record.owner || record.owner !== teacherId)) {
+      throw forbidden("Файл належить іншому викладачу або є спільним — видалення заборонене");
+    }
+    const filePath = this.filePath(safe);
+    if (!filePath || !fs.existsSync(filePath)) {
+      const error = new Error("Файл не знайдено на диску");
+      error.status = 404;
+      throw error;
     }
 
     fs.unlinkSync(filePath);
