@@ -35,14 +35,20 @@
     const headers = Object.assign({ "Content-Type": "application/json" }, options.headers || {});
     const response = await fetch(url, Object.assign({}, options, { headers }));
     let data = null;
+    let raw = "";
     try {
-      data = await response.json();
-    } catch { /* відповідь не JSON (наприклад, 401 текстом) */ }
+      raw = await response.text();
+      data = raw ? JSON.parse(raw) : null;
+    } catch { data = null; /* відповідь не JSON (наприклад, текстова помилка) */ }
     if (response.status === 401 || response.status === 403) {
+      // Для 403 показуємо текст сервера, якщо він є: без нього реальна причина
+      // (наприклад, «Неправильний PIN») маскувалася загальним шаблоном.
+      const serverMessage =
+        (data && data.message) || (response.status === 403 && raw ? raw : "");
       const error = new Error(
         response.status === 401
           ? "Сесію не знайдено — увійдіть заново як адміністратор (PIN адміністратора)."
-          : "Доступ має лише адміністратор (вхід за PORTAL_PIN)."
+          : (serverMessage || "Доступ має лише адміністратор (вхід за PORTAL_PIN).")
       );
       error.status = response.status;
       throw error;

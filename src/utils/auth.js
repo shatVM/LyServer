@@ -343,11 +343,17 @@ function requirePerm(req, res, perm) {
 /**
  * Issue #85: доступ лише для адміністратора (розділ «Викладачі» / API).
  *
- * Приймає адміністративний PIN у запиті або чинну сесію з access "admin".
+ * Приймає чинну сесію з access "admin" або адміністративний PIN у запиті.
+ * Пріоритет — сесія: поле `pin` у тілі деяких адмін-запитів містить PIN
+ * іншого призначення (новий PIN викладача в /api/teachers/create чи
+ * /api/teachers/set-pin) і не є креденціалом адміністратора.
  * Сесія викладача/учня → 403; без входу → 401 (як для інших сесійних API).
  * PIN викладача навіть за наявності ідентифікатора не дає адмін-доступу.
  */
 function requireAdmin(req, res) {
+  const session = readSession(req);
+  if (session && session.access === "admin") return session;
+
   const pin = extractPin(req);
   if (pin) {
     const result = evaluatePin(req);
@@ -368,8 +374,6 @@ function requireAdmin(req, res) {
     return null;
   }
 
-  const session = readSession(req);
-  if (session && session.access === "admin") return session;
   if (session) {
     res.status(403).send("Доступ має лише адміністратор");
     return null;

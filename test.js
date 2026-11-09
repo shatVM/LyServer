@@ -2236,6 +2236,59 @@ async function main() {
           Boolean(t85Id) && t85NoSecrets(t85Body)
         );
 
+        // --- Панель «Викладачі»: лише сесія адміністратора, без PIN-заголовка ---
+        // Регресія: поле `pin` у тілі — новий PIN викладача, а не креденціал
+        // адміністратора; воно не має перекривати чинну адмін-сесію (403/«Неправильний PIN»).
+        const t85SessLogin = await fetch(base + "/api/auth/verify", {
+          method: "POST",
+          headers: t85JsonHeaders,
+          body: JSON.stringify({ pin: PIN })
+        });
+        const t85SessMatch = (t85SessLogin.headers.get("set-cookie") || "").match(/ly_session=([^;]+)/);
+        const t85SessCookie = t85SessMatch ? t85SessMatch[1] : "";
+        const t85SessHeaders = {
+          "Content-Type": "application/json",
+          Cookie: "ly_session=" + t85SessCookie
+        };
+        r = await fetch(base + "/api/teachers/create", {
+          method: "POST",
+          headers: t85SessHeaders,
+          body: JSON.stringify({ fullName: "Сесійний Тест", pin: "7391", permissions: ["demo"] })
+        });
+        let t85SessBody = await r.json().catch(() => null);
+        check(
+          "Issue #85: створення із сесією адміністратора без PIN-заголовка → 201",
+          t85SessLogin.status === 200 && Boolean(t85SessCookie) &&
+            r.status === 201 && t85SessBody && t85SessBody.teacher &&
+            t85SessBody.teacher.fullName === "Сесійний Тест",
+          `login=${t85SessLogin.status} status=${r.status} msg=${t85SessBody && t85SessBody.message}`
+        );
+        const t85SessId = t85SessBody && t85SessBody.teacher ? t85SessBody.teacher.id : "";
+        r = await fetch(base + "/api/teachers/set-pin", {
+          method: "POST",
+          headers: t85SessHeaders,
+          body: JSON.stringify({ id: t85SessId, pin: "7392" })
+        });
+        check(
+          "Issue #85: заміна PIN із сесією без PIN-заголовка → 200",
+          Boolean(t85SessId) && r.status === 200,
+          `status=${r.status}`
+        );
+        r = await fetch(base + "/api/teachers/delete", {
+          method: "POST",
+          headers: t85SessHeaders,
+          body: JSON.stringify({ id: t85SessId, confirm: true })
+        });
+        check(
+          "Issue #85: видалення із підтвердженням із сесією без PIN-заголовка → 200",
+          Boolean(t85SessId) && r.status === 200,
+          `status=${r.status}`
+        );
+        await fetch(base + "/api/auth/logout", {
+          method: "POST",
+          headers: { Cookie: "ly_session=" + t85SessCookie }
+        });
+
         // --- Список: наслідки дій для адміністратора, без секретів ---
         r = await fetch(base + "/api/teachers", { headers: t85AdminHeaders });
         t85Body = await r.json().catch(() => null);
