@@ -155,45 +155,74 @@ class FileService {
     const order = Array.isArray(metadata.order) ? metadata.order : [];
     const orderIndex = new Map(order.map((id, index) => [id, index]));
 
-    // Issue #88: викладач бачить лише свої файли (власного простору), адмін — усі
-    let allFiles = fs.readdirSync(config.dataDir, { withFileTypes: true })
-      .filter(item => item.isFile() && !item.name.startsWith("."))
-      .map(item => {
-        const full = path.join(config.dataDir, item.name);
-        const rawInfo = fileMap[item.name];
-        const info = rawInfo && typeof rawInfo === "object"
-          ? rawInfo
-          : { originalName: typeof rawInfo === "string" ? rawInfo : item.name };
-        const ext = path.extname(item.name).toLowerCase();
-        let conversionStatus = info.conversionStatus || "";
-        let conversionError = typeof info.conversionError === "string" ? info.conversionError : "";
-        if (config.slideExtensions.has(ext)) {
-          const manifest = slideService.getManifest(item.name);
-          const manifestReady = manifest && Number.isInteger(manifest.pageCount) && manifest.pageCount > 0;
-          if (conversionStatus === "ready" && !manifestReady) {
-            conversionStatus = "failed";
-            conversionError = conversionError || "PNG-слайди відсутні або пошкоджені";
-          } else if (!conversionStatus) {
-            if (manifestReady) conversionStatus = "ready";
-            else if (manifest && manifest.converting) conversionStatus = "converting";
-            else conversionStatus = "pending";
-          }
+    // Issue #88: каталог складається з legacy-файлів кореня materials/ ТА файлів
+    // персональних просторів викладачів materials/<teacherId>/[<folderId>/]<id>.
+    // Раніше сканувався лише корінь, тому матеріали, завантажені у простір,
+    // не потрапляли в каталог викладача та учнів (учні взагалі не бачили нових
+    // завантажень). Фізичне розташування — джерело правди для owner/folderId.
+    const buildEntry = (fileName, owner, folderId, scanPath) => {
+      let full = this.filePath(fileName) || scanPath;
+      if (!fs.existsSync(full)) full = scanPath;
+      let size;
+      try { size = fs.statSync(full).size; } catch { return null; } // файл зник між скануванням
+      const rawInfo = fileMap[fileName];
+      const info = rawInfo && typeof rawInfo === "object"
+        ? rawInfo
+        : { originalName: typeof rawInfo === "string" ? rawInfo : fileName };
+      const ext = path.extname(fileName).toLowerCase();
+      let conversionStatus = info.conversionStatus || "";
+      let conversionError = typeof info.conversionError === "string" ? info.conversionError : "";
+      if (config.slideExtensions.has(ext)) {
+        const manifest = slideService.getManifest(fileName);
+        const manifestReady = manifest && Number.isInteger(manifest.pageCount) && manifest.pageCount > 0;
+        if (conversionStatus === "ready" && !manifestReady) {
+          conversionStatus = "failed";
+          conversionError = conversionError || "PNG-слайди відсутні або пошкоджені";
+        } else if (!conversionStatus) {
+          if (manifestReady) conversionStatus = "ready";
+          else if (manifest && manifest.converting) conversionStatus = "converting";
+          else conversionStatus = "pending";
         }
-        return {
-          id: item.name,
-          name: info.originalName || item.name,
-          ext,
-          size: fs.statSync(full).size,
-          hidden: hiddenSet.has(item.name),
-          description: typeof info.description === "string" ? info.description : "",
-          categoryId: categoryIds.has(info.categoryId) ? info.categoryId : "",
-          order: orderIndex.has(item.name) ? orderIndex.get(item.name) : Number.MAX_SAFE_INTEGER,
-          conversionStatus,
-          conversionError,
-          owner: info.owner || null,
-          folderId: info.folderId || null
+      }
+      return {
+        id: fileName,
+        name: info.originalName || fileName,
+        ext,
+        size,
+        hidden: hiddenSet.has(fileName),
+        description: typeof info.description === "string" ? info.description : "",
+        categoryId: categoryIds.has(info.categoryId) ? info.categoryId : "",
+        order: orderIndex.has(fileName) ? orderIndex.get(fileName) : Number.MAX_SAFE_INTEGER,
+        conversionStatus,
+        conversionError,
+        owner: owner || null,
+        folderId: folderId || null
+      };
+    };
+
+    const sources = [];
+    for (const item of fs.readdirSync(config.dataDir, { withFileTypes: true })) {
+      if (item.isFile() && !item.name.startsWith(".")) {
+        sources.push({ file: item.name, owner: null, folderId: null, scanPath: path.join(config.dataDir, item.name) });
+      } else if (item.isDirectory() && !item.name.startsWith(".")) {
+        const spaceRoot = path.join(config.dataDir, item.name);
+        const walk = (dir, folderId) => {
+          for (const sub of fs.readdirSync(dir, { withFileTypes: true })) {
+            const subPath = path.join(dir, sub.name);
+            if (sub.isDirectory()) {
+              if (!sub.name.startsWith(".")) walk(subPath, sub.name);
+            } else if (!sub.name.startsWith(".")) {
+              sources.push({ file: sub.name, owner: item.name, folderId, scanPath: subPath });
+            }
+          }
         };
-      })
+        try { walk(spaceRoot, null); } catch { /* простір видаляється паралельно */ }
+      }
+    }
+
+    let allFiles = sources
+      .map(s => buildEntry(s.file, s.owner, s.folderId, s.scanPath))
+      .filter(Boolean)
       .filter(item => config.allowedExtensions.has(item.ext))
       .sort((a, b) => {
         const aHasOrder = orderIndex.has(a.id), bHasOrder = orderIndex.has(b.id);
@@ -352,7 +381,14 @@ class FileService {
   filePath(fileId) {
     const metadata = this.getMetadata();
     const record = metadata.files && metadata.files[fileId];
-    if (!record) return null;
+    if (!record) {
+      // Legacy-файли в корені materials/ без запису в метаданих: шлях у корінь,
+      // але лише для безпечного імені — інакше ідентифікатор із шляхом
+      // («../») дав би доступ поза materials/ (захист від traversal).
+      const safe = safeFilename(fileId);
+      if (safe !== fileId || !config.allowedExtensions.has(path.extname(safe).toLowerCase())) return null;
+      return path.join(config.dataDir, safe);
+    }
     if (record.owner && record.folderId) {
       return folderService.filePhysicalPath(record.owner, record.folderId, fileId);
     }

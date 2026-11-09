@@ -3105,6 +3105,69 @@ async function main() {
         JSON.stringify((t88TeacherFilesSpoof.files || []).map((f) => f.owner))
       );
 
+      // === Сумісність просторів з чинними API (Issue #85/#63) ===
+      // Конвертація слайдів: раніше slideService шукав джерело лише в корені
+      // materials/, і файл простору давав «Файл не знайдено» (conversionStatus
+      // = failed) — учні не могли відкрити матеріал.
+      const t88PrepareResp = await fetch(base + "/api/slides/prepare", {
+        method: "POST",
+        headers: t88AuthHeaders(t88LoginA.cookie, t88PinA, t88TeacherA.id),
+        body: JSON.stringify({ file: t88FileA.id })
+      });
+      let t88Prepare = null;
+      try { t88Prepare = await t88PrepareResp.json(); } catch { /* не JSON */ }
+      check(
+        "Issue #88: конвертація слайдів файлу простору → маніфест",
+        t88PrepareResp.status === 200 && Boolean(t88Prepare) &&
+          Number.isInteger(t88Prepare.pageCount) && t88Prepare.pageCount >= 1,
+        `status=${t88PrepareResp.status}, pages=${t88Prepare && t88Prepare.pageCount}`
+      );
+
+      // Каталог викладача (/api/files): файли власного простору видимі
+      const t88TeacherCatalog = await (await fetch(base + "/api/files", {
+        headers: t88AuthHeaders(t88LoginA.cookie, t88PinA, t88TeacherA.id)
+      })).json();
+      check(
+        "Issue #88: каталог викладача містить файли його простору",
+        Array.isArray(t88TeacherCatalog) &&
+          t88TeacherCatalog.some((f) => f.id === t88FileA.id) &&
+          t88TeacherCatalog.every((f) => f.owner === t88TeacherA.id || f.owner === null),
+        JSON.stringify((Array.isArray(t88TeacherCatalog) ? t88TeacherCatalog : []).map((f) => f.id))
+      );
+
+      // Учнівський каталог: готовий файл простору доступний для перегляду
+      const t88StudentSpace = await (await fetch(base + "/api/files", { headers: sess() })).json();
+      check(
+        "Issue #88: учнівський каталог містить готовий файл простору",
+        Array.isArray(t88StudentSpace) && t88StudentSpace.some((f) => f.id === t88FileA.id),
+        JSON.stringify((Array.isArray(t88StudentSpace) ? t88StudentSpace : []).map((f) => f.id))
+      );
+
+      // Старт демонстрації з файлу простору: stateService раніше перевіряв
+      // наявність файла лише в корені → 404 «Файл не знайдено»
+      const t88DemoStart = await fetch(base + "/api/control", {
+        method: "POST",
+        headers: t88AuthHeaders(t88LoginA.cookie, t88PinA, t88TeacherA.id),
+        body: JSON.stringify({ file: t88FileA.id })
+      });
+      let t88DemoState = null;
+      try {
+        t88DemoState = await (await fetch(base + "/api/state", {
+          headers: t88AuthHeaders(t88LoginA.cookie, t88PinA, t88TeacherA.id)
+        })).json();
+      } catch { /* не JSON */ }
+      check(
+        "Issue #88: старт демонстрації з файлу простору",
+        t88DemoStart.status === 200 && Boolean(t88DemoState) && t88DemoState.file === t88FileA.id,
+        `start=${t88DemoStart.status}, file=${t88DemoState && t88DemoState.file}`
+      );
+      // Зупинка показу, щоб не впливати на подальші тести
+      await fetch(base + "/api/control", {
+        method: "POST",
+        headers: t88AuthHeaders(t88LoginA.cookie, t88PinA, t88TeacherA.id),
+        body: JSON.stringify({ stop: true })
+      });
+
       // Прямі URL оригіналів і слайдів не обходять авторизацію (без сесії)
       const t88NoSessionRaw = await fetch(base + "/files/" + encodeURIComponent(t88FileA.id));
       const t88NoSessionSlides = await fetch(base + "/slides/" + encodeURIComponent(t88FileA.id) + "/1");
