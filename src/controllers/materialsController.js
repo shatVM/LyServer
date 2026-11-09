@@ -268,7 +268,35 @@ class MaterialsController {
         targetTeacherId,
         targetFolderId: body.targetFolderId || null
       });
-      res.status(201).json({ ok: true, file: result });
+      // Issue #88 (рев'ю): копія PDF/PPT/PPTX конвертується одразу — раніше
+      // фізичне копіювання не запускало конвертацію, і копія вічно зависала
+      // без власного manifest/PNG. Стан ready виставляємо лише після перевірки
+      // всіх PNG; інакше failed із причиною (ніякого завислого "converting").
+      // Manifest і PNG копії належать новому file ID і незалежні від джерела.
+      const ext = path.extname(result.id).toLowerCase();
+      let conversionStatus = "not-required";
+      let conversionError = "";
+      if (config.slideExtensions.has(ext)) {
+        conversionStatus = "converting";
+        fileService.setConversionStatus(result.id, conversionStatus);
+        try {
+          const manifest = await slideService.ensureSlides(result.id);
+          if (!manifest || !Number.isInteger(manifest.pageCount) || manifest.pageCount < 1) {
+            throw new Error("Сервер не підтвердив готовність PNG-слайдів");
+          }
+          conversionStatus = "ready";
+          fileService.setConversionStatus(result.id, "ready");
+        } catch (error) {
+          conversionStatus = "failed";
+          conversionError = error.message || "Помилка конвертації";
+          fileService.setConversionStatus(result.id, "failed", conversionError);
+          console.error("Конвертація копії (" + result.id + "):", conversionError);
+        }
+      }
+      res.status(201).json({
+        ok: true,
+        file: { ...result, conversionStatus, conversionError }
+      });
     } catch (error) {
       res.status(error.status || 400).send(error.message || "Не вдалося скопіювати файл");
     }

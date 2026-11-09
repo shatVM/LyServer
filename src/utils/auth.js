@@ -146,7 +146,13 @@ function sessionCookieOptions(req) {
 function clearSession(req, res) {
   const existing = readSession(req);
   if (existing) sessionService.destroy(existing.id);
-  res.clearCookie(SESSION_COOKIE, { path: "/" });
+  // Issue #88 (рев'ю): cookie знімаємо з ТИМИ САМИМИ атрибутами, що й видача
+  // (httpOnly/sameSite/path/secure), — інакше браузер не видалить пару cookie/path,
+  // і клієнт після виходу лишається з відпрацьованою cookie. maxAge прибираємо:
+  // для очищення Express ставить Expires у минуле сам.
+  const options = sessionCookieOptions(req);
+  delete options.maxAge;
+  res.clearCookie(SESSION_COOKIE, options);
 }
 
 /**

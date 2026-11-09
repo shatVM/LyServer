@@ -21,6 +21,53 @@ function teacherIdFromSession(req) {
 }
 
 /**
+ * Issue #88 (рев'ю): авторизація операцій старих маршрутів, які ЗМІНЮЮТЬ стан
+ * матеріалів або створюють слайди (/api/files/{rename,category,reorder,
+ * toggle-hide,delete}, /api/upload, /api/slides/prepare).
+ *
+ * Спочатку PIN-дозвіл (чинна модель Issue #63: cookie сама по собі не
+ * авторизує POST-операції), далі — актор із ЧИННОЇ серверної сесії:
+ *  - адмін-PIN → { isAdmin: true, teacherId: null } — повний доступ;
+ *  - персональний PIN викладача → teacherId ЛИШЕ з сесії. Без сесії — 401:
+ *    раніше такий запит трактувався як адмін-доступ (teacherIdFromSession
+ *    повертав null), що дозволяло обхід через персональний PIN без cookie.
+ *
+ * У разі помилки сам надсилає відповідь і повертає null.
+ */
+function materialsActor(req, res) {
+  const perm = auth.requirePerm(req, res, "materials");
+  if (!perm) return null;
+  if (perm.access === "admin") return { isAdmin: true, teacherId: null };
+  const session = auth.readSession(req);
+  const teacherId = session && session.role === "teacher" ? (session.teacherId || "") : "";
+  if (!teacherId) {
+    res.status(401).send("Сесію не знайдено — увійдіть заново");
+    return null;
+  }
+  return { isAdmin: false, teacherId };
+}
+
+/**
+ * Issue #88 (рев'ю): доступ до конкретного файла для операцій, що змінюють
+ * його стан або створюють слайди. Адмін — до будь-якого; викладач — лише до
+ * власного: спільні/legacy-файли (owner === null) і чужі файли йому для
+ * змін стану недоступні (копіювання — окремий маршрут /api/materials/copy).
+ * Запис, що не існує, не блокується тут — далі сервіс сам відповість 404.
+ */
+function ensureFileEditable(res, actor, fileId) {
+  if (actor.isAdmin) return true;
+  const record = fileService.getFileRecord(fileId);
+  if (!record) return true;
+  if (record.owner && record.owner === actor.teacherId) return true;
+  if (!record.owner) {
+    res.status(403).send("Файл належить спільній бібліотеці — зміни заборонені");
+    return false;
+  }
+  res.status(403).send("Файл належить іншому викладачу");
+  return false;
+}
+
+/**
  * Issue #63 (доробка §2): безпечний набір полів категорії.
  * У відповідь віддаються ЛИШЕ id/name/order/createdAt — ніяких даних про
  * матеріали (приховані чи опубліковані), їх кількості чи складу.
@@ -193,14 +240,17 @@ class ApiController {
   }
 
   async uploadFile(req, res) {
-    // Issue #85: робота з матеріалами належить дозволу materials
-    if (!auth.requirePerm(req, res, "materials")) return;
+    // Issue #85: робота з матеріалами належить дозволу materials;
+    // Issue #88 (рев'ю): актор із сесії — викладач створює файл лише у власному
+    // просторі, без сесії (персональний PIN без cookie) — 401, не адмін-доступ.
+    const actor = materialsActor(req, res);
+    if (!actor) return;
     const originalName = req.query.name;
     if (!originalName) return res.status(400).send("Не вказано ім'я файлу");
     const description = typeof req.query.description === "string" ? req.query.description : "";
     const categoryId = typeof req.query.categoryId === "string" ? req.query.categoryId : "";
     const folderId = typeof req.query.folderId === "string" ? req.query.folderId : "";
-    const teacherId = teacherIdFromSession(req);
+    const teacherId = actor.teacherId;
 
     try {
       const result = await fileService.saveFileStream(req, originalName, description, categoryId, teacherId || null, folderId || null);
@@ -315,8 +365,9 @@ class ApiController {
   }
 
   renameFile(req, res) {
-    if (!auth.requirePerm(req, res, "materials")) return;
-    const teacherId = teacherIdFromSession(req);
+    const actor = materialsActor(req, res);
+    if (!actor) return;
+    const teacherId = actor.teacherId;
     try {
       const body = req.body || {};
       res.json(fileService.renameFile(teacherId, body.file, body.name));
@@ -326,8 +377,9 @@ class ApiController {
   }
 
   setFileCategory(req, res) {
-    if (!auth.requirePerm(req, res, "materials")) return;
-    const teacherId = teacherIdFromSession(req);
+    const actor = materialsActor(req, res);
+    if (!actor) return;
+    const teacherId = actor.teacherId;
     try {
       const body = req.body || {};
       const result = fileService.moveFileToCategory(teacherId, body.file, body.categoryId);
@@ -341,8 +393,9 @@ class ApiController {
   }
 
   reorderFile(req, res) {
-    if (!auth.requirePerm(req, res, "materials")) return;
-    const teacherId = teacherIdFromSession(req);
+    const actor = materialsActor(req, res);
+    if (!actor) return;
+    const teacherId = actor.teacherId;
     try {
       const body = req.body || {};
       res.json(fileService.reorderFile(teacherId, body.file, body.direction));
@@ -351,8 +404,9 @@ class ApiController {
     }
   }
   toggleHide(req, res) {
-    if (!auth.requirePerm(req, res, "materials")) return;
-    const teacherId = teacherIdFromSession(req);
+    const actor = materialsActor(req, res);
+    if (!actor) return;
+    const teacherId = actor.teacherId;
     const { file, hidden } = req.body || {};
     try {
       const result = fileService.toggleHide(teacherId, file, Boolean(hidden));
@@ -367,8 +421,9 @@ class ApiController {
   }
 
   deleteFile(req, res) {
-    if (!auth.requirePerm(req, res, "materials")) return;
-    const teacherId = teacherIdFromSession(req);
+    const actor = materialsActor(req, res);
+    if (!actor) return;
+    const teacherId = actor.teacherId;
     const { file } = req.body || {};
     try {
       const result = fileService.deleteFile(teacherId, file);
@@ -387,9 +442,14 @@ class ApiController {
    * The conversion is async — client may need to poll if it takes time.
    */
   async prepareSlides(req, res) {
-    if (!auth.requirePerm(req, res, "materials")) return;
+    const actor = materialsActor(req, res);
+    if (!actor) return;
     const { file } = req.body || {};
     if (!file) return res.status(400).send("Не вказано file");
+    // Issue #88 (рев'ю): перевірка власника ПЕРЕД setConversionStatus/ensureSlides —
+    // викладач готує лише власні файли; чужі та спільні/legacy (owner === null)
+    // залишаються незмінними (копіювання з конвертацією — /api/materials/copy).
+    if (!ensureFileEditable(res, actor, file)) return;
     try {
       fileService.setConversionStatus(file, "converting");
       const manifest = await slideService.ensureSlides(file);

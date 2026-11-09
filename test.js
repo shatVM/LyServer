@@ -3003,6 +3003,14 @@ async function main() {
           t88Copy.file.owner === t88TeacherA.id,
         `status=${t88CopyResp.status}`
       );
+      // Issue #88 (рев'ю): конвертація копії завершується ПІД ЧАС копіювання —
+      // стан у відповіді готовий, а не завислий "converting"/"pending"
+      check(
+        "Issue #88 (рев'ю): відповідь копіювання PDF містить готовий стан конвертації",
+        t88CopyResp.status === 201 && Boolean(t88Copy) &&
+          t88Copy.file.conversionStatus === "ready",
+        `conversion=${t88Copy && t88Copy.file && t88Copy.file.conversionStatus}`
+      );
 
       // Копія має власні метадані/слайди, незалежні від оригіналу
       await new Promise(resolve => setTimeout(resolve, 1500));
@@ -3014,9 +3022,34 @@ async function main() {
       check(
         "Issue #88: копія має власні слайди/метадані, незалежні від оригіналу",
         t88CopyInfoResp.status === 200 && Boolean(t88CopyInfo) &&
-          typeof t88CopyInfo.ready === "boolean",
-        `status=${t88CopyInfoResp.status}, ready=${t88CopyInfo && t88CopyInfo.ready}`
+          t88CopyInfo.ready === true &&
+          Number.isInteger(t88CopyInfo.pageCount) && t88CopyInfo.pageCount >= 1,
+        `status=${t88CopyInfoResp.status}, ready=${t88CopyInfo && t88CopyInfo.ready}, pages=${t88CopyInfo && t88CopyInfo.pageCount}`
       );
+      // Issue #88 (рев'ю): фізичні докази — власний manifest і PNG копії на
+      // диску, а також реальний HTTP-шлях віддачі сторінки
+      {
+        const t88FsCopy = require("node:fs");
+        const t88PathCopy = require("node:path");
+        const t88CopyDir = t88PathCopy.join(__dirname, "materials", ".slides", t88CopyId);
+        const t88CopySrcDir = t88PathCopy.join(__dirname, "materials", ".slides", t88FileB.id);
+        const t88PngMagic = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+        const t88CopyPng = t88PathCopy.join(t88CopyDir, "page-1.png");
+        const t88CopyPngOnDisk = t88FsCopy.existsSync(t88PathCopy.join(t88CopyDir, "manifest.json")) &&
+          t88FsCopy.existsSync(t88CopyPng) &&
+          t88FsCopy.readFileSync(t88CopyPng).subarray(0, 8).equals(t88PngMagic);
+        const t88CopyPngHttp = await fetch(base + "/slides/" + encodeURIComponent(t88CopyId) + "/1", {
+          headers: t88AuthHeaders(t88LoginA.cookie, t88PinA, t88TeacherA.id)
+        });
+        const t88CopyPngBytes = Buffer.from(await t88CopyPngHttp.arrayBuffer());
+        check(
+          "Issue #88 (рев'ю): копія PDF має власний manifest і PNG (диск + HTTP), теки джерела й копії різні",
+          t88CopyDir !== t88CopySrcDir && t88CopyPngOnDisk &&
+            t88CopyPngHttp.status === 200 && t88CopyPngBytes.length > 8 &&
+            t88CopyPngBytes.subarray(0, 8).equals(t88PngMagic),
+          `dirOk=${t88CopyDir !== t88CopySrcDir}, disk=${t88CopyPngOnDisk}, http=${t88CopyPngHttp.status}`
+        );
+      }
 
       // Зміна оригіналу (приховати) не впливає на копію
       await fetch(base + "/api/materials/file/toggle-hide", {
@@ -3027,11 +3060,107 @@ async function main() {
       const t88CopyInfo2Resp = await fetch(base + "/api/slides/info?file=" + encodeURIComponent(t88CopyId), {
         headers: t88AuthHeaders(t88LoginA.cookie, t88PinA, t88TeacherA.id)
       });
+      let t88CopyInfo2 = null;
+      try { t88CopyInfo2 = await t88CopyInfo2Resp.json(); } catch { /* не JSON */ }
       check(
         "Issue #88: зміна оригіналу не впливає на копію",
-        t88CopyInfo2Resp.status === 200,
-        `status=${t88CopyInfo2Resp.status}`
+        t88CopyInfo2Resp.status === 200 &&
+          Boolean(t88CopyInfo2) && t88CopyInfo2.ready === true,
+        `status=${t88CopyInfo2Resp.status}, ready=${t88CopyInfo2 && t88CopyInfo2.ready}`
       );
+
+      // === Issue #88 (рев'ю): копія PPTX — реальний шлях конвертації ===
+      // Фікстура — справжній PPTX, створений PowerPoint (test/fixtures/test.pptx,
+      // 2 слайди). Копія конвертується ПІД ЧАС /api/materials/copy і має власний
+      // manifest/PNG, незалежні від джерела; конвертація йде тим самим реальним
+      // шляхом (PowerPoint COM), що й для завантаженого файлу, — моків немає.
+      let t88PptxSrcId = "";
+      let t88PptxCopyId = "";
+      {
+        const t88FsPptx = require("node:fs");
+        const t88PathPptx = require("node:path");
+        const t88PptxFixture = t88PathPptx.join(__dirname, "test", "fixtures", "test.pptx");
+        check(
+          "Issue #88 (рев'ю): фікстура PPTX наявна у test/fixtures",
+          t88FsPptx.existsSync(t88PptxFixture) && t88FsPptx.statSync(t88PptxFixture).size > 1000
+        );
+
+        const t88PptxUpResp = await fetch(
+          base + "/api/materials/upload?name=" + encodeURIComponent("Issue88 тест.pptx"),
+          {
+            method: "POST",
+            headers: t88UploadHeaders(t88LoginA.cookie, t88PinA, t88TeacherA.id),
+            body: t88FsPptx.readFileSync(t88PptxFixture)
+          }
+        );
+        const t88PptxUp = t88PptxUpResp.status === 201 ? await t88PptxUpResp.json() : null;
+        t88PptxSrcId = t88PptxUp && t88PptxUp.id ? t88PptxUp.id : "";
+        check(
+          "Issue #88 (рев'ю): PPTX завантажено у простір викладача",
+          Boolean(t88PptxSrcId), `status=${t88PptxUpResp.status}`
+        );
+
+        // Чекаємо конвертацію джерела (фонову), щоб не тримати дві сесії
+        // PowerPoint COM паралельно; сама перевірка копії від неї незалежна
+        let t88PptxSrcReady = false;
+        for (let i = 0; i < 60 && !t88PptxSrcReady; i++) {
+          const srcInfo = await (await fetch(base + "/api/slides/info?file=" + encodeURIComponent(t88PptxSrcId), {
+            headers: t88AuthHeaders(t88LoginA.cookie, t88PinA, t88TeacherA.id)
+          })).json().catch(() => null);
+          if (srcInfo && srcInfo.ready) { t88PptxSrcReady = true; break; }
+          if (srcInfo && srcInfo.failed) break;
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+        check(
+          "Issue #88 (рев'ю): джерело PPTX сконвертовано реальним шляхом (PowerPoint COM)",
+          t88PptxSrcReady, "srcId=" + t88PptxSrcId
+        );
+
+        const t88PptxCopyResp = await fetch(base + "/api/materials/copy", {
+          method: "POST",
+          headers: t88AuthHeaders(t88LoginA.cookie, t88PinA, t88TeacherA.id),
+          body: JSON.stringify({ sourceFileId: t88PptxSrcId, targetFolderId: null })
+        });
+        const t88PptxCopy = t88PptxCopyResp.status === 201 ? await t88PptxCopyResp.json() : null;
+        t88PptxCopyId = t88PptxCopy && t88PptxCopy.file ? t88PptxCopy.file.id : "";
+        check(
+          "Issue #88 (рев'ю): копія PPTX конвертується під час копіювання → conversionStatus ready",
+          t88PptxCopyResp.status === 201 && Boolean(t88PptxCopyId) &&
+            t88PptxCopyId !== t88PptxSrcId &&
+            t88PptxCopy.file.conversionStatus === "ready",
+          `status=${t88PptxCopyResp.status}, conversion=${t88PptxCopy && t88PptxCopy.file && t88PptxCopy.file.conversionStatus}`
+        );
+
+        const t88PptxInfoResp = await fetch(base + "/api/slides/info?file=" + encodeURIComponent(t88PptxCopyId), {
+          headers: t88AuthHeaders(t88LoginA.cookie, t88PinA, t88TeacherA.id)
+        });
+        const t88PptxInfo = await t88PptxInfoResp.json().catch(() => null);
+        const t88PptxCopyDir = t88PathPptx.join(__dirname, "materials", ".slides", t88PptxCopyId);
+        const t88PngMagicPptx = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+        const t88PptxPngPath = t88PathPptx.join(t88PptxCopyDir, "page-1.png");
+        const t88PptxDiskOk = t88FsPptx.existsSync(t88PathPptx.join(t88PptxCopyDir, "manifest.json")) &&
+          t88FsPptx.existsSync(t88PptxPngPath) &&
+          t88FsPptx.readFileSync(t88PptxPngPath).subarray(0, 8).equals(t88PngMagicPptx);
+        check(
+          "Issue #88 (рев'ю): копія PPTX — ready, pageCount ≥ 2, власний manifest і PNG на диску",
+          t88PptxInfoResp.status === 200 && Boolean(t88PptxInfo) &&
+            t88PptxInfo.ready === true &&
+            Number.isInteger(t88PptxInfo.pageCount) && t88PptxInfo.pageCount >= 2 &&
+            t88PptxDiskOk,
+          `status=${t88PptxInfoResp.status}, ready=${t88PptxInfo && t88PptxInfo.ready}, pages=${t88PptxInfo && t88PptxInfo.pageCount}, disk=${t88PptxDiskOk}`
+        );
+
+        const t88PptxPngHttp = await fetch(base + "/slides/" + encodeURIComponent(t88PptxCopyId) + "/1", {
+          headers: t88AuthHeaders(t88LoginA.cookie, t88PinA, t88TeacherA.id)
+        });
+        const t88PptxPngBytes = Buffer.from(await t88PptxPngHttp.arrayBuffer());
+        check(
+          "Issue #88 (рев'ю): сторінка1 копії PPTX віддається через HTTP (справжній PNG)",
+          t88PptxPngHttp.status === 200 && t88PptxPngBytes.length > 8 &&
+            t88PptxPngBytes.subarray(0, 8).equals(t88PngMagicPptx),
+          `status=${t88PptxPngHttp.status}`
+        );
+      }
 
       // Адмін бачить і керує всіма просторами (включно з orphaned owner ID)
       const t88AdminTree = await (await fetch(base + "/api/materials/admin/tree", {
@@ -3122,6 +3251,126 @@ async function main() {
           Number.isInteger(t88Prepare.pageCount) && t88Prepare.pageCount >= 1,
         `status=${t88PrepareResp.status}, pages=${t88Prepare && t88Prepare.pageCount}`
       );
+
+      // === Issue #88 (рев'ю): /api/slides/prepare — перевірка власника ===
+      // Обов'язковий тест рев'ю: викладач А шле ID файла Б → 403, і стан, і
+      // manifest, і PNG файла Б залишаються незмінними (жодного setConversion-
+      // Status/ensureSlides до перевірки власника — відповідь іде перед ними).
+      {
+        const t88FsPrep = require("node:fs");
+        const t88PathPrep = require("node:path");
+        const snapPrep = (id) => {
+          const dir = t88PathPrep.join(__dirname, "materials", ".slides", id);
+          try {
+            return t88FsPrep.readdirSync(dir).sort().map(f => {
+              const st = t88FsPrep.statSync(t88PathPrep.join(dir, f));
+              return f + "|" + st.mtimeMs + "|" + st.size;
+            }).join(";");
+          } catch { return null; }
+        };
+        const infoPrep = async (headers, id) => {
+          const resp = await fetch(base + "/api/slides/info?file=" + encodeURIComponent(id), { headers });
+          return { status: resp.status, body: await resp.json().catch(() => null) };
+        };
+        const aPrepHeaders = t88AuthHeaders(t88LoginA.cookie, t88PinA, t88TeacherA.id);
+        const bPrepHeaders = t88AuthHeaders(t88LoginB.cookie, t88PinB, t88TeacherB.id);
+
+        const bInfoBefore = await infoPrep(bPrepHeaders, t88FileB.id);
+        const bSlidesBefore = snapPrep(t88FileB.id);
+        const prepareBCross = await fetch(base + "/api/slides/prepare", {
+          method: "POST",
+          headers: aPrepHeaders,
+          body: JSON.stringify({ file: t88FileB.id })
+        });
+        const bInfoAfter = await infoPrep(bPrepHeaders, t88FileB.id);
+        const bSlidesAfter = snapPrep(t88FileB.id);
+        check(
+          "Issue #88 (рев'ю): викладач А шле prepare чужого файла Б → 403, стан/manifest/PNG Б незмінні",
+          prepareBCross.status === 403 &&
+            bInfoBefore.status === 200 && bInfoAfter.status === 200 &&
+            JSON.stringify(bInfoBefore.body) === JSON.stringify(bInfoAfter.body) &&
+            JSON.stringify(bSlidesBefore) === JSON.stringify(bSlidesAfter),
+          `status=${prepareBCross.status}`
+        );
+
+        // Спільний/legacy-файл (owner === null): викладач не конвертує й не
+        // змінює стан — копіювання окремо дозволене, prepare тут закритий
+        const legacyBefore = await infoPrep(aPrepHeaders, fileId);
+        const legacySlidesBefore = snapPrep(fileId);
+        const prepareLegacy = await fetch(base + "/api/slides/prepare", {
+          method: "POST",
+          headers: aPrepHeaders,
+          body: JSON.stringify({ file: fileId })
+        });
+        const legacyAfter = await infoPrep(aPrepHeaders, fileId);
+        const legacySlidesAfter = snapPrep(fileId);
+        check(
+          "Issue #88 (рев'ю): prepare спільного/legacy-файлу викладачем → 403, стан незмінний",
+          prepareLegacy.status === 403 &&
+            legacyBefore.status === 200 && legacyAfter.status === 200 &&
+            JSON.stringify(legacyBefore.body) === JSON.stringify(legacyAfter.body) &&
+            JSON.stringify(legacySlidesBefore) === JSON.stringify(legacySlidesAfter),
+          `status=${prepareLegacy.status}`
+        );
+
+        // Власний файл А: той самий маршрут готується нормально
+        const prepareOwn = await fetch(base + "/api/slides/prepare", {
+          method: "POST",
+          headers: aPrepHeaders,
+          body: JSON.stringify({ file: t88FileA.id })
+        });
+        const prepareOwnBody = await prepareOwn.json().catch(() => null);
+        check(
+          "Issue #88 (рев'ю): викладач А готує ВЛАСНИЙ файл → 200 з маніфестом",
+          prepareOwn.status === 200 && Boolean(prepareOwnBody) &&
+            Number.isInteger(prepareOwnBody.pageCount) && prepareOwnBody.pageCount >= 1,
+          `status=${prepareOwn.status}`
+        );
+
+        // Адміністратор має повний доступ до чужого файла (окремий випадок)
+        const prepareAdminB = await fetch(base + "/api/slides/prepare", {
+          method: "POST",
+          headers: t88AdminHeaders,
+          body: JSON.stringify({ file: t88FileB.id })
+        });
+        const prepareAdminBBody = await prepareAdminB.json().catch(() => null);
+        check(
+          "Issue #88 (рев'ю): адміністратор готує чужий файл → 200 з маніфестом",
+          prepareAdminB.status === 200 && Boolean(prepareAdminBBody) &&
+            Number.isInteger(prepareAdminBBody.pageCount) && prepareAdminBBody.pageCount >= 1,
+          `status=${prepareAdminB.status}, pages=${prepareAdminBBody && prepareAdminBBody.pageCount}`
+        );
+
+        // Обхід, який закрито: персональний PIN БЕЗ cookie раніше давав
+        // адмін-доступ до старих маршрутів (teacherIdFromSession → null) —
+        // тепер 401, і жодна зміна стану/назви не відбувається
+        const bypassHeaders = {
+          "Content-Type": "application/json",
+          "X-Portal-Pin": t88PinB,
+          "X-Portal-Teacher": t88TeacherB.id
+        };
+        const bypassPrepare = await fetch(base + "/api/slides/prepare", {
+          method: "POST",
+          headers: bypassHeaders,
+          body: JSON.stringify({ file: t88FileB.id })
+        });
+        const bypassRename = await fetch(base + "/api/files/rename", {
+          method: "POST",
+          headers: bypassHeaders,
+          body: JSON.stringify({ file: t88FileB.id, name: "ОбхідСесії.pdf" })
+        });
+        const bTreeAfterBypass = await (await fetch(base + "/api/materials/admin/tree", {
+          headers: t88AdminHeaders
+        })).json();
+        const bRecordAfterBypass = (bTreeAfterBypass.files || {})[t88FileB.id];
+        check(
+          "Issue #88 (рев'ю): персональний PIN без cookie → 401 у старих маршрутах, файл Б незмінний",
+          bypassPrepare.status === 401 && bypassRename.status === 401 &&
+            Boolean(bRecordAfterBypass) &&
+            bRecordAfterBypass.originalName === "АдмінПерейменував.pdf",
+          `prepare=${bypassPrepare.status}, rename=${bypassRename.status}, name=${bRecordAfterBypass && bRecordAfterBypass.originalName}`
+        );
+      }
 
       // Каталог викладача (/api/files): файли власного простору видимі
       const t88TeacherCatalog = await (await fetch(base + "/api/files", {
@@ -3221,7 +3470,7 @@ async function main() {
       // включно з осиротілим (власника вже немає). Це водночас перевіряє
       // адмін-доступ: спочатку файли, потім порожні папки.
       const t88AdminCleanupFiles = [];
-      for (const id of [t88FolderFileId, t88FileA.id, t88CopyId, t88AdminUploadFile && t88AdminUploadFile.id].filter(Boolean)) {
+      for (const id of [t88FolderFileId, t88FileA.id, t88CopyId, t88AdminUploadFile && t88AdminUploadFile.id, t88PptxSrcId, t88PptxCopyId].filter(Boolean)) {
         try {
           const resp = await fetch(base + "/api/materials/file/delete", {
             method: "POST",
@@ -3282,13 +3531,30 @@ async function main() {
         (t88AdminLogout.headers.get("Cache-Control") || "").includes("no-store")
       );
 
-      // Вихід викладача зі сторінки /teachers (викладач не має доступу до /teachers,
-      // але можемо перевірити вихід через /api/state)
-      const t88TeacherLogin = await t88Verify(t88PinA);
+      // Вихід викладача з ПЕРСОНАЛЬНИМ PIN — реальна сесія (записи А/Б уже
+      // видалені вище; без окремого запису перевірка була б формальною з
+      // порожнім cookie). Після виходу старий cookie відхиляється (401).
+      const t88PinLogout = String(1000 + Math.floor(Math.random() * 9000));
+      const t88LogoutTeacher = await (await fetch(base + "/api/teachers/create", {
+        method: "POST",
+        headers: t88AdminHeaders,
+        body: JSON.stringify({
+          fullName: "Issue88 Вихід Тест",
+          pin: t88PinLogout,
+          permissions: ["demo", "materials"]
+        })
+      })).json();
+      const t88TeacherLogin = await t88Verify(t88PinLogout);
       const t88TeacherCookie = t88TeacherLogin.cookie;
+      check(
+        "Issue #88: вхід викладача з персональним PIN дає чинну сесію",
+        Boolean(t88LogoutTeacher && t88LogoutTeacher.teacher) &&
+          t88TeacherLogin.status === 200 && Boolean(t88TeacherCookie),
+        `status=${t88TeacherLogin.status}`
+      );
       const t88TeacherLogout = await fetch(base + "/api/auth/logout", {
         method: "POST",
-        headers: t88AuthHeaders(t88TeacherCookie)
+        headers: { Cookie: "ly_session=" + t88TeacherCookie }
       });
       check(
         "Issue #88: вихід викладача — сесія скасована",
@@ -3300,6 +3566,58 @@ async function main() {
       check(
         "Issue #88: старий cookie викладача після виходу — 401",
         t88TeacherAfterLogout.status === 401
+      );
+      await fetch(base + "/api/teachers/delete", {
+        method: "POST",
+        headers: t88AdminHeaders,
+        body: JSON.stringify({
+          id: t88LogoutTeacher && t88LogoutTeacher.teacher ? t88LogoutTeacher.teacher.id : "",
+          confirm: true
+        })
+      });
+
+      // Issue #88 (рев'ю): logout знімає cookie З ТИМИ САМИМИ атрибутами, що
+      // й видача (Path/HttpOnly/SameSite=Strict), із терміном дії в минулому —
+      // інакше браузер не видалив би пару HttpOnly-сесійної cookie
+      const t88SetCookie = t88AdminLogout.headers.get("set-cookie") || "";
+      check(
+        "Issue #88 (рев'ю): logout очищує ly_session (Path/HttpOnly/SameSite=Strict, Expires у минулому)",
+        /ly_session=;/.test(t88SetCookie) &&
+          /path=\//i.test(t88SetCookie) &&
+          /httponly/i.test(t88SetCookie) &&
+          /samesite=strict/i.test(t88SetCookie) &&
+          /expires=thu,\s*01 jan 1970/i.test(t88SetCookie),
+        t88SetCookie
+      );
+
+      // Issue #88 (рев'ю): усі HTML-сторінки віддаються без кешування — після
+      // виходу back/reload не відкриває захищений вміст із кешу браузера.
+      // Серверні перевірки сесії збережено: /teachers без входу → 403, з
+      // адмін-сесією → 200.
+      const t88HtmlCache = [];
+      for (const p of ["/materials", "/upload", "/demonstration", "/students"]) {
+        const resp = await fetch(base + p, { redirect: "manual" });
+        t88HtmlCache.push({ p, status: resp.status, cc: resp.headers.get("cache-control") || "" });
+      }
+      const t88TeachersNoSession = await fetch(base + "/teachers");
+      const t88AdminLogin2 = await t88Verify(PIN);
+      const t88TeachersAdmin = await fetch(base + "/teachers", {
+        headers: { Cookie: "ly_session=" + (t88AdminLogin2.cookie || "") }
+      });
+      await fetch(base + "/api/auth/logout", {
+        method: "POST",
+        headers: { Cookie: "ly_session=" + (t88AdminLogin2.cookie || "") }
+      });
+      check(
+        "Issue #88 (рев'ю): HTML-сторінки — Cache-Control no-store; /teachers: без сесії 403, адміну 200",
+        t88HtmlCache.every(x => x.cc.includes("no-store")) &&
+          t88TeachersNoSession.status === 403 &&
+          t88TeachersAdmin.status === 200,
+        JSON.stringify({
+          pages: t88HtmlCache.map(x => x.p + ":" + x.status + ":" + x.cc),
+          noSession: t88TeachersNoSession.status,
+          admin: t88TeachersAdmin.status
+        })
       );
 
       // Вхід викладача — перевіряємо відображення Прізвище І.П.

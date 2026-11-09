@@ -159,7 +159,9 @@ function connectSession(url, name) {
       id: 0,
       pending: new Map(),
       requests: [],
-      errors: { consoleErrors: [], exceptions: [], logErrors: [], loadingFailed: [] }
+      errors: { consoleErrors: [], exceptions: [], logErrors: [], loadingFailed: [] },
+      // URL, для якого CDP-перехоплення Fetch відповідає 500 (тест помилки logout)
+      fetchFail: null
     };
     w.onopen = () => resolve(sess);
     w.onerror = () => reject(new Error("CDP WebSocket error: " + name));
@@ -185,6 +187,21 @@ function connectSession(url, name) {
         sess.errors.logErrors.push(msg.params.entry.text + " " + (msg.params.entry.url || ""));
       } else if (msg.method === "Network.loadingFailed") {
         sess.errors.loadingFailed.push(msg.params.errorText + " " + (msg.params.type || ""));
+      } else if (msg.method === "Fetch.requestPaused") {
+        // Перехоплення запиту logout: коли увімкнено правило sess.fetchFail —
+        // відповідаємо СПРАВЖНІМ HTTP 500 (тест помилки logout на клієнті),
+        // усі інші запити пропускаємо без змін
+        const rule = sess.fetchFail;
+        if (rule && String(msg.params.request.url || "").includes(rule)) {
+          cdp(sess, "Fetch.fulfillRequest", {
+            requestId: msg.params.requestId,
+            responseCode: 500,
+            responseHeaders: [{ name: "Content-Type", value: "text/plain" }],
+            body: Buffer.from("симульована помилка сервера logout").toString("base64")
+          }).catch(() => {});
+        } else {
+          cdp(sess, "Fetch.continueRequest", { requestId: msg.params.requestId }).catch(() => {});
+        }
       }
     };
   });
@@ -245,6 +262,38 @@ async function loginTeacher(sess) {
     "document.getElementById('btnChooseTeacher').click(); true;"
   );
   return waitFor(sess, "document.getElementById('roleModal').style.display === 'none'", 10000);
+}
+
+/** Вхід конкретним персональним PIN викладача (для тесту ПІБ і виходу) */
+async function loginTeacherWithPin(sess, pinValue) {
+  if (!(await waitRoleModal(sess))) return false;
+  await evaluate(
+    sess,
+    "document.getElementById('modalTeacherPin').value = " + JSON.stringify(pinValue) + ";" +
+    "document.getElementById('btnChooseTeacher').click(); true;"
+  );
+  return waitFor(sess, "document.getElementById('roleModal').style.display === 'none'", 10000);
+}
+
+/** Справжня HttpOnly-сесійна cookie сторінки (CDP, не видна JS) */
+async function getSessionCookie(sess) {
+  const r = await cdp(sess, "Network.getCookies", { urls: [BASE + "/"] });
+  const found = (r.cookies || []).find((c) => c.name === "ly_session");
+  return found ? found.value : "";
+}
+
+/** Увімкнути мережеве перехоплення: запити, що містять urlPart, → HTTP 500 */
+async function setFetchFail(sess, urlPart) {
+  sess.fetchFail = urlPart;
+  await cdp(sess, "Fetch.enable", {
+    patterns: [{ urlPattern: "*" + urlPart + "*", requestStage: "Request" }]
+  });
+}
+
+/** Вимкнути перехоплення — подальші запити йдуть на сервер без змін */
+async function clearFetchFail(sess) {
+  sess.fetchFail = null;
+  await cdp(sess, "Fetch.disable");
 }
 
 let chromeSeq = 0;
@@ -891,9 +940,63 @@ async function main() {
   check("Сценарій 7: після зупинки показу вчитель бачить результати останнього запитання",
     t83Stopped && t83AfterStop, JSON.stringify({ t83Stopped, t83AfterStop }));
 
-  // сесія викладача скасовується при виході
+  // ============ Issue #88 §4 (браузер): вихід адміністратора ================
+  // Підпис біля «Вийти» на всіх сторінках, де є кнопка: адмін лишається
+  // «🎓 Адміністратор» (не отримує підпис викладача); HTML-сторінки — без
+  // кешування (no-store), щоб після виходу back/reload не показував із кешу
+  // захищений вміст
+  const ad88Pages = [];
+  for (const p of ["/demonstration", "/upload", "/students", "/teachers"]) {
+    await gotoS(T, p);
+    const labelOk = await waitFor(T,
+      `((document.getElementById("roleLabel") || {}).textContent || "").trim() === "🎓 Адміністратор"`, 8000);
+    const btnOk = await waitFor(T,
+      `((document.getElementById("btnSwitchRole") || {}).textContent || "").includes("Вийти")`, 3000);
+    const cc = await httpHeader(T, p, "cache-control");
+    ad88Pages.push({ p, labelOk, btnOk, cc });
+  }
+  check(
+    "Issue #88 §4: адмін — «🎓 Адміністратор» і «Вийти» на всіх сторінках із кнопкою; no-store",
+    ad88Pages.every((x) => x.labelOk && x.btnOk && String(x.cc || "").includes("no-store")),
+    JSON.stringify(ad88Pages)
+  );
+
+  // Реальний клік «Вийти»: чекаємо завершення logout і редіректу на головну.
+  // Поспішний редірект не чекає відповіді сервера (раніше робився одразу) —
+  // саме це фіксує очікування нижче
+  const ad88OldCookie = await getSessionCookie(T);
   await evaluate(T, "document.getElementById('btnSwitchRole').click(); true;");
-  await delay(800);
+  const ad88Redirected = await waitFor(T,
+    `(location.pathname === "/" || location.pathname === "/materials") &&
+      ((document.getElementById("roleLabel") || {}).textContent || "").includes("Учень")`, 15000);
+  check(
+    "Issue #88 §4: клік «Вийти» (адмін) → logout завершено, редірект на головну, гість",
+    ad88Redirected,
+    "path=" + await evaluate(T, "location.pathname")
+  );
+
+  // Старий cookie після виходу відхиляється (session видалено на сервері)
+  const ad88OldState = await fetch(BASE + "/api/state", {
+    headers: { Cookie: "ly_session=" + ad88OldCookie }
+  });
+  const ad88OldTeachers = await fetch(BASE + "/api/teachers", {
+    headers: { Cookie: "ly_session=" + ad88OldCookie }
+  });
+  const ad88OldTeachersHtml = await fetch(BASE + "/teachers", {
+    headers: { Cookie: "ly_session=" + ad88OldCookie }
+  });
+  check(
+    "Issue #88 §4: старий cookie адміністратора відхилено (state/teachers API 401, /teachers 403)",
+    ad88OldCookie !== "" && ad88OldState.status === 401 &&
+      ad88OldTeachers.status === 401 && ad88OldTeachersHtml.status === 403,
+    JSON.stringify({
+      state: ad88OldState.status,
+      api: ad88OldTeachers.status,
+      html: ad88OldTeachersHtml.status
+    })
+  );
+
+  // Медіа й стан недоступні без входу (без cookie у запиті)
   const afterLogout = await httpStatus(T, "/files/" + encodeURIComponent(pdfId));
   const afterLogoutNoCreds = await httpStatusNoCreds(T, "/api/state");
   check("PIN/URL: після виходу викладача сесію скасовано — медіа й стан недоступні без входу (401)",
@@ -908,11 +1011,138 @@ async function main() {
   check("Сценарій 4: підроблена cookie сесії не дає доступу (401)",
     forged === 401, "status=" + forged);
 
+  // Back/reload після виходу: захищена сторінка показує лише гість — вчительські
+  // блоки приховані, підпис «Учень», стан без сесії — 401, сторінка не з кешу
+  await gotoS(T, "/demonstration");
+  const ad88BackSafe = await waitFor(T,
+    `(() => {
+      const teacherVisible = [...document.querySelectorAll(".teacher-only")]
+        .some((el) => el.style.display !== "none");
+      const label = ((document.getElementById("roleLabel") || {}).textContent || "").trim();
+      return !teacherVisible && label.includes("Учень") && window.__mark === 42;
+    })()`, 10000);
+  const ad88BackState = await httpStatusNoCreds(T, "/api/state");
+  const ad88BackCache = await httpHeader(T, "/demonstration", "cache-control");
+  check(
+    "Issue #88 §4: back до /demonstration після виходу — лише гість, без кешу, state 401",
+    ad88BackSafe && ad88BackState === 401 && String(ad88BackCache || "").includes("no-store"),
+    JSON.stringify({ ad88BackSafe, ad88BackState, ad88BackCache })
+  );
+  await cdp(T, "Page.reload", { ignoreCache: true });
+  await waitFor(T, "document.readyState === 'complete'", 20000);
+  const ad88ReloadState = await httpStatusNoCreds(T, "/api/state");
+  const ad88ReloadLabel = await evaluate(T,
+    `((document.getElementById("roleLabel") || {}).textContent || "").trim()`);
+  check(
+    "Issue #88 §4: reload після виходу — сесії немає (state 401), захищений вміст не показується",
+    ad88ReloadState === 401 && ad88ReloadLabel.includes("Учень"),
+    JSON.stringify({ ad88ReloadState, ad88ReloadLabel })
+  );
+
+  // ============ Issue #88 §4 (браузер): персональний викладач ==============
+  // ПІБ «Коваль Олена Петрівна» має відображатися «Коваль О.П.» (без пробілу
+  // між ініціалами, join("")), і це має бути реальний текст усіх сторінок із
+  // «Вийти»; джерело — серверна сесія/профіль, а не localStorage
+  let t2Pin = String(1000 + Math.floor(Math.random() * 9000));
+  while (t2Pin === PIN) t2Pin = String(1000 + Math.floor(Math.random() * 9000));
+  const t2Create = await (await fetch(BASE + "/api/teachers/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Portal-Pin": PIN },
+    body: JSON.stringify({
+      fullName: "Коваль Олена Петрівна",
+      pin: t2Pin,
+      permissions: ["demo", "materials"]
+    })
+  })).json();
+  const t2Id = t2Create && t2Create.teacher ? t2Create.teacher.id : "";
+  check("Issue #88 §4: створено викладача «Коваль Олена Петрівна» для браузерного тесту",
+    Boolean(t2Id), "id=" + t2Id);
+
+  const T2 = await launchChrome("teacher2");
+  await gotoS(T2, "/demonstration");
+  const t2In = await loginTeacherWithPin(T2, t2Pin);
+  const t2LabelFirst = await waitFor(T2,
+    `((document.getElementById("roleLabel") || {}).textContent || "").trim() === "🎓 Коваль О.П."`, 8000);
+  check("Issue #88 §4: ПІБ викладача — «🎓 Коваль О.П.» (без пробілу між ініціалами)",
+    t2In && t2LabelFirst, "label=" + await evaluate(T2,
+      `((document.getElementById("roleLabel") || {}).textContent || "").trim()`));
+
+  const t2Pages = [];
+  for (const p of ["/demonstration", "/upload", "/students"]) {
+    await gotoS(T2, p);
+    const ok = await waitFor(T2,
+      `((document.getElementById("roleLabel") || {}).textContent || "").trim() === "🎓 Коваль О.П."`, 8000);
+    const btn = await evaluate(T2,
+      `((document.getElementById("btnSwitchRole") || {}).textContent || "").trim()`);
+    t2Pages.push({ p, ok, btn });
+  }
+  check(
+    "Issue #88 §4: «🎓 Коваль О.П.» і «Вийти» на всіх сторінках викладача",
+    t2Pages.every((x) => x.ok && x.btn.includes("Вийти")),
+    JSON.stringify(t2Pages)
+  );
+
+  // Помилка logout (HTTP 500, CDP-перехоплення): клієнт не «виходить» —
+  // без успіху, без редіректу, роль і сторінка лишаються, показується toast;
+  // після відновлення зв'язку повтор виходу успішний
+  const t2OldCookie = await getSessionCookie(T2);
+  await setFetchFail(T2, "api/auth/logout");
+  await evaluate(T2, "document.getElementById('btnSwitchRole').click(); true;");
+  const t2FailToast = await waitFor(T2,
+    `[...document.querySelectorAll(".toast")].some((t) => t.textContent.includes("Не вдалося завершити сесію"))`, 12000);
+  const t2FailState = await evaluate(T2, `(() => ({
+    path: location.pathname,
+    label: ((document.getElementById("roleLabel") || {}).textContent || "").trim()
+  }))()`);
+  check(
+    "Issue #88 §4: помилка logout (HTTP 500) → без успіху: toast, роль лишається, редіректу немає",
+    t2FailToast && t2FailState.path === "/students" && t2FailState.label === "🎓 Коваль О.П.",
+    JSON.stringify({ toast: t2FailToast, ...t2FailState })
+  );
+
+  await clearFetchFail(T2);
+  await evaluate(T2, "document.getElementById('btnSwitchRole').click(); true;");
+  const t2Redirected = await waitFor(T2,
+    `(location.pathname === "/" || location.pathname === "/materials") &&
+      ((document.getElementById("roleLabel") || {}).textContent || "").includes("Учень")`, 15000);
+  check(
+    "Issue #88 §4: повтор виходу після помилки — logout успішний, редірект на головну",
+    t2Redirected, "path=" + await evaluate(T2, "location.pathname")
+  );
+  const t2OldState = await fetch(BASE + "/api/state", {
+    headers: { Cookie: "ly_session=" + t2OldCookie }
+  });
+  check("Issue #88 §4: старий cookie викладача після виходу — 401",
+    t2OldCookie !== "" && t2OldState.status === 401, "status=" + t2OldState.status);
+
+  // Back після виходу викладача — захищена сторінка лише як гість
+  await gotoS(T2, "/demonstration");
+  const t2BackSafe = await waitFor(T2,
+    `(() => {
+      const teacherVisible = [...document.querySelectorAll(".teacher-only")]
+        .some((el) => el.style.display !== "none");
+      const label = ((document.getElementById("roleLabel") || {}).textContent || "").trim();
+      return !teacherVisible && label.includes("Учень") && window.__mark === 42;
+    })()`, 10000);
+  const t2BackState = await httpStatusNoCreds(T2, "/api/state");
+  check(
+    "Issue #88 §4: back до /demonstration після виходу викладача — лише гість, state 401",
+    t2BackSafe && t2BackState === 401,
+    JSON.stringify({ t2BackSafe, t2BackState })
+  );
+
+  // Прибирання: обліковий запис тестового викладача (net-zero)
+  await fetch(BASE + "/api/teachers/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Portal-Pin": PIN },
+    body: JSON.stringify({ id: t2Id, confirm: true })
+  });
+
   // ---------------- Помилки консолі ----------------------------------------
   const expectedBlocked = [TEST_MEDIA, TEST_HIDDEN, wavId, pdfId].filter(Boolean);
   const errReport = {};
   let errorsOk = true;
-  for (const sess of [T, S1, S2]) {
+  for (const sess of [T, S1, S2, T2]) {
     const unexpectedLog = sess.errors.logErrors.filter((t) =>
       !/favicon/i.test(t) &&
       !expectedBlocked.some((n) => t.includes(encodeURIComponent(n)) || t.includes(n)) &&
@@ -920,7 +1150,10 @@ async function main() {
       // Очікувана політика доступу Етап 5 (самі ці відповіді й перевіряємо):
       // 403 для каталогу/категорій поза роллю викладача та 401 для стану після
       // скасування сесії — відповіді сервера, а не помилка клієнта
-      !/(401|403)\s*\([^)]*\)\s*https?:\/\/\S+\/api\/(state|files|categories)/.test(t));
+      !/(401|403)\s*\([^)]*\)\s*https?:\/\/\S+\/api\/(state|files|categories)/.test(t) &&
+      // Очікувана симульована помилка logout (HTTP 500 від CDP-перехоплення
+      // в тесті «помилка виходу») — саме цю відповідь тест і перевіряє
+      !/\/api\/auth\/logout/.test(t));
     errReport[sess.name] = {
       exceptions: sess.errors.exceptions.length,
       consoleErrors: sess.errors.consoleErrors.length,
@@ -929,7 +1162,7 @@ async function main() {
     };
     if (sess.errors.exceptions.length || sess.errors.consoleErrors.length || unexpectedLog.length) errorsOk = false;
   }
-  check("Помилки консолі: JS-винятків і неочікуваних помилок немає у трьох клієнтів", errorsOk,
+  check("Помилки консолі: JS-винятків і неочікуваних помилок немає у всіх клієнтів", errorsOk,
     JSON.stringify(errReport));
 
   // ---------------- Прибирання (net-zero) ----------------------------------
