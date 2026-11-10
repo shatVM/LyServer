@@ -45,7 +45,7 @@ class SlideController {
     // (без входу — 401); учень бачить ЛИШЕ медіа активної демонстрації
     const identity = auth.mediaIdentity(req, res);
     if (!identity) return;
-    if (!canViewMedia(name, identity.isTeacher)) {
+    if (!canViewMedia(name, identity.isTeacher, identity.teacherId, identity.isAdmin)) {
       return res.status(404).send("Файл не знайдено");
     }
 

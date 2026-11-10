@@ -5,7 +5,9 @@ const { Transform } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 const config = require("../config");
 const slideService = require("./slideService");
-const { getFilePath, safeFilename } = require("../utils/fileHelpers");
+const { safeFilename } = require("../utils/fileHelpers");
+const folderService = require("./folderService");
+const { badRequest, notFound, conflict, forbidden } = folderService;
 
 // Ensure data directory exists
 fs.mkdirSync(config.dataDir, { recursive: true });
@@ -16,10 +18,12 @@ class FileService {
       if (fs.existsSync(config.metadataFile)) {
         const raw = fs.readFileSync(config.metadataFile, "utf-8");
         const parsed = JSON.parse(raw);
-        // Issue #63 Етап 3: невідомі верхні ключі (напр. майбутні категорії)
+        // Issue #63 Етап 3: невідомі верхні ключі (напр. май новіші форми)
         // зберігаємо — не втрачаємо дані попередніх/новіших форматів
+        // Issue #88: додаємо folders[] для персональних просторів викладачів
         return {
           ...parsed,
+          folders: Array.isArray(parsed.folders) ? parsed.folders : [],
           hidden: Array.isArray(parsed.hidden) ? parsed.hidden : [],
           files: (parsed.files && typeof parsed.files === "object") ? parsed.files : {}
         };
@@ -27,7 +31,7 @@ class FileService {
     } catch (e) {
       console.error("Error reading metadata:", e.message);
     }
-    return { hidden: [], files: {} };
+    return { folders: [], hidden: [], files: {} };
   }
 
   saveMetadata(metadata) {
@@ -132,7 +136,17 @@ class FileService {
     return { ok: true, moved, categories: this.getCategories() };
   }
 
-  getFilesList(isTeacher = false) {
+  // Issue #88: файли викладача (за owner), опціонально в папці folderId
+  getFilesForTeacher(teacherId, folderId) {
+    const metadata = this.getMetadata();
+    const files = Object.entries(metadata.files || {}).map(([fileId, info]) => ({
+      id: fileId,
+      ...(info && typeof info === "object" ? info : { originalName: typeof info === "string" ? info : fileId })
+    })).filter((f) => f.owner === teacherId && (folderId === undefined || f.folderId === folderId));
+    return files;
+  }
+
+  getFilesList(isTeacher = false, teacherId) {
     const metadata = this.getMetadata();
     const hiddenSet = new Set(metadata.hidden);
     const fileMap = metadata.files || {};
@@ -141,43 +155,74 @@ class FileService {
     const order = Array.isArray(metadata.order) ? metadata.order : [];
     const orderIndex = new Map(order.map((id, index) => [id, index]));
 
-    const allFiles = fs.readdirSync(config.dataDir, { withFileTypes: true })
-      .filter(item => item.isFile() && !item.name.startsWith("."))
-      .map(item => {
-        const full = path.join(config.dataDir, item.name);
-        const rawInfo = fileMap[item.name];
-        const info = rawInfo && typeof rawInfo === "object"
-          ? rawInfo
-          : { originalName: typeof rawInfo === "string" ? rawInfo : item.name };
-        const ext = path.extname(item.name).toLowerCase();
-        let conversionStatus = info.conversionStatus || "";
-        let conversionError = typeof info.conversionError === "string" ? info.conversionError : "";
-        if (config.slideExtensions.has(ext)) {
-          const manifest = slideService.getManifest(item.name);
-          const manifestReady = manifest && Number.isInteger(manifest.pageCount) && manifest.pageCount > 0;
-          if (conversionStatus === "ready" && !manifestReady) {
-            // Не покладаємося лише на старий прапорець ready, якщо PNG зникли або пошкоджені.
-            conversionStatus = "failed";
-            conversionError = conversionError || "PNG-слайди відсутні або пошкоджені";
-          } else if (!conversionStatus) {
-            if (manifestReady) conversionStatus = "ready";
-            else if (manifest && manifest.converting) conversionStatus = "converting";
-            else conversionStatus = "pending";
-          }
+    // Issue #88: каталог складається з legacy-файлів кореня materials/ ТА файлів
+    // персональних просторів викладачів materials/<teacherId>/[<folderId>/]<id>.
+    // Раніше сканувався лише корінь, тому матеріали, завантажені у простір,
+    // не потрапляли в каталог викладача та учнів (учні взагалі не бачили нових
+    // завантажень). Фізичне розташування — джерело правди для owner/folderId.
+    const buildEntry = (fileName, owner, folderId, scanPath) => {
+      let full = this.filePath(fileName) || scanPath;
+      if (!fs.existsSync(full)) full = scanPath;
+      let size;
+      try { size = fs.statSync(full).size; } catch { return null; } // файл зник між скануванням
+      const rawInfo = fileMap[fileName];
+      const info = rawInfo && typeof rawInfo === "object"
+        ? rawInfo
+        : { originalName: typeof rawInfo === "string" ? rawInfo : fileName };
+      const ext = path.extname(fileName).toLowerCase();
+      let conversionStatus = info.conversionStatus || "";
+      let conversionError = typeof info.conversionError === "string" ? info.conversionError : "";
+      if (config.slideExtensions.has(ext)) {
+        const manifest = slideService.getManifest(fileName);
+        const manifestReady = manifest && Number.isInteger(manifest.pageCount) && manifest.pageCount > 0;
+        if (conversionStatus === "ready" && !manifestReady) {
+          conversionStatus = "failed";
+          conversionError = conversionError || "PNG-слайди відсутні або пошкоджені";
+        } else if (!conversionStatus) {
+          if (manifestReady) conversionStatus = "ready";
+          else if (manifest && manifest.converting) conversionStatus = "converting";
+          else conversionStatus = "pending";
         }
-        return {
-          id: item.name,
-          name: info.originalName || item.name,
-          ext,
-          size: fs.statSync(full).size,
-          hidden: hiddenSet.has(item.name),
-          description: typeof info.description === "string" ? info.description : "",
-          categoryId: categoryIds.has(info.categoryId) ? info.categoryId : "",
-          order: orderIndex.has(item.name) ? orderIndex.get(item.name) : Number.MAX_SAFE_INTEGER,
-          conversionStatus,
-          conversionError
+      }
+      return {
+        id: fileName,
+        name: info.originalName || fileName,
+        ext,
+        size,
+        hidden: hiddenSet.has(fileName),
+        description: typeof info.description === "string" ? info.description : "",
+        categoryId: categoryIds.has(info.categoryId) ? info.categoryId : "",
+        order: orderIndex.has(fileName) ? orderIndex.get(fileName) : Number.MAX_SAFE_INTEGER,
+        conversionStatus,
+        conversionError,
+        owner: owner || null,
+        folderId: folderId || null
+      };
+    };
+
+    const sources = [];
+    for (const item of fs.readdirSync(config.dataDir, { withFileTypes: true })) {
+      if (item.isFile() && !item.name.startsWith(".")) {
+        sources.push({ file: item.name, owner: null, folderId: null, scanPath: path.join(config.dataDir, item.name) });
+      } else if (item.isDirectory() && !item.name.startsWith(".")) {
+        const spaceRoot = path.join(config.dataDir, item.name);
+        const walk = (dir, folderId) => {
+          for (const sub of fs.readdirSync(dir, { withFileTypes: true })) {
+            const subPath = path.join(dir, sub.name);
+            if (sub.isDirectory()) {
+              if (!sub.name.startsWith(".")) walk(subPath, sub.name);
+            } else if (!sub.name.startsWith(".")) {
+              sources.push({ file: sub.name, owner: item.name, folderId, scanPath: subPath });
+            }
+          }
         };
-      })
+        try { walk(spaceRoot, null); } catch { /* простір видаляється паралельно */ }
+      }
+    }
+
+    let allFiles = sources
+      .map(s => buildEntry(s.file, s.owner, s.folderId, s.scanPath))
+      .filter(Boolean)
       .filter(item => config.allowedExtensions.has(item.ext))
       .sort((a, b) => {
         const aHasOrder = orderIndex.has(a.id), bHasOrder = orderIndex.has(b.id);
@@ -185,23 +230,110 @@ class FileService {
         return aHasOrder ? a.order - b.order : a.name.localeCompare(b.name, "uk");
       });
 
-    if (isTeacher) return allFiles;
-    // Учням не передаємо порядок (поле order) або внутрішній стан конвертації.
-    // Issue #63 Р: categoryId передається — він потрібен для групування каталогу
-    // учня за категоріями (один матеріал — одна категорія); самі категорії віддає
-    // GET /api/categories. Приховані та неготові матеріали відфільтровуються нижче
-    // й не потрапляють у відповідь учню.
-    // PDF/PPTX доступні лише після підтвердження готового маніфесту.
-    return allFiles
-      .filter(item => !item.hidden &&
-        (!config.slideExtensions.has(item.ext) || item.conversionStatus === "ready"))
-      .map(({ id, name, ext, size, hidden, description, categoryId }) => ({ id, name, ext, size, hidden, description, categoryId }));
+    if (teacherId) {
+      // Викладач бачить свої файли + спільні/legacy (owner === null) для копіювання
+      allFiles = allFiles.filter((f) => f.owner === teacherId || f.owner === null);
+    } else if (!isTeacher) {
+      // Учням — лише публічні (не приховані) та готові
+      allFiles = allFiles.filter((f) => !f.hidden && (!config.slideExtensions.has(f.ext) || f.conversionStatus === "ready"));
+    }
+
+    if (!isTeacher && !teacherId) {
+      // Учням не передаємо порядок (поле order) або внутрішній стан конвертації.
+      // Issue #63 Р: categoryId передається — він потрібен для групування каталогу
+      // учня за категоріями (один матеріал — одна категорія); самі категорії віддає
+      // GET /api/categories. Приховані та неготові матеріали відфільтровуються нижче
+      // й не потрапляють у відповідь учню.
+      // PDF/PPTX доступні лише після підтвердження готового маніфесту.
+      return allFiles
+        .filter(item => !item.hidden && (!config.slideExtensions.has(item.ext) || item.conversionStatus === "ready"))
+        .map(({ id, name, ext, size, hidden, description, categoryId }) => ({ id, name, ext, size, hidden, description, categoryId }));
+    }
+    return allFiles;
   }
 
-  moveFileToCategory(idOrName, categoryId = "") {
+  setConversionStatus(idOrName, status, errorMessage = "") {
+    const record = this.getFileRecord(idOrName);
+    if (!record) return;
     const safe = safeFilename(idOrName);
-    const filePath = getFilePath(safe);
-    if (!filePath || !fs.existsSync(filePath)) throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
+    const filePath = this.filePath(safe);
+    if (!filePath || !fs.existsSync(filePath)) return;
+    const metadata = this.getMetadata();
+    if (!metadata.files || typeof metadata.files !== "object") metadata.files = {};
+    const current = metadata.files[safe];
+    metadata.files[safe] = {
+      ...(current && typeof current === "object" ? current : { originalName: typeof current === "string" ? current : safe }),
+      conversionStatus: status
+    };
+    if (errorMessage) metadata.files[safe].conversionError = String(errorMessage).slice(0, 500);
+    else delete metadata.files[safe].conversionError;
+    this.saveMetadata(metadata);
+  }
+  // Issue #63: перейменування матеріалу вчителем — змінюється лише показна
+  // назва (originalName у метаданих); ідентифікатор файлу, шлях до вмісту,
+  // опис і категорія не змінюються, тому наявні посилання не ламаються.
+  // Issue #88: лише власник файла (або адмін на рівні викликача) може перейменувати.
+  // Legacy-файли (owner === null) доступні викладачам лише для перегляду і
+  // копіювання — зміна/видалення заборонена.
+  renameFile(teacherId, idOrName, rawName) {
+    const safe = safeFilename(idOrName);
+    const record = this.getFileRecord(safe);
+    if (!record) {
+      throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
+    }
+    // TeacherId з сесії: null для адміна, інакше — ID викладача. Legacy-файли
+    // (owner === null) не підлягають зміні жодним викладачем.
+    if (teacherId && (!record.owner || record.owner !== teacherId)) {
+      throw forbidden("Файл належить іншому викладачу або є спільним — зміна заборонена");
+    }
+    const name = String(rawName || "").replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 120);
+    if (!name) throw Object.assign(new Error("Некоректна назва матеріалу"), { status: 400 });
+    const metadata = this.getMetadata();
+    if (!metadata.files || typeof metadata.files !== "object") metadata.files = {};
+    const current = metadata.files[safe];
+    const base = current && typeof current === "object"
+      ? current
+      : { originalName: typeof current === "string" ? current : safe, uploadedAt: Date.now() };
+    metadata.files[safe] = { ...base, originalName: name };
+    this.saveMetadata(metadata);
+    return { ok: true, file: safe, name };
+  }
+
+  // Issue #63: приховування/показ матеріалу від учнів; Issue #88: лише власник
+  toggleHide(teacherId, idOrName, shouldHide) {
+    const record = this.getFileRecord(idOrName);
+    if (!record) {
+      const error = new Error("Файл не знайдено");
+      error.status = 404;
+      throw error;
+    }
+    // Legacy-файли (owner === null) не підлягають зміні жодним викладачем.
+    if (teacherId && (!record.owner || record.owner !== teacherId)) {
+      throw forbidden("Файл належить іншому викладачу або є спільним — зміна заборонена");
+    }
+    const safe = safeFilename(idOrName);
+    const metadata = this.getMetadata();
+    const hiddenSet = new Set(metadata.hidden);
+
+    if (shouldHide) {
+      hiddenSet.add(safe);
+    } else {
+      hiddenSet.delete(safe);
+    }
+
+    metadata.hidden = Array.from(hiddenSet);
+    this.saveMetadata(metadata);
+
+    return { ok: true, name: safe, hidden: shouldHide };
+  }
+
+  // Issue #63: переміщення файла в категорію; Issue #88: лише власник
+  moveFileToCategory(teacherId, idOrName, categoryId = "") {
+    const record = this.getFileRecord(idOrName);
+    if (!record) throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
+    // Legacy-файли (owner === null) не підлягають зміні жодним викладачем.
+    if (teacherId && (!record.owner || record.owner !== teacherId)) throw forbidden("Файл належить іншому викладачу або є спільним — зміна заборонена");
+    const safe = safeFilename(idOrName);
     const validCategory = String(categoryId || "");
     if (validCategory && !this.getCategories().some(category => category.id === validCategory)) {
       throw Object.assign(new Error("Категорію не знайдено"), { status: 404 });
@@ -217,13 +349,16 @@ class FileService {
     return { ok: true, file: safe, categoryId: validCategory };
   }
 
-  reorderFile(idOrName, direction) {
+  // Issue #63: зміна порядку файлів; Issue #88: лише власник файла
+  reorderFile(teacherId, idOrName, direction) {
     if (direction !== "up" && direction !== "down") {
       throw Object.assign(new Error("Напрямок має бути up або down"), { status: 400 });
     }
+    const record = this.getFileRecord(idOrName);
+    if (!record) throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
+    // Legacy-файли (owner === null) не підлягають зміні жодним викладачем.
+    if (teacherId && (!record.owner || record.owner !== teacherId)) throw forbidden("Файл належить іншому викладачу або є спільним — зміна заборонена");
     const safe = safeFilename(idOrName);
-    const filePath = getFilePath(safe);
-    if (!filePath || !fs.existsSync(filePath)) throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
     const metadata = this.getMetadata();
     const all = this.getFilesList(true);
     const current = all.find(item => item.id === safe);
@@ -242,72 +377,90 @@ class FileService {
     return { ok: true, order: ordered };
   }
 
-  setConversionStatus(idOrName, status, errorMessage = "") {
-    const safe = safeFilename(idOrName);
-    const filePath = getFilePath(safe);
-    if (!filePath || !fs.existsSync(filePath)) return;
+  /** Фізичний шлях до оригінального файла (для потокового читання) */
+  filePath(fileId) {
     const metadata = this.getMetadata();
-    if (!metadata.files || typeof metadata.files !== "object") metadata.files = {};
-    const current = metadata.files[safe];
-    metadata.files[safe] = {
-      ...(current && typeof current === "object" ? current : { originalName: typeof current === "string" ? current : safe }),
-      conversionStatus: status
-    };
-    if (errorMessage) metadata.files[safe].conversionError = String(errorMessage).slice(0, 500);
-    else delete metadata.files[safe].conversionError;
-    this.saveMetadata(metadata);
-  }
-  // Issue #63: перейменування матеріалу вчителем — змінюється лише показна
-  // назва (originalName у метаданих); ідентифікатор файлу, шлях до вмісту,
-  // опис і категорія не змінюються, тому наявні посилання не ламаються.
-  renameFile(idOrName, rawName) {
-    const safe = safeFilename(idOrName);
-    const filePath = getFilePath(safe);
-    if (!filePath || !fs.existsSync(filePath)) {
-      throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
+    const record = metadata.files && metadata.files[fileId];
+    if (!record) {
+      // Legacy-файли в корені materials/ без запису в метаданих: шлях у корінь,
+      // але лише для безпечного імені — інакше ідентифікатор із шляхом
+      // («../») дав би доступ поза materials/ (захист від traversal).
+      const safe = safeFilename(fileId);
+      if (safe !== fileId || !config.allowedExtensions.has(path.extname(safe).toLowerCase())) return null;
+      return path.join(config.dataDir, safe);
     }
-    const name = String(rawName || "").replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 120);
-    if (!name) throw Object.assign(new Error("Некоректна назва матеріалу"), { status: 400 });
-    const metadata = this.getMetadata();
-    if (!metadata.files || typeof metadata.files !== "object") metadata.files = {};
-    const current = metadata.files[safe];
-    const base = current && typeof current === "object"
-      ? current
-      : { originalName: typeof current === "string" ? current : safe, uploadedAt: Date.now() };
-    metadata.files[safe] = { ...base, originalName: name };
-    this.saveMetadata(metadata);
-    return { ok: true, file: safe, name };
+    if (record.owner && record.folderId) {
+      return folderService.filePhysicalPath(record.owner, record.folderId, fileId);
+    }
+    if (record.owner) {
+      // Файл у корені персонального простору викладача (без папки)
+      return path.join(config.dataDir, record.owner, fileId);
+    }
+    return path.join(config.dataDir, fileId);
   }
 
-  toggleHide(idOrName, shouldHide) {
+  /** Сумісність зі старим кодом: фізичний шлях до файла за його іменем (fileId) */
+  getFilePath(fileId) {
+    return this.filePath(fileId);
+  }
+
+  /** Владелець файла (teacherId або null для shared/legacy) */
+  ownerOf(fileId) {
+    const metadata = this.getMetadata();
+    const record = metadata.files && metadata.files[fileId];
+    return record ? (record.owner || null) : null;
+  }
+
+  /** Чи належить файл викладачу (або адміну — перевірка на рівні викликача) */
+  isOwner(teacherId, fileId) {
+    return this.ownerOf(fileId) === teacherId;
+  }
+
+  /** Копіювання файла у власну папку іншого (או того самого) викладача.
+   * Створює новий file ID, незалежний фізичний файл і власні метадані.
+   * Оригінал не змінюється. Для PDF/PPT/PPTX створюється власний manifest/PNG-набір.
+   */
+  async copyFile({ sourceFileId, targetTeacherId, targetFolderId }) {
+    if (!folderService.isSafeId(targetTeacherId)) throw badRequest("Некоректний ідентифікатор викладача");
+    const sourceRecord = this.getFileRecord(sourceFileId);
+    if (!sourceRecord) throw notFound("Вихідний файл не знайдено");
+    // Читаємо вміст оригіналу
+    const srcPath = this.filePath(sourceFileId);
+    if (!srcPath || !fs.existsSync(srcPath)) throw notFound("Файл не знайдено на диску");
+    const origName = sourceRecord.originalName || sourceFileId;
+    const ext = path.extname(origName).toLowerCase();
+    if (!config.allowedExtensions.has(ext)) throw badRequest("Цей тип файлу не дозволено");
+
+    // Створюємо новий запис через saveFileStream з вмістом оригіналу
+    const stream = fs.createReadStream(srcPath);
+    const result = await this.saveFileStream(stream, origName, sourceRecord.description || "", sourceRecord.categoryId || "", targetTeacherId, targetFolderId);
+    return result;
+  }
+
+  getFileRecord(fileId) {
+    const metadata = this.getMetadata();
+    const record = metadata.files && metadata.files[fileId];
+    return record || null;
+  }
+
+  /** Видалити файл (лише власник або адмін — перевірка на рівні викликача) */
+  deleteFile(teacherId, idOrName) {
     const safe = safeFilename(idOrName);
-    const filePath = getFilePath(safe);
-    if (!filePath || !fs.existsSync(filePath)) {
+    const record = this.getFileRecord(safe);
+    if (!record) {
       const error = new Error("Файл не знайдено");
       error.status = 404;
       throw error;
     }
-
-    const metadata = this.getMetadata();
-    const hiddenSet = new Set(metadata.hidden);
-
-    if (shouldHide) {
-      hiddenSet.add(safe);
-    } else {
-      hiddenSet.delete(safe);
+    // teacherId === null → адмін: доступ до будь-якого файла, включно з legacy.
+    // Викладач — лише власний файл; legacy-файли (owner === null) й чужі
+    // записи йому недоступні (додатково блокується на рівні контролера).
+    if (teacherId && (!record.owner || record.owner !== teacherId)) {
+      throw forbidden("Файл належить іншому викладачу або є спільним — видалення заборонене");
     }
-
-    metadata.hidden = Array.from(hiddenSet);
-    this.saveMetadata(metadata);
-
-    return { ok: true, name: safe, hidden: shouldHide };
-  }
-
-  deleteFile(idOrName) {
-    const safe = safeFilename(idOrName);
-    const filePath = getFilePath(safe);
+    const filePath = this.filePath(safe);
     if (!filePath || !fs.existsSync(filePath)) {
-      const error = new Error("Файл не знайдено");
+      const error = new Error("Файл не знайдено на диску");
       error.status = 404;
       throw error;
     }
@@ -327,13 +480,20 @@ class FileService {
     if (Array.isArray(metadata.order)) metadata.order = metadata.order.filter(id => id !== safe);
     this.saveMetadata(metadata);
 
+    // Also delete cached slides
+    slideService.clearSlides(safe);
+
     return { ok: true, name: safe };
   }
 
-  // Issue #63 Етап 3: необов'язковий опис матеріалу (rawDescription) зберігається
-  // в наявних метаданих files[id].description; порожній опис не записується,
-  // тому формат записів без опису не змінюється (сумісність зі старими даними)
-  async saveFileStream(requestStream, rawOriginalName, rawDescription, rawCategoryId = "") {
+  /**
+   * Issue #63 Етап 3: необов'язковий опис матеріалу (rawDescription) зберігається
+   * в наявних метаданих files[id].description; порожній опис не записується,
+   * тому формат записів без опису не змінюється (сумісність зі старими даними)
+   * Issue #88: файл зберігається у materials/<teacherId>/<folderId>/<fileId>.<ext>
+   * (legacy завантаження без teacherId — у корінь materials/)
+   */
+  async saveFileStream(requestStream, rawOriginalName, rawDescription, rawCategoryId, teacherId, folderId) {
     const orig = path.basename(String(rawOriginalName || "").trim());
     if (!orig) {
       const error = new Error("Некоректне ім'я файлу");
@@ -341,7 +501,6 @@ class FileService {
       throw error;
     }
 
-    // Прибираємо керуючі символи, обрізаємо зайві пробіли й довжину
     const description = String(rawDescription || "")
       .replace(/[\u0000-\u001F\u007F]/g, " ")
       .trim()
@@ -354,10 +513,29 @@ class FileService {
       throw error;
     }
 
-    // Generate safe ASCII ID: file_<timestamp>_<random><ext>
+    // Issue #88: папка має належати викладачу; фізичний шлях — матеріали
+    // <teacherId>/<folderId> (папки створюються ліниво при першому файлі).
+    let targetDir;
+    if (teacherId && folderId) {
+      const folder = folderService.getFolder(folderId);
+      if (!folder) throw notFound("Папку не знайдено");
+      if (folder.teacherId !== teacherId) throw forbidden("Папка належить іншому викладачу");
+      targetDir = path.join(folderService.teacherRootPath(teacherId), String(folderId));
+    } else if (teacherId) {
+      targetDir = path.join(config.dataDir, teacherId);
+    } else {
+      targetDir = config.dataDir;
+    }
+    if (!targetDir) {
+      const error = new Error("Некоректний простір зберігання");
+      error.status = 400;
+      throw error;
+    }
+    fs.mkdirSync(targetDir, { recursive: true });
+
     const randomSuffix = crypto.randomBytes(3).toString("hex");
     const fileId = `file_${Date.now()}_${randomSuffix}${ext}`;
-    const filePath = path.join(config.dataDir, fileId);
+    const filePath = path.join(targetDir, fileId);
 
     let bytes = 0;
     const limiter = new Transform({
@@ -378,7 +556,6 @@ class FileService {
         fs.createWriteStream(filePath, { flags: "wx" })
       );
 
-      // Record correspondence in metadata
       const metadata = this.getMetadata();
       if (!metadata.files) metadata.files = {};
       const categoryId = String(rawCategoryId || "");
@@ -386,7 +563,9 @@ class FileService {
         fs.unlinkSync(filePath);
         throw Object.assign(new Error("Категорію не знайдено"), { status: 400 });
       }
-      metadata.files[fileId] = {
+      const record = {
+        owner: teacherId || null,
+        folderId: folderId || null,
         originalName: orig,
         uploadedAt: Date.now(),
         size: bytes,
@@ -394,6 +573,7 @@ class FileService {
         ...(categoryId ? { categoryId } : {}),
         ...(config.slideExtensions.has(ext) ? { conversionStatus: "converting" } : {})
       };
+      metadata.files[fileId] = record;
       if (!Array.isArray(metadata.order)) metadata.order = [];
       metadata.order = metadata.order.filter(id => id !== fileId);
       metadata.order.push(fileId);
@@ -403,16 +583,14 @@ class FileService {
         id: fileId,
         name: orig,
         size: bytes,
-        description
+        description,
+        owner: record.owner,
+        folderId: record.folderId
       };
     } catch (error) {
       try { fs.unlinkSync(filePath); } catch {}
       throw error;
     }
-  }
-
-  getFilePath(name) {
-    return getFilePath(name);
   }
 
   /**

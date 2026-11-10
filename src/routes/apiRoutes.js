@@ -68,4 +68,22 @@ router.post("/teachers/set-pin", (req, res) => teacherController.setPin(req, res
 router.post("/teachers/archive", (req, res) => teacherController.archive(req, res));
 router.post("/teachers/delete", (req, res) => teacherController.remove(req, res));
 
+// Issue #88: персональні простори матеріалів викладачів (серверна основа).
+// Всі операції перевіряють власника файла/папки через автентифіковану сесію.
+const materialsController = require("../controllers/materialsController");
+router.get("/materials/tree", (req, res) => materialsController.folderTree(req, res));
+router.post("/materials/folder", (req, res) => materialsController.createFolder(req, res));
+router.post("/materials/folder/rename", (req, res) => materialsController.renameFolder(req, res));
+router.post("/materials/folder/move", (req, res) => materialsController.moveFolder(req, res));
+router.post("/materials/folder/delete", (req, res) => materialsController.deleteFolder(req, res));
+router.get("/materials/files", (req, res) => materialsController.listFiles(req, res));
+router.post("/materials/upload", (req, res) => materialsController.uploadFile(req, res));
+router.get("/materials/shared", (req, res) => materialsController.sharedCatalog(req, res));
+router.post("/materials/copy", (req, res) => materialsController.copyFile(req, res));
+router.post("/materials/file/rename", (req, res) => materialsController.renameFile(req, res));
+router.post("/materials/file/toggle-hide", (req, res) => materialsController.toggleHide(req, res));
+router.post("/materials/file/delete", (req, res) => materialsController.deleteFile(req, res));
+router.post("/materials/file/category", (req, res) => materialsController.setFileCategory(req, res));
+router.get("/materials/admin/tree", (req, res) => materialsController.adminTree(req, res));
+
 module.exports = router;

@@ -10,6 +10,7 @@ let pin = sessionStorage.getItem("portalPin") || "";
 // не повертається, у сесію теж не потрапляє.
 let teacherId = sessionStorage.getItem("portalTeacherId") || "";
 let isAdmin = sessionStorage.getItem("portalAdmin") === "1";
+let teacherFullName = sessionStorage.getItem("portalTeacherFullName") || "";
 let files = [];
 let categories = [];
 
@@ -109,8 +110,12 @@ function applyAuthHeaders(headers) {
 function applyLoginResponse(data) {
   teacherId = data && data.teacherId ? String(data.teacherId) : "";
   isAdmin = Boolean(data && data.admin);
+  // Зберігаємо ПІБ викладача/адміністратора для відображення біля кнопки «Вийти»
+  teacherFullName = data && data.fullName ? String(data.fullName) : "";
   if (teacherId) sessionStorage.setItem("portalTeacherId", teacherId);
   else sessionStorage.removeItem("portalTeacherId");
+  if (teacherFullName) sessionStorage.setItem("portalTeacherFullName", teacherFullName);
+  else sessionStorage.removeItem("portalTeacherFullName");
   if (isAdmin) sessionStorage.setItem("portalAdmin", "1");
   else sessionStorage.removeItem("portalAdmin");
 }
@@ -118,8 +123,10 @@ function applyLoginResponse(data) {
 /** Issue #85: очищення контексту облікового запису (вихід або вхід як учень) */
 function clearLoginContext() {
   teacherId = "";
+  teacherFullName = "";
   isAdmin = false;
   sessionStorage.removeItem("portalTeacherId");
+  sessionStorage.removeItem("portalTeacherFullName");
   sessionStorage.removeItem("portalAdmin");
 }
 
@@ -1263,12 +1270,30 @@ async function prepareAndShowSlides(name, page, onReady, target) {
       // Викладач може явно запустити конвертацію (Issue #2: prepare — тільки для викладача)
       // Issue #63 (§3.3): /api/slides/prepare вимагає PIN (Issue #8) — без заголовка
       // сервер відповідав 403 і приватний перегляд слайдів показував помилку
-      const res = await api("/api/slides/prepare", {
-        method: "POST",
-        headers: applyAuthHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ file: name })
-      });
-      pageCount = (await res.json()).pageCount;
+      try {
+        const res = await api("/api/slides/prepare", {
+          method: "POST",
+          headers: applyAuthHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ file: name })
+        });
+        pageCount = (await res.json()).pageCount;
+      } catch (e) {
+        // Issue #88 (рев'ю): для спільних/legacy-файлів (owner === null) сервер
+        // відмовляє в prepare — викладач не змінює їх стан. Приватний перегляд
+        // лишається можливим через той самий шлях, що й учень: перший запит PNG
+        // сам запускає конвертацію (без запису в metadata конвертації), а потім
+        // /api/slides/info повертає готовий маніфест. Чужий файл (іншого
+        // викладача) цим шляхом недоступний — показуємо відмову сервера.
+        const shared = e && e.message && e.message.includes("спільній бібліотеці");
+        if (!shared) throw e;
+        const probe = await fetch(slideUrl(name, page));
+        if (!probe.ok) throw new Error(await probe.text());
+        const infoRes = await fetch("/api/slides/info?file=" + encodeURIComponent(name));
+        if (infoRes.ok) {
+          const info = await infoRes.json();
+          if (info.ready) pageCount = info.pageCount;
+        }
+      }
     } else {
       // Учень: перший запит PNG сам запускає конвертацію на сервері,
       // усі клієнти чекають одну конвертацію (спільний lock, Issue #3)
@@ -1377,12 +1402,28 @@ function updateRoleUI() {
   const isTeacher = role === "teacher";
   const isStudent = role === "student";
 
+  // Formatted teacher name: Прізвище І.П.
+  // Issue #88 (рев'ю): ініціали БЕЗ пробілу між ними — «Шевченко Т.М.».
+  // Джерело — серверне ПІБ сесії (teacherFullName); адміністратор має власне
+  // «🎓 Адміністратор» і цей підпис не отримує (див. нижче); неповне ПІБ без
+  // помилки UI показується як є.
+  function formatTeacherName(fullName) {
+    if (!fullName) return "";
+    const parts = fullName.trim().split(/\s+/);
+    if (parts.length < 2) return fullName;
+    const surname = parts[0];
+    const initials = parts.slice(1).map(p => p.charAt(0).toUpperCase() + ".").join("");
+    return surname + " " + initials;
+  }
+
   // Role label shows name for students
   if ($("roleLabel")) {
     // Issue #85: адміністратор (вхід за PORTAL_PIN) відрізняється від
     // викладача з персональним PIN — у ролі ті самі права + розділ «Викладачі»
     if (isTeacher && isAdmin) $("roleLabel").textContent = "🎓 Адміністратор";
-    else if (isTeacher) $("roleLabel").textContent = "🎓 Викладач";
+    else if (isTeacher && teacherFullName) {
+      $("roleLabel").textContent = "🎓 " + formatTeacherName(teacherFullName);
+    } else if (isTeacher) $("roleLabel").textContent = "🎓 Викладач";
     else if (isStudent && studentDisplayName) $("roleLabel").textContent = "👤 " + studentDisplayName;
     else $("roleLabel").textContent = "👤 Учень";
   }
@@ -1471,19 +1512,59 @@ function closeRoleModal() {
   if ($("roleModal")) $("roleModal").style.display = "none";
 }
 
+/**
+ * Issue #88 §4: вихід із ролі викладача. Спочатку ЧЕКАЄМО завершення logout
+ * на сервері і лише після успішної відповіді — локальне очищення та редірект
+ * на головну сторінку («/»). Під час очікування стан ролі не змінюється,
+ * тому після помилки можна повторити натискання.
+ *
+ * Порядок:
+ *  1) завершити спільну демонстрацію — поки є PIN і сесія ще чинна (якщо запит
+ *     не дійде, сервер доб'є тайм-аутом присутності викладача);
+ *  2) POST /api/auth/logout: сесію знищено на сервері, cookie очищено з тими
+ *     самими атрибутами. ПОМИЛКА — не показуємо успішний вихід, ролі не
+ *     скидаємо, редіректу немає — зрозуміле повідомлення і повторна спроба;
+ *  3) локальне очищення (setRole("")) і window.location.replace("/") —
+ *     старий cookie уже відхилений, back/reload не показує захищений вміст.
+ */
+async function logoutFlow() {
+  // 1) Зупинка показу — до виходу, поки PIN ще дійсний (лише в із ролі викладача)
+  const prevRole = role;
+  if (prevRole === "teacher") {
+    try {
+      await fetch("/api/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin, teacherId, stop: true })
+      });
+    } catch { /* сервер доб'є тайм-аутом присутності — не блокуємо вихід */ }
+  }
+  // 2) Серверний logout — обов'язково дочекуємося успіху
+  try {
+    const response = await fetch("/api/auth/logout", { method: "POST" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    const data = await response.json().catch(() => null);
+    if (!data || data.ok !== true) throw new Error("сервер не підтвердив вихід");
+  } catch (error) {
+    showToast("Не вдалося завершити сесію: " + error.message + ". Спробуйте ще раз.", "error", 8000);
+    return false;
+  }
+  // 3) Успіх: локальне очищення та вихід на головну
+  setRole("");
+  window.location.replace("/");
+  return true;
+}
+
 function setRole(newRole, newPin = "", newName = "") {
   const prevRole = role;
+  // Issue #88 §4: завершення ролі (prevRole && !newRole) — ЛИШЕ локальне
+  // очищення нижче. Скасування серверної сесії, зупинка показу та редірект
+  // на головну виконуються logoutFlow() ДО цього виклику: він чекає успішної
+  // відповіді сервера, тому стара cookie уже відхилена на момент редіректу.
+  const isLogout = Boolean(prevRole && !newRole);
   role = newRole;
   sessionExpiredHandled = false;
   localStorage.setItem("portalRole", newRole);
-  // Issue #63 (Етап 5): завершення ролі скасовує СЕРВЕРНУ сесію — інакше у
-  // цьому браузері (або у копії cookie) лишився б доступ до стану показу та
-  // медіафайлів після виходу. Перехід на ІНШУ роль сесію не чіпає: там нову
-  // сесію вже видало /api/auth/verify чи /api/auth/session (інакше logout
-  // тут же знищив би щойно видану сесію нової ролі)
-  if (prevRole && !newRole) {
-    fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
-  }
   if (newRole === "teacher") {
     pin = newPin;
     sessionStorage.setItem("portalPin", newPin);
@@ -1501,16 +1582,8 @@ function setRole(newRole, newPin = "", newName = "") {
       sendHeartbeat();
     }
   } else {
-    // logout. Вихід учителя (Issue #63): одразу зупинити спільну демонстрацію,
-    // поки є PIN, — інакше учні застрягають у режимі показу без керування.
-    // Якщо запит не дійде, сервер доб'є тайм-аутом присутності викладача.
-    if (prevRole === "teacher") {
-      fetch("/api/control", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pin, teacherId, stop: true })
-      }).catch(() => {});
-    }
+    // logout (локально): серверну сесію вже скасував logoutFlow(), а зупинку
+    // спільної демонстрації зробив там само — поки сесія ще була чинна
     pin = "";
     sessionStorage.removeItem("portalPin");
     // Issue #85: вихід прибирає ідентифікатор запису та адмін-прапорець —
@@ -1523,7 +1596,10 @@ function setRole(newRole, newPin = "", newName = "") {
   }
   closeRoleModal();
   updateRoleUI();
-  filesReady = refreshFiles();
+  // Issue #88 §4: на виході каталог не перечитуємо — logoutFlow одразу веде
+  // на головну сторінку (там все одно нова сесія та новий стан)
+  if (isLogout) filesReady = Promise.resolve();
+  else filesReady = refreshFiles();
   // Миттєвий старт опитування, якщо увійшли як викладач у поточній сесії
   // (раніше список оновлювався лише після перезавантаження сторінки)
   if (newRole === "teacher") {
@@ -1628,7 +1704,9 @@ if ($("modalTeacherPin")) {
 
 if ($("btnSwitchRole")) {
   $("btnSwitchRole").onclick = () => {
-    if (role === "teacher") { setRole(""); } else { openRoleModal(); }
+    // Issue #88 §4: вихід — асинхронний потік: чекаємо відповіді сервера
+    // перед очищенням і редіректом; при помилці лишаємось у ролі (повтор)
+    if (role === "teacher") { void logoutFlow(); } else { openRoleModal(); }
   };
 }
 

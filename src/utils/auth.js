@@ -146,7 +146,13 @@ function sessionCookieOptions(req) {
 function clearSession(req, res) {
   const existing = readSession(req);
   if (existing) sessionService.destroy(existing.id);
-  res.clearCookie(SESSION_COOKIE, { path: "/" });
+  // Issue #88 (рев'ю): cookie знімаємо з ТИМИ САМИМИ атрибутами, що й видача
+  // (httpOnly/sameSite/path/secure), — інакше браузер не видалить пару cookie/path,
+  // і клієнт після виходу лишається з відпрацьованою cookie. maxAge прибираємо:
+  // для очищення Express ставить Expires у минуле сам.
+  const options = sessionCookieOptions(req);
+  delete options.maxAge;
+  res.clearCookie(SESSION_COOKIE, options);
 }
 
 /**
@@ -187,11 +193,32 @@ function requireViewer(req, res) {
  * Ідентичність для МЕДІАЗАПИТІВ (/files, /slides, /api/slides/info):
  * викладач (PIN або teacher-сесія) або учасник із чинною сесією.
  * Без входу — 401; далі право на конкретний файл вирішує mediaAccess.
+ *
+ * Issue #88 (уточнення Tech-lead): окремо позначаємо АДМІНІСТРАТОРА —
+ * сесію з access "admin" або адміністративний PORTAL_PIN у запиті. Без цієї
+ * позначки адмін трактувався як «викладач без власника» (teacherId ""/null)
+ * і отримував 404 на медіа чужих викладачів. Ізоляція між звичайними
+ * викладачами не змінюється — її вирішує mediaAccess.canViewMedia.
  */
 function mediaIdentity(req, res) {
-  if (extractPin(req) && isTeacher(req)) return { isTeacher: true };
   const session = readSession(req);
-  if (session) return { isTeacher: session.role === "teacher", session };
+  const sessionIsAdmin = Boolean(session && session.access === "admin");
+  if (extractPin(req) && isTeacher(req)) {
+    return {
+      isTeacher: true,
+      // Сесія має пріоритет (як у requireAdmin); за PIN — лише PORTAL_PIN
+      isAdmin: sessionIsAdmin || evaluatePin(req).access === "admin",
+      teacherId: session ? session.teacherId : null
+    };
+  }
+  if (session) {
+    return {
+      isTeacher: session.role === "teacher",
+      isAdmin: sessionIsAdmin,
+      session,
+      teacherId: session.role === "teacher" ? session.teacherId : null
+    };
+  }
   res.status(401).send("Сесію не знайдено — увійдіть заново");
   return null;
 }
@@ -335,11 +362,17 @@ function requirePerm(req, res, perm) {
 /**
  * Issue #85: доступ лише для адміністратора (розділ «Викладачі» / API).
  *
- * Приймає адміністративний PIN у запиті або чинну сесію з access "admin".
+ * Приймає чинну сесію з access "admin" або адміністративний PIN у запиті.
+ * Пріоритет — сесія: поле `pin` у тілі деяких адмін-запитів містить PIN
+ * іншого призначення (новий PIN викладача в /api/teachers/create чи
+ * /api/teachers/set-pin) і не є креденціалом адміністратора.
  * Сесія викладача/учня → 403; без входу → 401 (як для інших сесійних API).
  * PIN викладача навіть за наявності ідентифікатора не дає адмін-доступу.
  */
 function requireAdmin(req, res) {
+  const session = readSession(req);
+  if (session && session.access === "admin") return session;
+
   const pin = extractPin(req);
   if (pin) {
     const result = evaluatePin(req);
@@ -360,8 +393,6 @@ function requireAdmin(req, res) {
     return null;
   }
 
-  const session = readSession(req);
-  if (session && session.access === "admin") return session;
   if (session) {
     res.status(403).send("Доступ має лише адміністратор");
     return null;

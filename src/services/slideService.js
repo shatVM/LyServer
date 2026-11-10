@@ -48,6 +48,28 @@ function slideFolder(name) {
   return path.join(config.slidesDir, name);
 }
 
+/**
+ * Issue #88: фізичний шлях до вихідного файла конвертації.
+ * Legacy-файли лежать у корені materials/, файли персональних просторів
+ * викладачів — у materials/<teacherId>/[<folderId>/]<fileId>. Розташування
+ * визначається за метаданими (owner/folderId) через fileService.filePath —
+ * те саме джерело правди, що й для віддачі файлу; вгадані шляхи не
+ * використовуються (раніше тут був лише корінь, і конвертація файлів
+ * просторів падала з «Файл не знайдено»).
+ * Ленивий require: fileService завантажує цей модуль (clearSlides), тому
+ * звернення відбувається лише під час виклику, коли обидва модулі завантажені.
+ */
+function sourcePath(name) {
+  try {
+    const fileService = require("./fileService");
+    const resolved = fileService && typeof fileService.filePath === "function"
+      ? fileService.filePath(name)
+      : null;
+    if (resolved) return resolved;
+  } catch { /* нижче — запасний шлях у корені */ }
+  return path.join(config.dataDir, name);
+}
+
 function manifestPath(name) {
   return path.join(slideFolder(name), "manifest.json");
 }
@@ -116,7 +138,7 @@ const manifestValidationCache = new Map();
 /** fingerprint стану джерела/набору PNG для file, або null якщо стан невідомий */
 function validationFingerprint(name) {
   try {
-    const src = fs.statSync(path.join(config.dataDir, name));
+    const src = fs.statSync(sourcePath(name));
     const folder = fs.statSync(slideFolder(name));
     const manifest = fs.statSync(manifestPath(name));
     return src.mtimeMs + "|" + folder.mtimeMs + "|" + manifest.mtimeMs;
@@ -157,7 +179,7 @@ async function convertPdf(name) {
   const folder = slideFolder(name);
   fs.mkdirSync(folder, { recursive: true });
 
-  const srcPath = path.join(config.dataDir, name);
+  const srcPath = sourcePath(name);
 
   try {
     if (!POPPLER_SUPPORTED) {
@@ -239,7 +261,7 @@ async function convertPptx(name) {
   const folder = slideFolder(name);
   fs.mkdirSync(folder, { recursive: true });
 
-  const srcPath = path.join(config.dataDir, name).replace(/\\/g, "\\\\");
+  const srcPath = sourcePath(name).replace(/\\/g, "\\\\");
   const outFolder = folder.replace(/\\/g, "\\\\");
 
   const ps = `
@@ -291,7 +313,7 @@ const inFlight = new Map();
  * Checks mtime of source file vs manifest – re-converts if source is newer.
  */
 async function ensureSlides(name) {
-  const srcPath = path.join(config.dataDir, name);
+  const srcPath = sourcePath(name);
   if (!fs.existsSync(srcPath)) {
     throw Object.assign(new Error("Файл не знайдено"), { status: 404 });
   }
