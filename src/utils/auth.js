@@ -193,13 +193,32 @@ function requireViewer(req, res) {
  * Ідентичність для МЕДІАЗАПИТІВ (/files, /slides, /api/slides/info):
  * викладач (PIN або teacher-сесія) або учасник із чинною сесією.
  * Без входу — 401; далі право на конкретний файл вирішує mediaAccess.
+ *
+ * Issue #88 (уточнення Tech-lead): окремо позначаємо АДМІНІСТРАТОРА —
+ * сесію з access "admin" або адміністративний PORTAL_PIN у запиті. Без цієї
+ * позначки адмін трактувався як «викладач без власника» (teacherId ""/null)
+ * і отримував 404 на медіа чужих викладачів. Ізоляція між звичайними
+ * викладачами не змінюється — її вирішує mediaAccess.canViewMedia.
  */
 function mediaIdentity(req, res) {
   const session = readSession(req);
+  const sessionIsAdmin = Boolean(session && session.access === "admin");
   if (extractPin(req) && isTeacher(req)) {
-    return { isTeacher: true, teacherId: session ? session.teacherId : null };
+    return {
+      isTeacher: true,
+      // Сесія має пріоритет (як у requireAdmin); за PIN — лише PORTAL_PIN
+      isAdmin: sessionIsAdmin || evaluatePin(req).access === "admin",
+      teacherId: session ? session.teacherId : null
+    };
   }
-  if (session) return { isTeacher: session.role === "teacher", session, teacherId: session.role === "teacher" ? session.teacherId : null };
+  if (session) {
+    return {
+      isTeacher: session.role === "teacher",
+      isAdmin: sessionIsAdmin,
+      session,
+      teacherId: session.role === "teacher" ? session.teacherId : null
+    };
+  }
   res.status(401).send("Сесію не знайдено — увійдіть заново");
   return null;
 }

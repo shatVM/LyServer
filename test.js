@@ -1471,9 +1471,13 @@ async function main() {
       check(
         "Issue #63 Д: серверний дозвіл медіа активної демонстрації (mediaAccess)",
         s4MediaSource.includes("stateService.isCurrentlyDemonstrated(name)") &&
-          s4FileCtlSource.includes("canViewMedia(name, isTeacher, identity.teacherId)") &&
-          s4SlideCtlSource.includes("canViewMedia(name, identity.isTeacher, identity.teacherId)") &&
-          apiControllerSource.includes("canViewMedia(file, isTeacher, identity.teacherId)")
+          s4FileCtlSource.includes("canViewMedia(name, isTeacher, identity.teacherId, identity.isAdmin)") &&
+          s4SlideCtlSource.includes("canViewMedia(name, identity.isTeacher, identity.teacherId, identity.isAdmin)") &&
+          apiControllerSource.includes("canViewMedia(file, isTeacher, identity.teacherId, identity.isAdmin)") &&
+          // Issue #88 (уточнення Tech-lead): адмін позначений окремо,
+          // решта ролей лишається під перевіркою власника
+          s4AuthSource.includes("isAdmin: sessionIsAdmin") &&
+          s4MediaSource.includes("if (isAdmin) return true;")
       );
       check(
         "Issue #63 Д: клієнт відновлює сесію при завантаженні і скасовує її при зміні ролі",
@@ -3480,6 +3484,60 @@ async function main() {
       check(
         "Issue #88: прямі URL без сесії — 401",
         t88NoSessionRaw.status === 401 && t88NoSessionSlides.status === 401
+      );
+
+      // === Issue #88 (уточнення Tech-lead): адмін має повний доступ
+      // до медіа ВСІХ викладачів; ізоляція звичайних викладачів лишається ===
+      const t88AdminMediaLogin = await t88Verify(PIN);
+      const t88AdminPinHdrs = { "Content-Type": "application/json", "X-Portal-Pin": PIN };
+      const t88AdminSessHdrs = {
+        "Content-Type": "application/json",
+        Cookie: "ly_session=" + t88AdminMediaLogin.cookie
+      };
+      const t88MediaStatus = async (headers, url) => (await fetch(base + url, { headers })).status;
+      const t88MediaTrio = async (headers, id) => {
+        const enc = encodeURIComponent(id);
+        return [
+          await t88MediaStatus(headers, "/files/" + enc),
+          await t88MediaStatus(headers, "/slides/" + enc + "/1"),
+          await t88MediaStatus(headers, "/api/slides/info?file=" + enc)
+        ].join("/");
+      };
+      check(
+        "Issue #88 (Tech-lead): сесія за PORTAL_PIN має admin=true",
+        t88AdminMediaLogin.status === 200 && Boolean(t88AdminMediaLogin.data) &&
+          t88AdminMediaLogin.data.admin === true && t88AdminMediaLogin.data.role === "teacher",
+        `status=${t88AdminMediaLogin.status}`
+      );
+
+      const t88AdminForeignPin = await t88MediaTrio(t88AdminPinHdrs, t88FileB.id);
+      const t88AdminForeignSess = await t88MediaTrio(t88AdminSessHdrs, t88FileB.id);
+      const t88AdminOwnA = await t88MediaTrio(t88AdminPinHdrs, t88FileA.id);
+      const t88AdminShared = await t88MediaTrio(t88AdminPinHdrs, fileId);
+      check(
+        "Issue #88 (Tech-lead): адмін бачить медіа чужого викладача (файл/слайд/стан) — за PIN і за сесією",
+        t88AdminForeignPin === "200/200/200" && t88AdminForeignSess === "200/200/200",
+        `pin=${t88AdminForeignPin}, session=${t88AdminForeignSess}`
+      );
+      check(
+        "Issue #88 (Tech-lead): адмін бачить медіа власника та спільного/legacy-файлу",
+        t88AdminOwnA === "200/200/200" && t88AdminShared === "200/200/200",
+        `ownA=${t88AdminOwnA}, shared=${t88AdminShared}`
+      );
+
+      const t88BB = t88AuthHeaders(t88LoginB.cookie, t88PinB, t88TeacherB.id);
+      const t88TeacherBFar = await t88MediaTrio(t88BB, t88FileA.id);
+      const t88TeacherBOwn = await t88MediaTrio(t88BB, t88FileB.id);
+      const t88TeacherBShared = await t88MediaTrio(t88BB, fileId);
+      check(
+        "Issue #88 (Tech-lead): звичайний викладач лишається ізольованим від чужого простору",
+        t88TeacherBFar === "404/404/404",
+        `foreign=${t88TeacherBFar}`
+      );
+      check(
+        "Issue #88 (Tech-lead): звичайний викладач бачить власні та спільні медіа",
+        t88TeacherBOwn === "200/200/200" && t88TeacherBShared === "200/200/200",
+        `own=${t88TeacherBOwn}, shared=${t88TeacherBShared}`
       );
 
       // Підміна teacherId у тілі не дає доступу до чужого простору

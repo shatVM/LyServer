@@ -28,9 +28,15 @@ const stateService = require("../services/stateService");
  * @param {string} name — id/ім'я файлу з URL запиту
  * @param {boolean} isTeacher — медіа-ідентичність запиту (auth.mediaIdentity)
  * @param {string|null} teacherId — teacherId автентифікованого викладача (з сесії)
+ * @param {boolean} [isAdmin] — адміністратор (сесія access "admin" або PORTAL_PIN)
  * @returns {boolean} чи дозволити віддати медіа
  */
-function canViewMedia(name, isTeacher = false, teacherId = null) {
+function canViewMedia(name, isTeacher = false, teacherId = null, isAdmin = false) {
+  // Issue #88 (уточнення Tech-lead): адміністратор бачить медіа ВСІХ
+  // викладачів — оригінали, PNG-слайди й стан конвертації, включно з
+  // прихованими (підтвердження — регресійні тести в test.js). Нижче —
+  // правила для всіх інших ролей, вони не змінюються.
+  if (isAdmin) return true;
   if (isTeacher) {
     // Викладач бачить власні файли та shared/legacy файли (owner === null).
     // Чужі особисті файли (owner !== null і owner !== teacherId) заборонені.

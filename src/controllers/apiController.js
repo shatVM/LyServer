@@ -487,7 +487,7 @@ class ApiController {
     // Issue #63 (аудит кешування): відповідь про приватний ресурс не кешується
     res.set("Cache-Control", "no-store");
     const isTeacher = identity.isTeacher;
-    if (!canViewMedia(file, isTeacher, identity.teacherId)) {
+    if (!canViewMedia(file, isTeacher, identity.teacherId, identity.isAdmin)) {
       return res.status(404).json({ ready: false });
     }
     const manifest = slideService.getManifest(file);
