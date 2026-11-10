@@ -159,6 +159,9 @@ function connectSession(url, name) {
       id: 0,
       pending: new Map(),
       requests: [],
+      // Статуси HTTP-відповідей /api/auth/logout — перевірка успішного
+      // завершення запиту logout (Issue #88: Tech-lead просив окремо)
+      logoutStatuses: [],
       errors: { consoleErrors: [], exceptions: [], logErrors: [], loadingFailed: [] },
       // URL, для якого CDP-перехоплення Fetch відповідає 500 (тест помилки logout)
       fetchFail: null
@@ -178,6 +181,11 @@ function connectSession(url, name) {
       if (msg.method === "Network.requestWillBeSent") {
         // Журнал URL медіазапитів — для перевірки відсутності ?pin= (Issue #63)
         sess.requests.push(msg.params.request.url);
+      } else if (msg.method === "Network.responseReceived") {
+        const resp = msg.params.response;
+        if (resp && String(resp.url || "").includes("/api/auth/logout")) {
+          sess.logoutStatuses.push(resp.status);
+        }
       } else if (msg.method === "Runtime.consoleAPICalled" && msg.params.type === "error") {
         sess.errors.consoleErrors.push(msg.params.args.map((a) => a.value ?? a.description ?? "").join(" "));
       } else if (msg.method === "Runtime.exceptionThrown") {
@@ -961,18 +969,22 @@ async function main() {
     JSON.stringify(ad88Pages)
   );
 
-  // Реальний клік «Вийти»: чекаємо завершення logout і редіректу на головну.
-  // Поспішний редірект не чекає відповіді сервера (раніше робився одразу) —
-  // саме це фіксує очікування нижче
+  // Реальний клік «Вийти»: чекаємо успішного завершення запиту logout (HTTP 200)
+  // і переходу САМЕ на головну сторінку `/`. Поспішний редірект не чекає
+  // відповіді сервера (раніше робився одразу) — саме це фіксує очікування нижче
   const ad88OldCookie = await getSessionCookie(T);
   await evaluate(T, "document.getElementById('btnSwitchRole').click(); true;");
   const ad88Redirected = await waitFor(T,
-    `(location.pathname === "/" || location.pathname === "/materials") &&
+    `location.pathname === "/" &&
       ((document.getElementById("roleLabel") || {}).textContent || "").includes("Учень")`, 15000);
+  const ad88LogoutOk = T.logoutStatuses.includes(200);
   check(
-    "Issue #88 §4: клік «Вийти» (адмін) → logout завершено, редірект на головну, гість",
-    ad88Redirected,
-    "path=" + await evaluate(T, "location.pathname")
+    "Issue #88 §4: клік «Вийти» (адмін) → logout HTTP 200, точний URL /, гість",
+    ad88Redirected && ad88LogoutOk,
+    JSON.stringify({
+      path: await evaluate(T, "location.pathname"),
+      logoutStatuses: T.logoutStatuses
+    })
   );
 
   // Старий cookie після виходу відхиляється (session видалено на сервері)
@@ -1103,11 +1115,16 @@ async function main() {
   await clearFetchFail(T2);
   await evaluate(T2, "document.getElementById('btnSwitchRole').click(); true;");
   const t2Redirected = await waitFor(T2,
-    `(location.pathname === "/" || location.pathname === "/materials") &&
+    `location.pathname === "/" &&
       ((document.getElementById("roleLabel") || {}).textContent || "").includes("Учень")`, 15000);
+  const t2LogoutOk = T2.logoutStatuses.includes(200);
   check(
-    "Issue #88 §4: повтор виходу після помилки — logout успішний, редірект на головну",
-    t2Redirected, "path=" + await evaluate(T2, "location.pathname")
+    "Issue #88 §4: повтор виходу після помилки — logout HTTP 200, точний URL /",
+    t2Redirected && t2LogoutOk,
+    JSON.stringify({
+      path: await evaluate(T2, "location.pathname"),
+      logoutStatuses: T2.logoutStatuses
+    })
   );
   const t2OldState = await fetch(BASE + "/api/state", {
     headers: { Cookie: "ly_session=" + t2OldCookie }

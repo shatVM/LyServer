@@ -900,13 +900,17 @@ async function main() {
         jsSrc.includes("filesReady.finally(() => pollState(true));") &&
           jsSrc.includes("filesReady = refreshFiles();")
       );
-      // Регресія: маршрут /upload не видалено, корінь / перенаправляє на /materials
+      // Регресія: маршрут /upload не видалено; корінь / віддає сторінку
+      // самостійного перегляду БЕЗ перенаправлення — Issue #88: після
+      // успішного logout фінальна адреса має бути саме `/` (302 на /materials
+      // змінював її на клієнті)
       r = await fetch(base + "/upload");
       check("Issue #63 Е2: /upload залишається доступною", r.status === 200, `status=${r.status}`);
       r = await fetch(base + "/", { redirect: "manual" });
+      const rootHtml = await r.text();
       check(
-        "Issue #63 Е2: корінь / перенаправляє на /materials",
-        (r.status === 301 || r.status === 302) && r.headers.get("location") === "/materials",
+        "Issue #63 Е2/Issue #88: корінь / віддає сторінку матеріалів (200, без 302)",
+        r.status === 200 && rootHtml.includes('id="files"'),
         `status=${r.status}, location=${r.headers.get("location")}`
       );
 

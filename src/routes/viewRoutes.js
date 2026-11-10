@@ -1,6 +1,5 @@
 const express = require("express");
 const viewController = require("../controllers/viewController");
-const auth = require("../utils/auth");
 
 const router = express.Router();
 
@@ -16,11 +15,13 @@ const noStoreHtml = (req, res, next) => {
 };
 
 // Issue #63 (доробка §1): корінь веде на сторінку самостійного перегляду, а
-// викладача — одразу на «Демонстрацію» (подвійне перенаправлення зайве)
-router.get("/", noStoreHtml, (req, res) => {
-  const session = auth.readSession(req);
-  res.redirect(session && session.role === "teacher" ? "/demonstration" : "/materials");
-});
+// викладача — одразу на «Демонстрацію» (подвійне перенаправлення зайве).
+// Issue #88 (уточнення Tech-lead): для гостя/учня корінь РЕНДЕРИТЬ цю сторінку
+// без перенаправлення — після успішного logout клієнт робить
+// window.location.replace("/") і фінальна адреса має бути саме `/`
+// (раніше 302 на /materials змінював її). Логіку «викладач → /demonstration»
+// виконує той самий renderMaterials.
+router.get("/", noStoreHtml, (req, res) => viewController.renderMaterials(req, res));
 router.get("/materials", noStoreHtml, (req, res) => viewController.renderMaterials(req, res));
 router.get("/upload", noStoreHtml, (req, res) => viewController.renderUpload(req, res));
 router.get("/demonstration", noStoreHtml, (req, res) => viewController.renderDemonstration(req, res));
