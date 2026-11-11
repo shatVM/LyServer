@@ -25,9 +25,17 @@ class StateService {
       updated: Date.now()
     };
     // Issue #63 (доробка §3): чи файл був прихованим у момент старту показу.
-    // Потрібно, щоб відрізнити: "демонстрація прихованого матеріалу" (дозволено)
+    // Потрібно, щоб відрізнити: "демонстрація прихованого" (дозволено)
     // від "приховування матеріалу ПІД ЧАС показу" (заборонено для учнів).
     this.wasHiddenAtDemoStart = false;
+    // Issue #83 (уточнення власника 11-11-2026): стан автоперегортання
+    // «Вперед» для таймера учнів у смузі відповіді. seq зростає при кожному
+    // оновленні — клієнт застосовує лише новий знімок (опитування /api/state
+    // ~0,5 с не перезапускає локальний зворотний відлік). remainingMs — залишок
+    // у момент публікації: учень ставить локальний дедлайн при ОТРИМАННІ, тому
+    // синхронізація годинників між пристроями не потрібна (похибка ≤ затримка
+    // опитування). Окремо від shared: публікація не чіпає ревізію стану.
+    this.autoNext = { seq: 0, running: false, remainingMs: 0, totalMs: 0 };
   }
 
   getState() {
@@ -45,6 +53,10 @@ class StateService {
       ...this.shared,
       revision: this.revision
     };
+
+    // Issue #83 (таймер учнів): знімок автоперегортання — частина стану,
+    // яку опитують учні разом із демонстрацією (без окремого ендпоінту)
+    state.autoNext = this.autoNext;
 
     // Issue #63 (доробка §3): чи можна ЗАРАЗ показувати активний матеріал
     // учням. blocked = матеріал показу зараз прихований, але НЕ БУВ прихованим
@@ -90,6 +102,8 @@ class StateService {
     // отримують сигнали, надіслані для показу, що вже завершився (і автозупинка
     // при виході викладача проходить цей самий шлях)
     signalService.clearActive();
+    // Issue #83 (таймер учнів): зупинка показу зупиняє й відлік автоперегортання
+    this.autoNext = { seq: this.autoNext.seq + 1, running: false, remainingMs: 0, totalMs: 0 };
     this.revision++;
     return { ok: true, revision: this.revision, stopped: true };
   }
@@ -101,6 +115,13 @@ class StateService {
     // без перезавантаження; ревізія зростає, тому всі клієнти бачать зупинку.
     if (data && data.stop === true) {
       return this.stopShared();
+    }
+
+    // Issue #83 (таймер учнів): знімок автоперегортання публікується вчителем
+    // окремо від керування показом — змінює ЛИШЕ autoNext: без ревізії стану
+    // (інакше кожна фаза 15/30 с оновлювала б каталог учнів) і без syncSlide.
+    if (data && data.autoNext !== undefined) {
+      return this.updateAutoNext(data.autoNext);
     }
 
     if (data.file !== undefined) {
@@ -159,6 +180,42 @@ class StateService {
     return { ok: true, revision: this.revision };
   }
 
+  /**
+   * Issue #83 (таймер учнів): оновлення стану автоперегортання «Вперед»
+   * (POST /api/control { autoNext }). Валідація сувора: running — boolean;
+   * для роботи — залишок ≥ 0 і тривалість > 0 у мс. Скидання (running:false)
+   * завжди приймається. seq зростає при кожному прийнятті — клієнти
+   * застосовують лише нові знімки.
+   */
+  updateAutoNext(payload) {
+    const p = payload && typeof payload === "object" ? payload : null;
+    if (!p || typeof p.running !== "boolean") {
+      const error = new Error("Некоректний стан автоперегортання");
+      error.status = 400;
+      throw error;
+    }
+    const seq = this.autoNext.seq + 1;
+    if (!p.running) {
+      this.autoNext = { seq, running: false, remainingMs: 0, totalMs: 0 };
+      return { ok: true, seq };
+    }
+    const remainingMs = Number(p.remainingMs);
+    const totalMs = Number(p.totalMs);
+    if (!Number.isFinite(remainingMs) || remainingMs < 0 ||
+        !Number.isFinite(totalMs) || totalMs <= 0) {
+      const error = new Error("Некоректний час автоперегортання");
+      error.status = 400;
+      throw error;
+    }
+    this.autoNext = {
+      seq,
+      running: true,
+      remainingMs: Math.min(Math.round(remainingMs), 86400000),
+      totalMs: Math.min(Math.round(totalMs), 86400000)
+    };
+    return { ok: true, seq };
+  }
+
   resetIfFileMatches(filename) {
     if (this.shared.file === filename) {
       this.shared = {
@@ -174,6 +231,8 @@ class StateService {
       this.wasHiddenAtDemoStart = false;
       // Issue #79: матеріал показу зник/видалений — активні сигнали прибираємо
       signalService.clearActive();
+      // Issue #83 (таймер учнів): матеріал зник — відлік автоперегортання теж
+      this.autoNext = { seq: this.autoNext.seq + 1, running: false, remainingMs: 0, totalMs: 0 };
       this.revision++;
     }
   }

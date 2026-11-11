@@ -967,7 +967,7 @@ function renderTestAnswerBar() {
   bar.style.display = "";
 
   // Кнопки створюються лише при зміні кількості варіантів (інакше кожне
-  // опитування знищувало б фокус із натиснутої кнопки)
+  // опитування знищував би фокус із натиснутої кнопки)
   if (bar.dataset.options !== String(count)) {
     bar.dataset.options = String(count);
     bar.replaceChildren();
@@ -979,12 +979,94 @@ function renderTestAnswerBar() {
       btn.textContent = TESTING_VARIANT_LETTERS[i];
       bar.append(btn);
     }
+    // Таймер до авто-кліку «Вперед» праворуч від варіантів (уточнення
+    // власника 11-11-2026): створюється разом із кнопками — приховування
+    // смуги прибирає його разом зі вмістом (replaceChildren)
+    const timer = document.createElement("span");
+    timer.id = "testAnswerTimer";
+    timer.className = "test-answer-timer";
+    bar.append(timer);
   }
   for (const btn of bar.querySelectorAll(".test-answer-btn")) {
     const index = Number(btn.dataset.variant);
     const isSelected = index === selected;
     btn.classList.toggle("is-selected", isSelected);
     btn.setAttribute("aria-pressed", String(isSelected));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #83 (уточнення власника 11-11-2026): таймер до авто-кліку «Вперед»
+// у смузі відповіді учня. Знімок публікує модуль autoNext.js вчителя через
+// POST /api/control { autoNext }; учень застосовує ЛИШЕ новий seq (інакше
+// опитування /api/state ~0,5 с перезапускало б локальний дедлайн). Локальний
+// дедлайн = Date.now() + remainingMs у момент ОТРИМАННЯ — без синхронізації
+// годинників між пристроями (похибка ≤ затримка опитування ~0,5 с).
+// Смуга (#testAnswerBar) — індикатор: заливка прив'язана ліворуч
+// (--an-fill), права межа рухається ліворуч, колір від світло-зеленого
+// до світло-червоного за залишком часу (--an-color).
+// ---------------------------------------------------------------------------
+let autoNextSeq = -1;
+let autoNextDeadline = 0;
+let autoNextTotalMs = 1;
+let autoNextTimerId = null;
+
+/** Світло-зелений #90EE90 (144,238,144) → світло-червоний #F08080 (240,128,128) */
+function autoNextFillColor(frac) {
+  const green = [144, 238, 144];
+  const red = [240, 128, 128];
+  const c = green.map((v, i) => Math.round(red[i] + (v - red[i]) * frac));
+  return "rgb(" + c[0] + ", " + c[1] + ", " + c[2] + ")";
+}
+
+function clearAutoNextTimerUi() {
+  const bar = $("testAnswerBar");
+  if (bar) {
+    bar.style.removeProperty("--an-fill");
+    bar.style.removeProperty("--an-color");
+    bar.removeAttribute("data-autonext");
+  }
+  const timer = $("testAnswerTimer");
+  if (timer) timer.textContent = "";
+}
+
+/** 5 оновлень/сек — той самий кадр, що й таймер панелі вчителя */
+function tickAutoNextTimer() {
+  const bar = $("testAnswerBar");
+  if (!bar || !bar.getClientRects().length) return; // смуга прихована
+  const timer = $("testAnswerTimer");
+  if (!timer) return; // смугу перестворили — наступний тік знайде новий елемент
+  const remain = Math.max(0, autoNextDeadline - Date.now());
+  const frac = autoNextTotalMs > 0 ? Math.min(1, remain / autoNextTotalMs) : 0;
+  const remainSec = Math.ceil(remain / 1000);
+  timer.textContent =
+    String(Math.floor(remainSec / 60)).padStart(2, "0") + ":" +
+    String(remainSec % 60).padStart(2, "0");
+  bar.style.setProperty("--an-fill", (frac * 100).toFixed(2) + "%");
+  bar.style.setProperty("--an-color", autoNextFillColor(frac));
+  bar.setAttribute("data-autonext", "on");
+}
+
+function applyAutoNextState(snap) {
+  if (!snap || typeof snap.seq !== "number" || snap.seq === autoNextSeq) return;
+  autoNextSeq = snap.seq;
+  if (snap.running) {
+    const remaining = Number(snap.remainingMs);
+    const total = Number(snap.totalMs);
+    autoNextDeadline = Date.now() +
+      (Number.isFinite(remaining) && remaining > 0 ? remaining : 0);
+    autoNextTotalMs = Number.isFinite(total) && total > 0 ? total : 1;
+    if (autoNextTimerId === null) {
+      autoNextTimerId = setInterval(tickAutoNextTimer, 200);
+    }
+    tickAutoNextTimer();
+  } else {
+    if (autoNextTimerId !== null) {
+      clearInterval(autoNextTimerId);
+      autoNextTimerId = null;
+    }
+    autoNextDeadline = 0;
+    clearAutoNextTimerUi();
   }
 }
 
@@ -2842,6 +2924,9 @@ async function pollStateCore(force = false) {
     // «!state.file» тут не повертаємось, тому панель оновиться і на зупинці)
     applyTestingState(state.testing);
     updateViewerTestBadge();
+    // Issue #83 (таймер учнів): знімок автоперегортання для зворотного
+    // відліку в смузі відповіді (тільки новий seq змінює локальний дедлайн)
+    applyAutoNextState(state.autoNext);
 
     // Issue #75: розгорнутий режим показу на пристрої учня — за тим самим
     // серверним станом (початок показу розгортає, зупинка повертає звичайний

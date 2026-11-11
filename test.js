@@ -1923,6 +1923,20 @@ async function main() {
           t83AutoJs.includes("allOnlineAnswered")
       );
       check(
+        "Issue #83 таймер: публікація autoNext, стан на сервері, рендер учня і CSS",
+        t83AutoJs.includes("publishAutoNext") &&
+          t83AutoJs.includes("autoNext:") &&
+          t83StateSrc.includes("updateAutoNext") &&
+          t83StateSrc.includes("state.autoNext = this.autoNext") &&
+          t83StateSrc.includes("autoNext.seq + 1") &&
+          t83Js.includes("applyAutoNextState") &&
+          t83Js.includes("testAnswerTimer") &&
+          t83Js.includes("--an-fill") &&
+          t83Css.includes(".test-answer-timer") &&
+          t83Css.includes("--an-fill") &&
+          t83Css.includes('data-autonext="on"')
+      );
+      check(
         "Issue #83: панель автоперегортання — лише всередині блоку «Тестування» (не в «Учні»)",
         autoNextIdx > studentsEndIdx &&
           studentsIdx !== -1 &&
@@ -2048,6 +2062,41 @@ async function main() {
           t83StudentState.testing.answers === undefined &&
           t83StudentState.testing.histogram === undefined,
         JSON.stringify(t83StudentState.testing)
+      );
+
+      // --- Таймер учнів: публікація знімка автоперегортання вчителем ---
+      r = await fetch(`${base}/api/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, autoNext: { running: true, remainingMs: 30000, totalMs: 30000 } })
+      });
+      const t83AnPublish = await r.json();
+      let t83AnState = await (await fetch(base + "/api/state", { headers: tSess() })).json();
+      check(
+        "Issue #83 таймер: публікація autoNext → state.autoNext (running, seq, залишок)",
+        r.status === 200 && t83AnPublish.ok === true &&
+          Boolean(t83AnState.autoNext) && t83AnState.autoNext.running === true &&
+          t83AnState.autoNext.remainingMs === 30000 && t83AnState.autoNext.totalMs === 30000 &&
+          typeof t83AnState.autoNext.seq === "number" && t83AnState.autoNext.seq > 0,
+        `status=${r.status}, publish=${JSON.stringify(t83AnPublish)}, state=${JSON.stringify(t83AnState.autoNext)}`
+      );
+      r = await fetch(`${base}/api/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, autoNext: { running: true, remainingMs: -5, totalMs: 0 } })
+      });
+      const t83AnBad = r.status;
+      r = await fetch(`${base}/api/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, autoNext: { running: false } })
+      });
+      t83AnState = await (await fetch(base + "/api/state", { headers: tSess() })).json();
+      check(
+        "Issue #83 таймер: некоректний знімок → 400, скидання running:false приймається",
+        t83AnBad === 400 && r.status === 200 &&
+          Boolean(t83AnState.autoNext) && t83AnState.autoNext.running === false,
+        `bad=${t83AnBad}, reset=${r.status}, state=${JSON.stringify(t83AnState.autoNext)}`
       );
 
       // --- Відповідь першого учня (сесія уже прив'язана до s_test_1) ---
@@ -2204,6 +2253,13 @@ async function main() {
       );
 
       // --- Зупинка показу НЕ знищує вказівник і результати останнього запитання ---
+      // Таймер учнів: перед зупинкою публікуємо «працює» — скидання показу
+      // має прибрати й відлік автоперегортання (stateService.stopShared)
+      await fetch(`${base}/api/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: PIN, autoNext: { running: true, remainingMs: 15000, totalMs: 15000 } })
+      });
       await fetch(`${base}/api/control`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2212,13 +2268,14 @@ async function main() {
       const t83Stopped = await (await fetch(base + "/api/state", { headers: tSess() })).json();
       const t83StoppedStudent = await (await fetch(base + "/api/state", { headers: sess() })).json();
       check(
-        "Issue #83: після зупинки показу запитання та відповіді збережені",
+        "Issue #83: після зупинки показу запитання та відповіді збережені, таймер скинуто",
         t83Stopped.file === "" &&
           Boolean(t83Stopped.testing.question) && t83Stopped.testing.question.page === 2 &&
           (t83Stopped.testing.histogram || []).join(",") === "0,1,1,0" &&
           t83StoppedStudent.testing.accepting === false &&
-          t83StoppedStudent.testing.yourAnswer === 2,
-        JSON.stringify({ teacher: t83Stopped.testing, student: t83StoppedStudent.testing })
+          t83StoppedStudent.testing.yourAnswer === 2 &&
+          Boolean(t83Stopped.autoNext) && t83Stopped.autoNext.running === false,
+        JSON.stringify({ teacher: t83Stopped.testing, student: t83StoppedStudent.testing, autoNext: t83Stopped.autoNext })
       );
 
       // --- Нове тестування: попередні відповіді очищаються (3 варіанти) ---

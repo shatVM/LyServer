@@ -27,6 +27,12 @@
  * фаз. Спрацювання — один раз на запитання (прапорець firedKey), щоб повернення
  * на вже відповідне запитання не клацало поспіль. Діє ЛИШЕ за статусу
  * «ПРАЦЮЄ»; СТОП — повна зупинка, як і раніше.
+ *
+ * Таймер учня (уточнення власника 11-11-2026): на кожній зміні фази та при
+ * зупинці модуль публікує знімок стану (POST /api/control { autoNext }) —
+ * учні бачать зворотний відлік і заливку смуги у смузі відповіді. Публікація
+ * з keepalive, щоб СТОП дійшов під час закриття вкладки; помилки мовчазні —
+ * таймер вчителя від публікації не залежить.
  */
 (function () {
   "use strict";
@@ -219,10 +225,40 @@
     if (stopBtn) stopBtn.disabled = !running;
   }
 
+  /**
+   * Публікація знімка автоперегортання для таймера учнів. Тіло дзеркалить
+   * postControl (pin/teacherId у тілі), keepalive — щоб публікація СТОП
+   * дійшла при закритті вкладки. Помилки мовчазні: публікація — лише
+   * візуальний канал, сам таймер вчителя від неї не залежить.
+   */
+  function publishAutoNext(running, remainingMs, totalMs) {
+    try {
+      const body = {
+        autoNext: {
+          running: Boolean(running),
+          remainingMs: Math.max(0, Math.round(remainingMs || 0)),
+          totalMs: Math.max(0, Math.round(totalMs || 0))
+        }
+      };
+      try {
+        if (typeof pin !== "undefined" && pin) body.pin = pin;
+        if (typeof teacherId !== "undefined" && teacherId) body.teacherId = teacherId;
+      } catch (e) { /* app.js ще не завантажився — запит без PIN отримає 403 */ }
+      fetch("/api/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        keepalive: true,
+        body: JSON.stringify(body)
+      }).catch(() => {});
+    } catch (e) { /* silent */ }
+  }
+
   /** Запланувати поточний інтервал: значення читається ЗАРАЗ (тільки для наступного) */
   function schedulePhase() {
-    deadline = Date.now() + readLenient(nextPhase) * 1000;
+    const totalMs = readLenient(nextPhase) * 1000;
+    deadline = Date.now() + totalMs;
     renderTimer();
+    publishAutoNext(true, totalMs, totalMs); // таймер учнів: фаза розпочата
   }
 
   function tick() {
@@ -268,6 +304,7 @@
     setStatus("ЗУПИНЕНО");
     renderButtons();
     setMessage(message || "");
+    publishAutoNext(false, 0, 0); // таймер учнів: відлік зупинено
   }
 
   function start() {

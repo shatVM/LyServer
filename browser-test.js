@@ -1282,7 +1282,30 @@ async function main() {
     `(() => { const b = [...document.querySelectorAll('#testAnswerBar .test-answer-btn')]` +
     `.find(x => x.textContent.trim() === 'Б'); if (b) b.click(); return !!b; })()`);
   const an810One = await waitFor(T, `${t83HistExpr} === '0,1,0,0'`, 10000);
-  await delay(3000);
+  // Таймер учня (S1) у смузі відповіді: текст відліку, смуга-заливка
+  // зменшується (права межа рухається ліворуч), колір світло-зелений,
+  // елемент праворуч від кнопок — інтервал 60 с, режим «ПРАЦЮЄ»
+  const an810TimerExpr =
+    `(() => { const t = document.getElementById('testAnswerTimer');` +
+    ` const bar = document.getElementById('testAnswerBar');` +
+    ` if (!t || !bar || !bar.getClientRects().length) return null;` +
+    ` const btns = bar.querySelectorAll('.test-answer-btn');` +
+    ` const last = btns[btns.length - 1];` +
+    ` const fill = getComputedStyle(bar, '::before');` +
+    ` const rgb = (fill.backgroundColor.match(/\\d+/g) || []).map(Number);` +
+    ` return { text: t.textContent.trim(),` +
+    `   rightOfBtns: !!last && t.getBoundingClientRect().left > last.getBoundingClientRect().right + 4,` +
+    `   fillW: parseFloat(fill.width) || 0, greenish: rgb.length >= 3 && rgb[1] > rgb[0] }; })()`;
+  const an810T1 = await evaluate(S1, an810TimerExpr);
+  await delay(1500);
+  const an810T2 = await evaluate(S1, an810TimerExpr);
+  const an810TimerOk = Boolean(an810T1 && an810T2) &&
+    /^\d{2}:\d{2}$/.test(an810T1.text) && an810T1.text !== "00:00" &&
+    an810T1.rightOfBtns && an810T1.fillW > 10 && an810T1.greenish &&
+    an810T2.text !== an810T1.text && an810T2.fillW < an810T1.fillW;
+  check("Сценарій 8: таймер учня — відлік, заливка смуги зменшується, світло-зелений, праворуч від кнопок",
+    an810TimerOk, JSON.stringify({ an810T1, an810T2 }));
+  await delay(1500); // разом ~3 с без переходу (негатив: 1 відповідь із 2)
   const an810Still = (await apiState()).page === 2;
   check("Сценарій 8: ранній клік — відповів один із двох: переходу немає (інтервал 60 с)",
     an810Ctl === 200 && an810Demo && an810Page1 && an810Synced && an810Opt4 &&
@@ -1312,13 +1335,25 @@ async function main() {
     an810S2Bar && an810Eq && an810Early && an810Ms < 15000 && an810Run,
     JSON.stringify({ an810S2Bar, an810Eq, an810Early, an810Ms, an810Run }));
   // Прибирання: СТОП і ручне завершення — автоперегортання не лишається
-  // «ПРАЦЮЄ», тестування — у статусі finished для подальших сценаріїв
+  // «ПРАЦЮЄ», тестування — у статусі finished для подальших сценаріїв;
+  // СТОП публікує running:false — серверний знімок таймера теж скидається
+  const an810AnBefore = (await apiState()).autoNext || { seq: -1 };
   await evaluate(T, `document.getElementById('autoNextStopBtn').click(); true;`);
   await evaluate(T, `document.getElementById('testToggleBtn').click(); true;`);
   const an810Finished = await waitFor(T,
     `/Нове тестування/.test(document.getElementById('testToggleBtn').textContent)`, 10000);
-  check("Сценарій 8: після раннього кліку — СТОП і ручне завершення тестування",
-    an810Finished, "an810Finished=" + an810Finished);
+  let an810AnOff = false;
+  for (let i = 0; i < 25; i += 1) {
+    const snap = (await apiState()).autoNext;
+    if (snap && snap.running === false && snap.seq > an810AnBefore.seq) {
+      an810AnOff = true;
+      break;
+    }
+    await delay(200);
+  }
+  check("Сценарій 8: після раннього кліку — СТОП і ручне завершення тестування, autoNext скинуто",
+    an810Finished && an810AnOff,
+    JSON.stringify({ an810Finished, an810AnOff, an810SeqBefore: an810AnBefore.seq }));
 
   // Прибирання сценарію 8: показ зупинено (файл видаляється у net-zero нижче)
   await evaluate(T, "document.getElementById('stopDemo').click(); true;");
