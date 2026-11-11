@@ -25,7 +25,7 @@
       <div id="pdfControls" class="row pdf-controls" style="display:none">
         <button id="prevPage" class="secondary btn-sm">← Попередня</button>
         <span id="pageLabel" class="hint">Сторінка 1</span>
-        <button id="nextPage" class="secondary btn-sm">Наступна →</button>
+        <button id="nextPage" class="secondary btn-sm" data-auto-next>Наступна →</button>
         <input id="pageInput" class="page-input" type="number" min="1" step="1" inputmode="numeric" placeholder="№">
         <button id="gotoPage" class="secondary btn-sm">Перейти</button>
       </div>
@@ -46,3 +46,11 @@
 
 <!-- Issue #19: список учнів окремим блоком (нижче основного вмісту) -->
 {{> studentsBlock}}
+
+<!-- Issue #83 (уточнення): блок «Тестування» — окремий самостійний розділ,
+     не вкладений у блок «Учні» (для вчителя ця сторінка перенаправляється
+     на «Демонстрацію», блок лишається тут для рівності розмітки) -->
+{{> testingBlock}}
+
+<!-- Issue #83 (уточнення): модуль автоперегортання «Вперед» -->
+<script src="/js/autoNext.js"></script>

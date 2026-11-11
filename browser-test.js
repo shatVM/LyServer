@@ -3,7 +3,7 @@
  *
  * Запуск:  npm run test:browser      (або: node browser-test.js)
  *
- * Що перевіряє (7 обов'язкових сценаріїв + перевірка передачі PIN), Issue #63
+ * Що перевіряє (9 обов'язкових сценаріїв + перевірка передачі PIN), Issue #63
  * (Етап 5 і доробка — доступ учнів, PIN і кеш медіа):
  *   Сценарій 0 — самостійний перегляд: у ролі «учень» каталог відкритий, але
  *     ЛИШЕ опублікованими матеріалами (картки в розмітці та /api/files 200;
@@ -26,6 +26,14 @@
  *   Сценарій 6 — приховування/публікація оновлюють каталог учня БЕЗ
  *     перезавантаження; після перемикання показу медіа прихованого матеріалу
  *     закривається, активна демонстрація для учнів не переривається;
+ *   Сценарій 7 — тестування під час демонстрації (Issue #83): старт приймання,
+ *     відповіді обох учнів, гістограма, автозачинення, ручне завершення;
+ *   Сценарій 8 — автоперегортання «Вперед» (Issue #83, уточнення Tech-lead):
+ *     окремий блок «Тестування» поза блоком «Учні», панель із СТАРТ/СТОП,
+ *     реальний цикл 30/15 с (миттєвий перший перехід, чергування інтервалів,
+ *     таймер), короткі інтервали 1/2 с із редагуванням «на льоту», незалежність
+ *     від блоку «Учні», зупинка при приховуванні блока/відсутній кнопці/переході
+ *     на іншу сторінку;
  *   PIN/URL  — медіа-запити викладача не містять ?pin= (HttpOnly cookie),
  *     cookie не авторизує API керування, скасовується при виході викладача,
  *     підроблена cookie не дає доступу.
@@ -52,6 +60,7 @@ const TMP = path.join(os.tmpdir(), "lyserver-browser-test-" + process.pid);
 
 const TEST_MEDIA = "BT тест опубліковане.wav"; // опублікований матеріал
 const TEST_HIDDEN = "BT тест приховане.pdf"; // прихований матеріал
+const TEST_SLIDES = "BT тест слайди.pdf"; // 4-сторінковий PDF для автоперегортання
 
 // --------------------------- пошук Chrome/Chromium --------------------------
 function findChrome() {
@@ -129,6 +138,28 @@ const TINY_PDF = Buffer.from(
 );
 const TINY_PDF_BODY = new ArrayBuffer(TINY_PDF.length);
 new Uint8Array(TINY_PDF_BODY).set(TINY_PDF);
+
+// Мінімальний валідний PDF на 4 сторінки — фікстура для тесту автоперегортання
+// (Issue #83): потрібні щонайменше три переходи «Вперед» (1→2→3→4), тож реальний
+// цикл 30/15 с встигає прогнатися без підпирання кінця документа
+function fourPagePdf() {
+  const kids = [3, 5, 7, 9].map((n) => n + " 0 R").join(" ");
+  let body = "%PDF-1.4\n";
+  body += "1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n";
+  body += "2 0 obj << /Type /Pages /Kids [" + kids + "] /Count 4 >> endobj\n";
+  for (let i = 0; i < 4; i++) {
+    const pageNum = 3 + i * 2;
+    const contentNum = pageNum + 1;
+    const stream = "BT /F1 24 Tf 72 720 Td (Page " + (i + 1) + ") Tj ET";
+    body += pageNum + " 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
+      "/Contents " + contentNum + " 0 R /Resources << /Font << /F1 11 0 R >> >> >> endobj\n";
+    body += contentNum + " 0 obj << /Length " + stream.length + " >> stream\n" +
+      stream + "\nendstream endobj\n";
+  }
+  body += "11 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n";
+  body += "trailer << /Root 1 0 R >>\n%%EOF\n";
+  return Buffer.from(body, "ascii");
+}
 
 // --------------------------- утиліти перевірок -----------------------------
 const results = [];
@@ -460,7 +491,7 @@ async function main() {
   // (старій) картці, а перевірка стану чекає id нового файлу — показ
   // «не стартує». Прибираємо залишки ДО фіксації базового стану метаданих.
   const staleLeftovers = (await apiTeacherFiles())
-    .filter((f) => f.name === TEST_MEDIA || f.name === TEST_HIDDEN);
+    .filter((f) => f.name === TEST_MEDIA || f.name === TEST_HIDDEN || f.name === TEST_SLIDES);
   for (const f of staleLeftovers) {
     await fetch(BASE + "/api/files/delete", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -468,7 +499,7 @@ async function main() {
     });
   }
   const staleAfter = (await apiTeacherFiles())
-    .filter((f) => f.name === TEST_MEDIA || f.name === TEST_HIDDEN);
+    .filter((f) => f.name === TEST_MEDIA || f.name === TEST_HIDDEN || f.name === TEST_SLIDES);
   check("Залишки тестових файлів попередніх прогонів прибрано (net-zero)",
     staleAfter.length === 0,
     JSON.stringify(staleLeftovers.map((f) => f.id)));
@@ -920,6 +951,17 @@ async function main() {
     ` return letters.includes('Б') && letters.includes('В'); })()`, 10000);
   check("Сценарій 7: вчитель бачить гістограму (0,1,1,0) і вибір кожного учня поруч з ім'ям",
     t83Hist && t83Labels, JSON.stringify({ t83Hist, t83Labels }));
+  // Кольорове заповнення смуги: у Б count=1 → ширина > 0 і фон #185ba5
+  // (спан inline ігнорував width/height — фікс display:block, доповідь власника)
+  const t83Fill = await waitFor(T,
+    `(() => { const row = [...document.querySelectorAll('#testHistogram .test-hist-row')]` +
+    `.find(r => (r.querySelector('.test-hist-label') || {}).textContent.trim() === 'Б');` +
+    ` if (!row) return false; const bar = row.querySelector('.test-hist-bar');` +
+    ` if (!bar) return false;` +
+    ` return bar.getBoundingClientRect().width > 4 &&` +
+    ` getComputedStyle(bar).backgroundColor === 'rgb(24, 91, 165)'; })()`, 10000);
+  check("Сценарій 7: гістограма — кольорове заповнення смуги видиме (width>0, фон #185ba5)",
+    t83Fill, "t83Fill=" + t83Fill);
 
   // 7.6 Слайд-відповідь (непарний): приймання зачиняється, у учня на глядачі
   //     видно його вибір (бейдж), гістограма вчителя не змінюється
@@ -967,6 +1009,320 @@ async function main() {
       /слайд 2/.test(document.getElementById('testStatus').textContent)`, 10000);
   check("Сценарій 7: після зупинки показу вчитель бачить результати останнього запитання",
     t83Stopped && t83AfterStop, JSON.stringify({ t83Stopped, t83AfterStop }));
+
+  // ---------------- Сценарій 8: автоперегортання «Вперед» (Issue #83) -------
+  // Уточнення Tech-lead (коментар 6767853101): блок «Тестування» — окремий
+  // самостійний розділ поза блоком «Учні»; панель СТАРТ/СТОП/інтервали/таймер —
+  // усередині нього. Реальний цикл 30/15 с (перший перехід миттєвий) + короткі
+  // інтервали 1/2 с для чергування, редагування «на льоту» та зупинок.
+
+  // 8.1 Фікстура: 4-сторінковий PDF → PNG-слайди (потрібні 3 переходи «Вперед»)
+  const upSlides = await fetch(BASE + "/api/upload?name=" + encodeURIComponent(TEST_SLIDES), {
+    method: "POST",
+    headers: { "X-Portal-Pin": PIN, "Content-Type": "application/octet-stream" },
+    body: fourPagePdf()
+  });
+  const slidesData = upSlides.status === 201 ? await upSlides.json() : {};
+  const slideId = slidesData.id || "";
+  let slidesReady = false;
+  for (let i = 0; i < 60 && !slidesReady; i++) {
+    const info = await (await fetch(BASE + "/api/slides/info?file=" + encodeURIComponent(slideId),
+      { headers: { "X-Portal-Pin": PIN } })).json();
+    if (info && info.ready && info.pageCount >= 4) slidesReady = true;
+    else if (info && info.failed) break;
+    else await delay(500);
+  }
+  check("Сценарій 8: 4-сторінковий PDF завантажено й сконвертовано у слайди",
+    upSlides.status === 201 && Boolean(slideId) && slidesReady,
+    JSON.stringify({ status: upSlides.status, slideId, slidesReady }));
+
+  // 8.2 Показ і структура: блок «Тестування» окремий, панель один раз і на місці.
+  // Фікстуру завантажено HTTP-запитом ПОЗА браузером — сторінка викладача про
+  // це не знає, тому каталог оновлюємо кнопкою «🔄 Оновити» і чекаємо картку
+  const an8Refreshed = await evaluate(T,
+    `(() => { const b = document.getElementById('refresh'); if (b) b.click(); return !!b; })()`);
+  const an8CardShown = await waitFor(T, `!!(${cardExpr(TEST_SLIDES)})`, 10000);
+  const an8DemoClicked = await teacherAction(T, TEST_SLIDES, "Показувати всім");
+  const an8DemoStarted = await waitDemoFile(slideId, true);
+  const an8SlideShown = await waitFor(T, mediaExpr("slide"), 20000);
+  const an8Struct = await evaluate(T, `(() => ({
+    testing: !!document.getElementById('testingBlock'),
+    standalone: !document.querySelector('#studentsSideBlock #testingBlock') &&
+      !document.querySelector('#studentsSideBlock #testPanel'),
+    single: document.querySelectorAll('#testingBlock').length === 1 &&
+      document.querySelectorAll('#autoNextPanel').length === 1,
+    panelVisible: (() => { const el = document.getElementById('testingBlock');
+      return !!el && el.getClientRects().length > 0; })(),
+    defaults: document.getElementById('autoNextInterval1').value === '30' &&
+      document.getElementById('autoNextInterval2').value === '15',
+    stopped: document.getElementById('autoNextStatus').textContent.trim() === 'ЗУПИНЕНО' &&
+      document.getElementById('autoNextTimer').textContent.trim() === '00:00' &&
+      document.getElementById('autoNextStartBtn').disabled === false &&
+      document.getElementById('autoNextStopBtn').disabled === true,
+    nextAttr: document.getElementById('nextPage').hasAttribute('data-auto-next')
+  }))()`);
+  const an8StudentHidden = await waitFor(S1,
+    `(() => { const el = document.getElementById('testingBlock');` +
+    ` return !!el && el.getClientRects().length === 0; })() && window.__mark === 42`, 10000);
+  // Клієнт має знати кількість сторінок (demoPageCount = 4) до першого переходу:
+  // інакше navigateSlide підіб'є номер сторінки до 1 і «Вперед» нічого не змінить
+  const an8PageCount4 = await waitFor(T,
+    `typeof demoPageCount !== 'undefined' && demoPageCount >= 4`, 10000);
+  check("Сценарій 8: блок «Тестування» окремий від «Учнів», панель один раз, 30/15, ЗУПИНЕНО, data-auto-next, учневі не видно",
+    an8Refreshed && an8CardShown && an8DemoClicked && an8DemoStarted && an8SlideShown &&
+      an8PageCount4 &&
+      an8Struct.testing && an8Struct.standalone && an8Struct.single &&
+      an8Struct.panelVisible && an8Struct.defaults && an8Struct.stopped && an8Struct.nextAttr &&
+      an8StudentHidden,
+    JSON.stringify({ an8Refreshed, an8CardShown, an8DemoClicked, an8DemoStarted, an8SlideShown, an8PageCount4, an8Struct, an8StudentHidden }));
+
+  // 8.3 Лічильник реальних натискань кнопки «Вперед»: обгортка методу click —
+  // саме так autoNext.js і викликає кнопку (без координат і емуляції курсора)
+  const an8Instrumented = await evaluate(T,
+    `(() => { window.__an8Clicks = [];` +
+    ` const b = document.getElementById('nextPage');` +
+    ` if (!b || b.__an8Wrapped) return false;` +
+    ` const orig = b.click;` +
+    ` b.click = function () { window.__an8Clicks.push(Date.now()); return orig.apply(this, arguments); };` +
+    ` b.__an8Wrapped = true; return true; })()`);
+  const an8ClickCount = () => evaluate(T, `(window.__an8Clicks || []).length`);
+  const an8ClickTimes = () => evaluate(T, `window.__an8Clicks || []`);
+  const waitStatePage = async (page, timeoutMs = 10000) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      const s = await apiState();
+      if (s.page === page) return true;
+      await delay(150);
+    }
+    return false;
+  };
+
+  // 8.4 Реальний цикл 30/15 с: миттєвий перший перехід, потім ~30 с і ~15 с
+  await evaluate(T, `document.getElementById('autoNextStartBtn').click(); true;`);
+  const an8Immediate = await waitStatePage(2, 6000);
+  const an8CountAfterStart = await an8ClickCount();
+  // Подвійне натискання СТАРТ під час роботи — без ефекту (захист + disabled)
+  await evaluate(T,
+    `document.getElementById('autoNextStartBtn').click();` +
+    ` document.getElementById('autoNextStartBtn').click(); true;`);
+  await delay(1500);
+  const an8CountNoDouble = await an8ClickCount();
+  const an8StatusRun = await evaluate(T,
+    `document.getElementById('autoNextStatus').textContent.trim() === 'ПРАЦЮЄ' &&
+     document.getElementById('autoNextStartBtn').disabled === true &&
+     document.getElementById('autoNextStopBtn').disabled === false &&
+     /^\\d\\d:\\d\\d$/.test(document.getElementById('autoNextTimer').textContent.trim())`);
+  check("Сценарій 8: СТАРТ → миттєвий перехід 1→2, ПРАЦЮЄ/таймер, подвійний СТАРТ без ефекту, до 30 с — один перехід",
+    an8Instrumented && an8Immediate && an8CountAfterStart === 1 &&
+      an8CountNoDouble === 1 && an8StatusRun,
+    JSON.stringify({ an8Instrumented, an8Immediate, an8CountAfterStart, an8CountNoDouble, an8StatusRun }));
+
+  const an8Got2 = await waitFor(T, `(window.__an8Clicks || []).length >= 2`, 36000);
+  const an8Got3 = await waitFor(T, `(window.__an8Clicks || []).length >= 3`, 22000);
+  const an8Times = await an8ClickTimes();
+  const an8Gap1 = an8Times.length >= 2 ? an8Times[1] - an8Times[0] : -1;
+  const an8Gap2 = an8Times.length >= 3 ? an8Times[2] - an8Times[1] : -1;
+  const an8Page4 = await waitStatePage(4, 5000);
+  check("Сценарій 8: реальний цикл — другий перехід через ~30 с, третій через ~15 с, сторінки 1→2→3→4",
+    an8Got2 && an8Got3 && an8Gap1 >= 29000 && an8Gap1 <= 34000 &&
+      an8Gap2 >= 14000 && an8Gap2 <= 19000 && an8Page4,
+    JSON.stringify({ an8Got2, an8Got3, an8Gap1, an8Gap2, an8Page4 }));
+
+  // СТОП: 00:00, ЗУПИНЕНО, СТАРТ знову доступний, жодного додаткового переходу
+  await evaluate(T, `document.getElementById('autoNextStopBtn').click(); true;`);
+  await delay(500);
+  const an8CountAtStop = await an8ClickCount();
+  await delay(3500);
+  const an8CountAfterStop = await an8ClickCount();
+  const an8StoppedUi = await evaluate(T,
+    `document.getElementById('autoNextStatus').textContent.trim() === 'ЗУПИНЕНО' &&
+     document.getElementById('autoNextTimer').textContent.trim() === '00:00' &&
+     document.getElementById('autoNextStartBtn').disabled === false &&
+     document.getElementById('autoNextStopBtn').disabled === true`);
+  check("Сценарій 8: СТОП — 00:00, ЗУПИНЕНО, СТАРТ доступний, додаткових натискань немає",
+    an8CountAfterStop === an8CountAtStop && an8StoppedUi,
+    JSON.stringify({ an8CountAtStop, an8CountAfterStop, an8StoppedUi }));
+
+  // 8.5 Короткі інтервали: 1/2 с чергуються; зміна інтервалу 1 (1→4 с) під
+  // час роботи застосовується до НАСТУПНОГО інтервалу 1, цикл не перезапускається
+  await evaluate(T,
+    `document.getElementById('autoNextInterval1').value = '1';` +
+    ` document.getElementById('autoNextInterval2').value = '2';` +
+    ` window.__an8Clicks = []; true;`);
+  await evaluate(T, `document.getElementById('autoNextStartBtn').click(); true;`);
+  const an8Sgot4 = await waitFor(T, `(window.__an8Clicks || []).length >= 4`, 15000);
+  await evaluate(T, `document.getElementById('autoNextInterval1').value = '4'; true;`);
+  const an8Sgot6 = await waitFor(T, `(window.__an8Clicks || []).length >= 6`, 14000);
+  const an8Stimes = await an8ClickTimes();
+  const an8Sg = [];
+  for (let i = 1; i < an8Stimes.length && an8Sg.length < 5; i++) an8Sg.push(an8Stimes[i] - an8Stimes[i - 1]);
+  check("Сценарій 8: інтервали 1/2 с чергуються; зміна 1→4 с застосовується до наступного інтервалу",
+    an8Sgot4 && an8Sgot6 && an8Sg.length >= 5 &&
+      an8Sg[0] >= 800 && an8Sg[0] <= 1600 &&
+      an8Sg[1] >= 1800 && an8Sg[1] <= 2600 &&
+      an8Sg[2] >= 800 && an8Sg[2] <= 1600 &&
+      an8Sg[3] >= 1800 && an8Sg[3] <= 2600 &&
+      an8Sg[4] >= 3500 && an8Sg[4] <= 5000,
+    JSON.stringify({ an8Sgot4, an8Sgot6, an8Sg }));
+
+  // 8.6 Незалежність від блоку «Учні»: ховаємо/повертаємо його під час роботи
+  const an8CountBeforeHide = await an8ClickCount();
+  await evaluate(T, `document.getElementById('studentsSideBlock').style.display = 'none'; true;`);
+  await delay(4000);
+  const an8CountAfterHide = await an8ClickCount();
+  const an8StillRun = await evaluate(T,
+    `document.getElementById('autoNextStatus').textContent.trim() === 'ПРАЦЮЄ' &&
+     document.getElementById('testingBlock').getClientRects().length > 0`);
+  await evaluate(T, `document.getElementById('studentsSideBlock').style.display = ''; true;`);
+  check("Сценарій 8: приховування блоку «Учні» не впливає на автоперегортання",
+    an8CountAfterHide > an8CountBeforeHide && an8StillRun,
+    JSON.stringify({ an8CountBeforeHide, an8CountAfterHide, an8StillRun }));
+
+  // 8.7 Приховування блоку «Тестування» — негайна безпечна зупинка
+  await evaluate(T, `document.getElementById('testingBlock').style.display = 'none'; true;`);
+  const an8CloseStopped = await waitFor(T,
+    `document.getElementById('autoNextStatus').textContent.trim() === 'ЗУПИНЕНО' &&
+     document.getElementById('autoNextTimer').textContent.trim() === '00:00' &&
+     /закрито/i.test(document.getElementById('autoNextMessage').textContent)`, 5000);
+  const an8CountAtClose = await an8ClickCount();
+  await delay(3000);
+  const an8CountAfterClose = await an8ClickCount();
+  await evaluate(T, `document.getElementById('testingBlock').style.display = ''; true;`);
+  check("Сценарій 8: приховування блоку «Тестування» — миттєва зупинка з повідомленням, переходів більше немає",
+    an8CloseStopped && an8CountAfterClose === an8CountAtClose,
+    JSON.stringify({ an8CloseStopped, an8CountAtClose, an8CountAfterClose }));
+
+  // 8.8 Кнопка «Вперед» недоступна — без натискань, зрозуміле повідомлення
+  await evaluate(T,
+    `document.getElementById('nextPage').style.display = 'none';` +
+    ` window.__an8Clicks = []; true;`);
+  await evaluate(T, `document.getElementById('autoNextStartBtn').click(); true;`);
+  await delay(2000);
+  const an8NoBtn = await evaluate(T,
+    `document.getElementById('autoNextStatus').textContent.trim() === 'ЗУПИНЕНО' &&
+     /не знайдено або вона недоступна/.test(document.getElementById('autoNextMessage').textContent) &&
+     (window.__an8Clicks || []).length === 0 &&
+     document.getElementById('autoNextTimer').textContent.trim() === '00:00'`);
+  await evaluate(T, `document.getElementById('nextPage').style.display = ''; true;`);
+  check("Сценарій 8: без доступної кнопки «Вперед» — жодного натискання, повідомлення й ЗУПИНЕНО",
+    an8NoBtn, "an8NoBtn=" + an8NoBtn);
+
+  // 8.9 Перехід на іншу сторінку зупиняє режим; після повернення — свіжий
+  // ЗУПИНЕНО. Сторінка за час відсутності вчителя може змінитися ЛИШЕ через
+  // наявний механізм Issue #63: pagehide → beacon stop: true → сервер зупиняє
+  // показ (file порожній); саме автоперегортання збільшує сторінку і без дії
+  // вчителя вже не працює (документ знищено) — підтвердження: воно не росло
+  await evaluate(T,
+    `document.getElementById('autoNextInterval1').value = '1';` +
+    ` document.getElementById('autoNextInterval2').value = '2';` +
+    ` window.__an8Clicks = []; true;`);
+  await evaluate(T, `document.getElementById('autoNextStartBtn').click(); true;`);
+  const an8NavGot2 = await waitFor(T, `(window.__an8Clicks || []).length >= 2`, 8000);
+  const an8PageBeforeNav = (await apiState()).page;
+  await gotoS(T, "/students");
+  await delay(3000);
+  const an8AwayState = await apiState();
+  await gotoS(T, "/demonstration");
+  await waitFor(T, `!!document.getElementById('autoNextPanel')`, 15000);
+  const an8AfterNav = await evaluate(T,
+    `document.getElementById('autoNextStatus').textContent.trim() === 'ЗУПИНЕНО' &&
+     document.getElementById('autoNextTimer').textContent.trim() === '00:00'`);
+  // Сторінка не зростала (автоперегортання мовчить): або не змінилася, або
+  // показ зупинено beacon'ом виходу вчителя (сторінка при зупинці скидається)
+  const an8PageNotAdvanced = an8AwayState.page === an8PageBeforeNav || !an8AwayState.file;
+  check("Сценарій 8: перехід на іншу сторінку зупиняє режим, після повернення — ЗУПИНЕНО, сторінка не зростала від автоперегортання",
+    an8NavGot2 && an8PageNotAdvanced && an8AfterNav,
+    JSON.stringify({ an8NavGot2, an8PageBeforeNav, an8AwayPage: an8AwayState.page, an8AwayFile: an8AwayState.file, an8PageNotAdvanced, an8AfterNav }));
+
+  // 8.10 Ранній клік «Вперед» (уточнення власника 11-11-2026): коли всі
+  // ОНЛАЙН-учні відповіли на поточне запитання — перехід не чекає інтервалу;
+  // поки відповів лише один — переходу немає. Інтервали 60/60: у вікні тесту
+  // інтервал фізично не встигає, тож будь-який перехід раніше за 60 с — лише
+  // від раннього кліку. Після 8.9 показ може бути зупинено beacon'ом виходу
+  // вчителя — відновлюємо й ставимо на слайд 1; тестування нове (попереднє
+  // завершено в 7.8), 4 варіанти вибираємо явно: після перезавантаження
+  // сторінки в 8.9 клієнт починає з перемикача за замовчуванням (3).
+  const an810SetPage = async (page) => {
+    const r = await fetch(BASE + "/api/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin: PIN, file: slideId, kind: "slides", page })
+    });
+    return r.status;
+  };
+  const an810Ctl = await an810SetPage(1);
+  const an810Demo = await waitDemoFile(slideId, true);
+  const an810Page1 = await waitStatePage(1, 5000);
+  // Клієнт вчителя має синхронізуватися ДО стартового кліку: sharedState —
+  // джерело поточної сторінки для navigateSlide, demoPageCount ≥ 4 — щоб не
+  // підібрати номер до 1 (див. коментар про an8PageCount4 вище)
+  const an810Synced = await waitFor(T,
+    `typeof sharedState !== 'undefined' && sharedState &&
+     sharedState.file === ${JSON.stringify(slideId)} && sharedState.page === 1 &&
+     typeof demoPageCount !== 'undefined' && demoPageCount >= 4`, 10000);
+  await evaluate(T, `document.getElementById('testOpt4').click(); true;`);
+  const an810Opt4 = await waitFor(T,
+    `document.getElementById('testOpt4').getAttribute('aria-pressed') === 'true'`, 5000);
+  await evaluate(T, `document.getElementById('testToggleBtn').click(); true;`);
+  const an810Active = await waitFor(T,
+    `/Завершити тестування/.test(document.getElementById('testToggleBtn').textContent)`, 10000);
+  // Обидва учні онлайн — умова раннього кліку рахує саме онлайн-учнів
+  const an810Online = await waitFor(T,
+    `typeof lastStudentsList !== 'undefined' &&
+     lastStudentsList.filter(s => s && s.online).length >= 2`, 10000);
+  await evaluate(T,
+    `document.getElementById('autoNextInterval1').value = '60';` +
+    ` document.getElementById('autoNextInterval2').value = '60'; true;`);
+  await evaluate(T, `document.getElementById('autoNextStartBtn').click(); true;`);
+  const an810Start = await waitStatePage(2, 6000); // миттєвий стартовий перехід 1→2
+  // Негатив: відповів лише S1 (1 із 2) — хоча б 3 с без переходу
+  const an810S1Bar = await waitFor(S1,
+    t83BarExpr(true, 4) + " && window.__mark === 42", 10000);
+  await evaluate(S1,
+    `(() => { const b = [...document.querySelectorAll('#testAnswerBar .test-answer-btn')]` +
+    `.find(x => x.textContent.trim() === 'Б'); if (b) b.click(); return !!b; })()`);
+  const an810One = await waitFor(T, `${t83HistExpr} === '0,1,0,0'`, 10000);
+  await delay(3000);
+  const an810Still = (await apiState()).page === 2;
+  check("Сценарій 8: ранній клік — відповів один із двох: переходу немає (інтервал 60 с)",
+    an810Ctl === 200 && an810Demo && an810Page1 && an810Synced && an810Opt4 &&
+      an810Active && an810Online && an810Start && an810S1Bar && an810One && an810Still,
+    JSON.stringify({ an810Ctl, an810Demo, an810Page1, an810Synced, an810Opt4,
+      an810Active, an810Online, an810Start, an810S1Bar, an810One, an810Still }));
+  // Позитив: відповів і S2 — перехід раніше інтервалу 60 с, режим «ПРАЦЮЄ»
+  const an810S2Bar = await waitFor(S2,
+    t83BarExpr(true, 4) + " && window.__mark === 42", 10000);
+  const an810T0 = Date.now();
+  await evaluate(S2,
+    `(() => { const b = [...document.querySelectorAll('#testAnswerBar .test-answer-btn')]` +
+    `.find(x => x.textContent.trim() === 'В'); if (b) b.click(); return !!b; })()`);
+  // Прява умова власника: кількість відповідей === кількість онлайн-учнів
+  // (hist 0,1,1,0 = Б+В = 2 відповіді, online = 2) — саме в цей момент і спрацьовує клік
+  const an810Eq = await waitFor(T,
+    `${t83HistExpr} === '0,1,1,0' &&
+     (() => { const on = lastStudentsList.filter(s => s && s.online).length;
+       const ans = testingState && testingState.answers
+         ? Object.keys(testingState.answers).length : -1;
+       return on > 0 && on === ans; })()`, 10000);
+  const an810Early = await waitStatePage(3, 15000);
+  const an810Ms = Date.now() - an810T0;
+  const an810Run = await evaluate(T,
+    `document.getElementById('autoNextStatus').textContent.trim() === 'ПРАЦЮЄ'`);
+  check("Сценарій 8: ранній клік — усі онлайн-учні відповіли (відповідей = онлайн) → перехід раніше інтервалу 60 с",
+    an810S2Bar && an810Eq && an810Early && an810Ms < 15000 && an810Run,
+    JSON.stringify({ an810S2Bar, an810Eq, an810Early, an810Ms, an810Run }));
+  // Прибирання: СТОП і ручне завершення — автоперегортання не лишається
+  // «ПРАЦЮЄ», тестування — у статусі finished для подальших сценаріїв
+  await evaluate(T, `document.getElementById('autoNextStopBtn').click(); true;`);
+  await evaluate(T, `document.getElementById('testToggleBtn').click(); true;`);
+  const an810Finished = await waitFor(T,
+    `/Нове тестування/.test(document.getElementById('testToggleBtn').textContent)`, 10000);
+  check("Сценарій 8: після раннього кліку — СТОП і ручне завершення тестування",
+    an810Finished, "an810Finished=" + an810Finished);
+
+  // Прибирання сценарію 8: показ зупинено (файл видаляється у net-zero нижче)
+  await evaluate(T, "document.getElementById('stopDemo').click(); true;");
+  await waitDemoFile(slideId, false);
 
   // ============ Issue #88 §4 (браузер): вихід адміністратора ================
   // Підпис біля «Вийти» на всіх сторінках, де є кнопка: адмін лишається
@@ -1222,7 +1578,7 @@ async function main() {
   });
 
   // ---------------- Помилки консолі ----------------------------------------
-  const expectedBlocked = [TEST_MEDIA, TEST_HIDDEN, wavId, pdfId].filter(Boolean);
+  const expectedBlocked = [TEST_MEDIA, TEST_HIDDEN, TEST_SLIDES, wavId, pdfId, slideId].filter(Boolean);
   const errReport = {};
   let errorsOk = true;
   for (const sess of [T, S1, S2, T2]) {
@@ -1260,11 +1616,15 @@ async function main() {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ pin: PIN, file: pdfId })
   });
+  const delSlides = await fetch(BASE + "/api/files/delete", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pin: PIN, file: slideId })
+  });
   const filesLeft = await apiTeacherFiles();
   check("Тестові файли видалено (net-zero)",
-    delWav.status === 200 && delPdf.status === 200 &&
-      !filesLeft.some((f) => f.id === wavId || f.id === pdfId),
-    JSON.stringify({ wav: delWav.status, pdf: delPdf.status }));
+    delWav.status === 200 && delPdf.status === 200 && delSlides.status === 200 &&
+      !filesLeft.some((f) => f.id === wavId || f.id === pdfId || f.id === slideId),
+    JSON.stringify({ wav: delWav.status, pdf: delPdf.status, slides: delSlides.status }));
 
   const metaAfterStable = stable(JSON.parse(fs.readFileSync(META_PATH, "utf-8")));
   check("Метадані власника без змін (stable-порівняння до/після)", metaAfterStable === metaBeforeStable);

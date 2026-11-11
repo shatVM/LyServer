@@ -854,7 +854,7 @@ function renderTestUI() {
   renderStudentsList(lastStudentsList);
 }
 
-/** Панель керування тестуванням у блоці «Учні» (лише викладач) */
+/** Панель керування тестуванням у окремому блоці «Тестування» (лише викладач) */
 function renderTestingPanel() {
   const panel = $("testPanel");
   if (!panel) return;

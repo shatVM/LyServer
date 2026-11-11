@@ -1818,16 +1818,123 @@ async function main() {
           t83Demo.includes('id="testHistogram"') &&
           t83Demo.includes('id="testAnswerBar"')
       );
+      // Issue #83 (уточнення Tech-lead, коментар 6767853101): блок
+      // «Тестування» — окремий самостійний розділ, НЕ вкладений у «Учні».
+      const t83Mat2 = await (await fetch(base + "/materials")).text();
+      const t83Fs = require("node:fs");
+      const t83Path = require("node:path");
+      const t83AutoJs = t83Fs.readFileSync(
+        t83Path.join(__dirname, "public", "js", "autoNext.js"),
+        "utf-8"
+      );
+      const t83DemoHbs = t83Fs.readFileSync(
+        t83Path.join(__dirname, "views", "demonstration.hbs"),
+        "utf-8"
+      );
+      const t83MatHbs = t83Fs.readFileSync(
+        t83Path.join(__dirname, "views", "materials.hbs"),
+        "utf-8"
+      );
+      const studentsIdx = t83Demo.indexOf('id="studentsSideBlock"');
+      const studentsEndIdx = studentsIdx === -1 ? -1 : t83Demo.indexOf("</aside>", studentsIdx);
+      const testPanelIdx = t83Demo.indexOf('id="testPanel"');
+      const testingBlockIdx = t83Demo.indexOf('id="testingBlock"');
+      const autoNextIdx = t83Demo.indexOf('id="autoNextPanel"');
       check(
-        "Issue #83: панель тестування — усередині teacher-only блоку «Учні»",
-        t83Demo.indexOf('id="studentsSideBlock"') !== -1 &&
-          t83Demo.indexOf('id="testPanel"') > t83Demo.indexOf('id="studentsSideBlock"')
+        "Issue #83: блок «Тестування» — окремий розділ, не вкладений у «Учні»",
+        studentsIdx !== -1 &&
+          studentsEndIdx !== -1 &&
+          testingBlockIdx !== -1 &&
+          testPanelIdx > studentsEndIdx &&
+          testingBlockIdx > studentsEndIdx &&
+          t83Demo.indexOf('class="panel testing-side-block teacher-only"') !== -1 &&
+          t83DemoHbs.includes("{{> testingBlock}}") &&
+          t83MatHbs.includes("{{> testingBlock}}")
+      );
+      check(
+        "Issue #83: панель тестування та панель автоперегортання — у блоці «Тестування»",
+        testingBlockIdx !== -1 &&
+          testPanelIdx > testingBlockIdx &&
+          autoNextIdx > testPanelIdx &&
+          t83Mat2.includes('id="testingBlock"') &&
+          t83Mat2.includes('id="autoNextPanel"') &&
+          t83Demo.includes('id="autoNextPanel"')
+      );
+      check(
+        "Issue #83: панель автоперегортання — елементи керування за замовчуванням",
+        t83Demo.includes('id="autoNextInterval1"') &&
+          t83Demo.includes('id="autoNextInterval2"') &&
+          t83Demo.includes('id="autoNextTimer"') &&
+          t83Demo.includes('id="autoNextStartBtn"') &&
+          t83Demo.includes('id="autoNextStopBtn"') &&
+          t83Demo.includes('id="autoNextStatus"') &&
+          t83Demo.includes('value="30"') &&
+          t83Demo.includes('value="15"') &&
+          t83Demo.includes(">00:00<") &&
+          t83Demo.includes("ЗУПИНЕНО")
+      );
+      check(
+        "Issue #83: кнопка «Вперед» позначена data-auto-next на демонстрації та матеріалах",
+        t83Demo.includes('id="nextPage"') &&
+          /<button[^>]*id="nextPage"[^>]*data-auto-next/.test(t83Demo.replace(/\n/g, " ")) &&
+          /<button[^>]*id="nextPage"[^>]*data-auto-next/.test(t83Mat2.replace(/\n/g, " "))
+      );
+      check(
+        "Issue #83: окремий модуль autoNext.js підключено на обох сторінках",
+        t83Demo.includes('src="/js/autoNext.js"') &&
+          t83Mat2.includes('src="/js/autoNext.js"')
+      );
+      check(
+        "Issue #83: CSS панелі автоперегортання (темний фон 60%, заокруглення, тінь)",
+        t83Css.includes(".auto-next-panel") &&
+          t83Css.includes("rgba(11, 18, 32, 0.6)") &&
+          t83Css.includes(".auto-next-status") &&
+          t83Css.includes(".testing-side-block")
+      );
+      check(
+        "Issue #83: модуль — дедлайн Date.now(), стани, пріоритет data-auto-next",
+        t83AutoJs.includes("Date.now()") &&
+          t83AutoJs.includes("data-auto-next") &&
+          t83AutoJs.includes("visibilitychange") &&
+          t83AutoJs.includes("MutationObserver") &&
+          t83AutoJs.includes("TICK_MS = 200") &&
+          t83AutoJs.includes("ПРАЦЮЄ") &&
+          t83AutoJs.includes("ЗУПИНЕНО") &&
+          t83AutoJs.includes("btn.click()") &&
+          t83AutoJs.includes("navigateSlide")
+      );
+      check(
+        "Issue #83: модуль — без емуляції курсора/координат і без консолі",
+        !t83AutoJs.includes("elementFromPoint") &&
+          !t83AutoJs.includes("dispatchEvent(new MouseEvent") &&
+          !t83AutoJs.includes("pageX") &&
+          !t83AutoJs.includes("pageY") &&
+          !t83AutoJs.includes("mousemove") &&
+          !t83AutoJs.includes("console.")
+      );
+      check(
+        "Issue #83: ранній клік — умова «усі онлайн-учні відповіли» в модулі",
+        t83AutoJs.includes("lastStudentsList") &&
+          t83AutoJs.includes("testingState") &&
+          t83AutoJs.includes("firedKey") &&
+          t83AutoJs.includes('status !== "active"') &&
+          t83AutoJs.includes("online") &&
+          t83AutoJs.includes("hasOwnProperty") &&
+          t83AutoJs.includes("allOnlineAnswered")
+      );
+      check(
+        "Issue #83: панель автоперегортання — лише всередині блоку «Тестування» (не в «Учні»)",
+        autoNextIdx > studentsEndIdx &&
+          studentsIdx !== -1 &&
+          t83Mat2.indexOf('id="autoNextPanel"') >
+            t83Mat2.indexOf("</aside>", t83Mat2.indexOf('id="studentsSideBlock"'))
       );
       check(
         "Issue #83: CSS кнопок відповіді, гістограми, бейджа та рядка учня",
         t83Css.includes(".test-answer-btn") &&
           t83Css.includes(".test-panel") &&
           t83Css.includes(".test-histogram") &&
+          /\.test-hist-bar\s*\{[^}]*display:\s*block/.test(t83Css) &&
           t83Css.includes(".student-test-answer") &&
           t83Css.includes("#viewer[data-test-answer]")
       );

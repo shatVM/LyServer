@@ -1,0 +1,49 @@
+<!-- Issue #83: блок «Тестування» — ОКРЕМИЙ самостійний розділ інтерфейсу
+     (уточнення Tech-lead, коментар 6767853101): не вкладений у блок «Учні»
+     і від нього незалежний. Усередині — панель керування тестуванням
+     (перемикач 3/4, кнопка «Тестування», статус, гістограма; дані — із
+     персонального поля state.testing опитування /api/state, app.js) і нижче
+     панель автоматичного перегортання «Вперед» (public/js/autoNext.js).
+     teacher-only: учням не показується (API операцій захищений PIN/сесією). -->
+<aside class="panel testing-side-block teacher-only" id="testingBlock" style="display:none">
+  <div class="panel-header-row">
+    <h3>🧪 Тестування</h3>
+  </div>
+  <div id="testPanel" class="test-panel">
+    <div class="row test-toolbar">
+      <span class="test-options-label" id="testOptionsLabel">Варіантів:</span>
+      <div class="test-options" role="group" aria-labelledby="testOptionsLabel">
+        <button id="testOpt3" type="button" data-options="3" aria-pressed="true">3</button>
+        <button id="testOpt4" type="button" data-options="4" aria-pressed="false">4</button>
+      </div>
+      <button id="testToggleBtn" type="button" class="btn-sm">Тестування</button>
+    </div>
+    <div id="testStatus" class="hint test-status" role="status"></div>
+    <div id="testHistogram" class="test-histogram" style="display:none"></div>
+
+    <!-- Панель автоперегортання — виключно всередині блоку «Тестування»,
+         під основними елементами керування. Темний напівпрозорий фон 60%,
+         без зміни верстки сайту; логіка — окремий модуль autoNext.js -->
+    <div id="autoNextPanel" class="auto-next-panel" role="group"
+         aria-label="Автоматичне перегортання слайдів">
+      <div class="auto-next-head">
+        <span class="auto-next-title">Автоперегортання «Вперед»</span>
+        <span id="autoNextStatus" class="auto-next-status" role="status">ЗУПИНЕНО</span>
+      </div>
+      <div class="auto-next-controls">
+        <label class="auto-next-field" for="autoNextInterval1">
+          <span>Інтервал 1, с</span>
+          <input id="autoNextInterval1" type="number" min="1" step="1" value="30" inputmode="numeric">
+        </label>
+        <label class="auto-next-field" for="autoNextInterval2">
+          <span>Інтервал 2, с</span>
+          <input id="autoNextInterval2" type="number" min="1" step="1" value="15" inputmode="numeric">
+        </label>
+        <span class="auto-next-timer" id="autoNextTimer" aria-live="off">00:00</span>
+        <button id="autoNextStartBtn" type="button" class="auto-next-btn auto-next-start">СТАРТ</button>
+        <button id="autoNextStopBtn" type="button" class="auto-next-btn auto-next-stop" disabled>СТОП</button>
+      </div>
+      <div id="autoNextMessage" class="auto-next-message" role="status"></div>
+    </div>
+  </div>
+</aside>

@@ -1618,7 +1618,8 @@ body.demo-focus #viewer video {
   pointer-events: none;
 }
 
-/* Блок керування тестуванням — під списком учнів (Issue #83 §2) */
+/* Блок керування тестуванням (Issue #83 §2): з 2026-11-11 — усередині
+   окремого блоку «Тестування»; розділювач вимкнено див. .testing-side-block */
 .test-panel {
   display: flex;
   flex-direction: column;
@@ -1672,6 +1673,7 @@ body.demo-focus #viewer video {
   overflow: hidden;
 }
 .test-hist-bar {
+  display: block; /* span за замовчуванням inline — width/height ігноруються */
   height: 100%;
   border-radius: 999px;
   background: #185ba5;
@@ -1700,6 +1702,124 @@ body.demo-focus #viewer video {
   color: #8a94a6;
   font-weight: 500;
 }
+
+/* --- Issue #83 (уточнення Tech-lead, коментар 6767853101): окремий блок
+       «Тестування» і панель автоматичного перегортання «Вперед» --- */
+
+/* Блок поза сіткою grid-demo: вертикальний відступ від сітки не потрібен,
+   сам блок — звичайна panel-панель нижче основного рядка */
+.testing-side-block {
+  margin-top: 0;
+}
+
+/* Панель тестування всередині власного блоку: без «відокремлювача» від
+   списку учнів (він був потрібен, коли панель сиділа в блоці «Учні») */
+.testing-side-block .test-panel {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+/* Панель автоперегортання: темний напівпрозорий фон 60%, заокруглені кути,
+   м'яка тінь, читабельні написи; потікова верстка всередині блоку — без
+   накладань на інші елементи та без зміни верстки сайту */
+.auto-next-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(11, 18, 32, 0.6);
+  box-shadow: 0 4px 14px rgba(11, 18, 32, 0.25);
+  color: #f1f5fa;
+}
+.auto-next-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.auto-next-title {
+  font-size: 14px;
+  font-weight: 700;
+}
+.auto-next-status {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  color: #eef3fa;
+}
+.auto-next-status.is-running {
+  background: rgba(64, 196, 124, 0.3);
+  color: #c8f7dc;
+}
+.auto-next-controls {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+.auto-next-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #d7e1ee;
+}
+.auto-next-field input {
+  width: 76px;
+  padding: 7px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-weight: 700;
+}
+.auto-next-field input:focus-visible {
+  outline: 3px solid #ffd43b;
+  outline-offset: 1px;
+}
+.auto-next-timer {
+  min-width: 68px;
+  padding: 7px 8px;
+  text-align: center;
+  font-size: 21px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+}
+.auto-next-btn {
+  padding: 9px 18px;
+  border: 0;
+  border-radius: 8px;
+  font-weight: 700;
+  cursor: pointer;
+  color: #fff;
+}
+.auto-next-start { background: #185ba5; }
+.auto-next-start:hover { background: #144985; }
+.auto-next-stop { background: #e03131; }
+.auto-next-stop:hover { background: #c92a2a; }
+.auto-next-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.auto-next-btn:focus-visible { outline: 3px solid #ffd43b; outline-offset: 2px; }
+.auto-next-message {
+  min-height: 16px;
+  font-size: 13px;
+  color: #ffd8a8;
+}
+
+/* Вузькі екрани: елементи панелі переносяться без виходу за межі блоку */
+@media (max-width: 600px) {
+  .auto-next-controls { gap: 8px; }
+  .auto-next-field input { width: 68px; }
+}
+
 
 /* ---------------------------------------------------------------------------
    Issue #85: адміністративний розділ «Викладачі» (форми, список записів,

@@ -32,7 +32,8 @@
           </button>
           <span id="pageLabel" class="hint">PDF: сторінка 1</span>
           <button id="nextPage" type="button" class="secondary btn-sm icon-btn"
-                  title="Наступна сторінка" aria-label="Наступна сторінка">
+                  title="Наступна сторінка" aria-label="Наступна сторінка"
+                  data-auto-next>
             <svg class="ui-icon" aria-hidden="true"><use href="/icons.svg#chevron-right"></use></svg>
           </button>
           <input id="pageInput" class="page-input" type="number" min="1" step="1" inputmode="numeric" placeholder="№" aria-label="Номер сторінки">
@@ -63,6 +64,11 @@
   <!-- Issue #19: блок «Учні» у правій колонці сітки -->
   {{> studentsBlock}}
 </div>
+
+<!-- Issue #83 (уточнення Tech-lead, коментар 6767853101): блок «Тестування» —
+     окремий самостійний розділ НЕЗАЛЕЖНО від блоку «Учні», поза сіткою
+     grid-demo; усередині — панель тестування та панель автоперегортання -->
+{{> testingBlock}}
 
 <!-- Issue #63, Етап 2: блок «Додати матеріали» — наявний механізм завантаження,
      під'єднаний до сторінки «Демонстрація». Розташований після блоку «Учні» і
@@ -196,3 +202,7 @@
     <p class="hint preview-hint">Приватний перегляд: це вікно бачите лише ви — спільну демонстрацію воно не змінює.</p>
   </div>
 </div>
+
+<!-- Issue #83 (уточнення): окремий модуль автоперегортання «Вперед» —
+     завантажується лише на сторінках із блоком «Тестування» -->
+<script src="/js/autoNext.js"></script>
