@@ -62,28 +62,11 @@ function getStudents() {
 }
 
 // ---------------------------------------------------------------------------
-// Присутність викладача (Issue #63: вихід учителя не залишає учнів у режимі
-// демонстрації). Викладач шле heartbeat кожні ~2 с (POST /api/presence/teacher)
-// та під час будь-якого успішного керування показом (POST /api/control).
-// Якщо вчитель виходить (закрив вкладку, натиснув «Вийти», втрачено зв'язок),
-// heartbeat зникає, і stateService.getState() сам зупиняє активну демонстрацію.
-// Тайм-аут більший за інтервал (4 пропущені heartbeat), щоб короткі обривки
-// мережі не зупиняли показ посеред уроку; у тестах задається через
-// TEACHER_PRESENCE_TIMEOUT_MS.
+// Присутність викладача (heartbeat, тайм-аут, автозупинка демонстрації)
+// прибрано рішенням власника (2026-11-12): довга відсутність вчителя на
+// сайті більше НЕ зупиняє активний показ — зупиняє лише явна дія вчителя
+// (кнопка «Стоп», «Вийти» або закриття вкладки). Див. DECISIONS.md.
 // ---------------------------------------------------------------------------
-const TEACHER_TIMEOUT_MS = Number(process.env.TEACHER_PRESENCE_TIMEOUT_MS) > 0
-  ? Number(process.env.TEACHER_PRESENCE_TIMEOUT_MS)
-  : 8000;
-
-let teacherLastSeen = 0;
-
-function markTeacherSeen() {
-  teacherLastSeen = Date.now();
-}
-
-function isTeacherOnline() {
-  return teacherLastSeen !== 0 && (Date.now() - teacherLastSeen) < TEACHER_TIMEOUT_MS;
-}
 
 function cleanup() {
   // Remove students that haven't pinged in 60 seconds
@@ -96,4 +79,4 @@ function cleanup() {
 // Run cleanup every minute
 setInterval(cleanup, 60000).unref();
 
-module.exports = { heartbeat, getStudents, hasStudent, TIMEOUT_MS, markTeacherSeen, isTeacherOnline, TEACHER_TIMEOUT_MS };
+module.exports = { heartbeat, getStudents, hasStudent, TIMEOUT_MS };

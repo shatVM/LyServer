@@ -43,22 +43,6 @@ class PresenceController {
   }
 
   /**
-   * POST /api/presence/teacher
-   * Heartbeat викладача (Issue #63): PIN у заголовку X-Portal-Pin або тілі
-   * (підтримує й form-data від navigator.sendBeacon). Оновлює присутність
-   * викладача — без неї активна демонстрація зупиняється автоматично,
-   * тому учні не застрягають у режимі показу після виходу вчителя.
-   * Без PIN відхиляється, щоб учні не могли «утримувати» чужий показ.
-   */
-  teacherHeartbeat(req, res) {
-    // Issue #85: heartbeat викладача належить дозволу demo (керування показом);
-    // без нього викладач не може «утримувати» демонстрацію в роботі
-    if (!auth.requirePerm(req, res, "demo")) return;
-    presenceService.markTeacherSeen();
-    res.json({ ok: true });
-  }
-
-  /**
    * GET /api/presence/students
    * Teacher-only. Returns all students with online status.
    */

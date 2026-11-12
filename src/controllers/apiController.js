@@ -4,7 +4,6 @@ const auth = require("../utils/auth");
 const { canViewMedia } = require("../utils/mediaAccess");
 const fileService = require("../services/fileService");
 const stateService = require("../services/stateService");
-const presenceService = require("../services/presenceService");
 const signalService = require("../services/signalService");
 // Issue #83: стан тестування для конкретного запитувача (state.testing)
 const testingService = require("../services/testingService");
@@ -109,8 +108,6 @@ class ApiController {
     // 1) Адміністративний PIN (PORTAL_PIN) — як і раніше, головний механізм
     if (auth.safeEqual(pin, config.portalPin)) {
       pinLimiter.reset(key);
-      // Вхід на портал = присутність на зв'язку (автозупинка показу при виході)
-      presenceService.markTeacherSeen();
       auth.issueSession(req, res, "teacher", "", { access: "admin" });
       return res.json({ ok: true, role: "teacher", admin: true });
     }
@@ -132,7 +129,6 @@ class ApiController {
 
     pinLimiter.reset(key);
     const teacher = outcome.teacher;
-    presenceService.markTeacherSeen();
     auth.issueSession(req, res, "teacher", "", {
       access: "teacher",
       teacherId: teacher.id,
@@ -228,8 +224,6 @@ class ApiController {
     const { pin, ...data } = req.body || {};
     // Issue #85: керування показом належить дозволу demo
     if (!auth.requirePerm(req, res, "demo")) return;
-    // Будь-яке успішне керування показом — вчитель на зв'язку (Issue #63)
-    presenceService.markTeacherSeen();
 
     try {
       const result = stateService.updateState(data);

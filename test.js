@@ -1492,7 +1492,7 @@ async function main() {
           .includes("sessionService.reset()")
       );
       check(
-        "Issue #63 Д: стан показу має назву та isCurrentlyDemonstrated (автозупинку)",
+        "Issue #63 Д: стан показу має назву та isCurrentlyDemonstrated (доступ під час показу)",
         s4StateServiceSource.includes("isCurrentlyDemonstrated(name)") &&
           s4StateServiceSource.includes('fileName: ""') &&
           s4StateServiceSource.includes("fileService.getOriginalName(")
@@ -1716,16 +1716,19 @@ async function main() {
           jsSrc.includes("if ($(\"navUploadLink\")) $(\"navUploadLink\").style.display = \"none\";") &&
           jsSrc.includes("$(\"navMaterialsLink\").style.display = \"\";")
       );
-      // Вихід учителя: heartbeat, зупинка показу при «Вийти» та при закритті
-      // вкладки. Доповнює поведінковий тест автозупинки вище (окремий екземпляр).
+      // Вихід учителя: автозупинку за відсутністю вчителя прибрано рішенням
+      // власника (2026-11-12) — залишається лише явна зупинка при закритті
+      // вкладки (pagehide → beacon) і кнопкою «Вийти»/«Стоп».
       check(
-        "Issue #63: клієнт шле heartbeat викладача та зупиняє показ при виході",
-        jsSrc.includes("\"/api/presence/teacher\"") &&
+        "Issue #63: автозупинку демонстрації прибрано, зупинка при закритті вкладки лишилася",
+        !jsSrc.includes("\"/api/presence/teacher\"") &&
+          !jsSrc.includes("startTeacherHeartbeat") &&
+          !jsSrc.includes("stopTeacherHeartbeat") &&
           jsSrc.includes("function reportTeacherLeave()") &&
-          jsSrc.includes("startTeacherHeartbeat();") &&
-          jsSrc.includes("stopTeacherHeartbeat();") &&
           jsSrc.includes("if (prevRole === \"teacher\")") &&
-          jsSrc.includes("reportTeacherLeave();")
+          jsSrc.includes("reportTeacherLeave();") &&
+          !stateServiceSource.includes("isTeacherOnline") &&
+          !stateServiceSource.includes("автозупинка демонстрації")
       );
       check(
         "Issue #63 Р: зупинка демонстрації — кнопка викладача та серверний стан",
@@ -1782,19 +1785,13 @@ async function main() {
         `status=${r.status}, file=${JSON.stringify(stoppedState.file)}, page=${stoppedState.page}`
       );
 
-      // Issue #63: вихід учителя — присутність викладача (heartbeat)
-      r = await fetch(base + "/api/presence/teacher", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}"
-      });
-      check("Issue #63: heartbeat викладача без PIN → 403", r.status === 403, `status=${r.status}`);
+      // Issue #63: ендпоінт присутності викладача прибрано разом з автозупинкою
       r = await fetch(base + "/api/presence/teacher", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Portal-Pin": PIN },
         body: "{}"
       });
-      check("Issue #63: heartbeat викладача з PIN → 200", r.status === 200, `status=${r.status}`);
+      check("Issue #63: /api/presence/teacher більше не існує → 404", r.status === 404, `status=${r.status}`);
 
       // 7г. Issue #83: MVP системи тестування під час демонстрації.
       // Повний цикл на ОСНОВНОМУ екземплярі: старт (3/4 варіанти) → відповіді
@@ -2203,11 +2200,6 @@ async function main() {
       );
 
       // Повернення на парний слайд відкриває приймання ЗНОВУ (тестування не завершено)
-      await fetch(base + "/api/presence/teacher", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Portal-Pin": PIN },
-        body: "{}"
-      });
       await fetch(`${base}/api/control`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2221,11 +2213,6 @@ async function main() {
       );
 
       // --- Ручне завершення: відповіді блокуються, результати лишаються ---
-      await fetch(base + "/api/presence/teacher", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Portal-Pin": PIN },
-        body: "{}"
-      });
       const t83Finish = await (await fetch(base + "/api/testing/finish", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2514,12 +2501,12 @@ async function main() {
         check("Issue #85: сторінка /teachers для викладача → 403", r.status === 403, `status=${r.status}`);
 
         // --- Операції викладача з персональним PIN + ідентифікатор ---
-        r = await fetch(base + "/api/presence/teacher", {
+        r = await fetch(base + "/api/control", {
           method: "POST",
           headers: t85TeacherHeaders(t85Pin, t85Id),
           body: JSON.stringify({})
         });
-        check("Issue #85: heartbeat викладача (право demo) → 200", r.status === 200, `status=${r.status}`);
+        check("Issue #85: операція з правом demo (POST /api/control) → 200", r.status === 200, `status=${r.status}`);
         const t85CatName = "Issue85Категорія" + Date.now();
         r = await fetch(base + "/api/categories", {
           method: "POST",
@@ -2547,7 +2534,7 @@ async function main() {
           body: JSON.stringify({ name: t85CatName + "2" })
         });
         check("Issue #85: без materials створення категорії → 403", r.status === 403, `status=${r.status}`);
-        r = await fetch(base + "/api/presence/teacher", {
+        r = await fetch(base + "/api/control", {
           method: "POST",
           headers: t85TeacherHeaders(t85Pin, t85Id),
           body: JSON.stringify({})
@@ -2576,7 +2563,7 @@ async function main() {
         check("Issue #85: деактивація запису → 200", r.status === 200, `status=${r.status}`);
         t85Login = await t85Verify(t85Pin);
         check("Issue #85: вхід деактивованого викладача → 403", t85Login.status === 403, `status=${t85Login.status}`);
-        r = await fetch(base + "/api/presence/teacher", {
+        r = await fetch(base + "/api/control", {
           method: "POST",
           headers: t85TeacherHeaders(t85Pin, t85Id),
           body: JSON.stringify({})
@@ -2615,13 +2602,13 @@ async function main() {
         );
 
         // --- Без PIN-ідентифікатора персональний PIN не діє (без fallback) ---
-        r = await fetch(base + "/api/presence/teacher", {
+        r = await fetch(base + "/api/control", {
           method: "POST",
           headers: { "Content-Type": "application/json", "X-Portal-Pin": t85NewPin },
           body: JSON.stringify({})
         });
         check("Issue #85: персональний PIN без X-Portal-Teacher → 403", r.status === 403, `status=${r.status}`);
-        r = await fetch(base + "/api/presence/teacher", {
+        r = await fetch(base + "/api/control", {
           method: "POST",
           headers: t85TeacherHeaders(t85NewPin, "deadbeefdeadbeef"),
           body: JSON.stringify({})
@@ -2720,13 +2707,13 @@ async function main() {
         }
         check("Issue #85: CLI відхиляє зайнятий PIN (не нульовий вихідний код)", cliExit !== 0);
         for (let attempt = 0; attempt < 3; attempt++) {
-          await fetch(base + "/api/presence/teacher", {
+          await fetch(base + "/api/control", {
             method: "POST",
             headers: t85TeacherHeaders("0000", t85Id2),
             body: JSON.stringify({})
           });
         }
-        r = await fetch(base + "/api/presence/teacher", {
+        r = await fetch(base + "/api/control", {
           method: "POST",
           headers: t85TeacherHeaders(t85Pin2, t85Id2),
           body: JSON.stringify({})
@@ -3930,18 +3917,17 @@ async function main() {
         body: JSON.stringify({ id: t88NameTeacher && t88NameTeacher.teacher ? t88NameTeacher.teacher.id : "", confirm: true })
       });
 
-      // Issue #63: автозупинка демонстрації, коли вчитель пішов. Окремий
-      // екземпляр із коротким тайм-аутом присутності — щоб не впливати на
-      // інші тести; той самий каталог матеріалів на диску (fileId існує на
-      // цьому етапі).
+      // Issue #63: відсутність учителя НЕ зупиняє демонстрацію (автозупинку
+      // прибрано рішенням власника 2026-11-12). Окремий екземпляр — щоб не
+      // впливати на інші тести; той самий каталог матеріалів на диску
+      // (fileId існує на цьому етапі).
       const WDOG_PORT = PORT + 2;
       const wdogBase = "http://127.0.0.1:" + WDOG_PORT;
       const wdog = spawn(process.execPath, ["server.js"], {
         env: {
           ...process.env,
           PORT: String(WDOG_PORT),
-          PORTAL_PIN: PIN,
-          TEACHER_PRESENCE_TIMEOUT_MS: "3000"
+          PORTAL_PIN: PIN
         },
         stdio: ["ignore", "pipe", "pipe"]
       });
@@ -3950,10 +3936,10 @@ async function main() {
       wdog.stderr.on("data", (chunk) => { wdogLog += chunk; });
       try {
         const wdogUp = await waitForHealth(wdogBase);
-        check("Issue #63: екземпляр сервера для тесту автозупинки запущено", wdogUp, "port=" + WDOG_PORT);
+        check("Issue #63: екземпляр сервера для тесту відсутності вчителя запущено", wdogUp, "port=" + WDOG_PORT);
         if (wdogUp) {
           // Issue #63 (Етап 5): на тестовому екземплярі — власна сесія учня
-          await studentLogin(wdogBase, "Учень автозупинки");
+          await studentLogin(wdogBase, "Учень без вчителя");
 
           // Issue #63 (§3.1): порядок категорій переживає перезапуск сервера —
           // «свіжий» екземпляр читає той самий файл метаданих і повертає той
@@ -3968,7 +3954,7 @@ async function main() {
             JSON.stringify({ mainIds, freshIds })
           );
 
-          // Старт показу позначає присутність викладача
+          // Старт показу на тестовому екземплярі
           r = await fetch(wdogBase + "/api/control", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -4002,56 +3988,36 @@ async function main() {
             `slides=${wHiddenSlides.status}, raw=${wHiddenRaw.status}, info=${wHiddenInfo.status}, cat=${wHiddenListRes.status}, leak=${wHiddenLeak}`
           );
 
-          // Жодного control/heartbeat довше за тайм-аут (3 с) → автозупинка.
-          // Перевірка виконується в GET /api/state, який учні опитують саме
-          // так, тож тест відтворює реальний шлях відновлення каталогу.
+          // Жодного керування вчителем довше за колишній тайм-аут (3 с) —
+          // автозупинку прибрано рішенням власника (2026-11-12): стан показу
+          // НЕ скидається, а медіа прихованого матеріалу лишаються
+          // відкликаними (матеріал прихований ПІД ЧАС показу — перевірка на
+          // сервері при кожному запиті, незалежно від присутності вчителя).
           await delay(3600);
           wState = await (await fetch(wdogBase + "/api/state", { headers: sess(wdogBase) })).json();
+          const wAbsentSlides = await fetch(`${wdogBase}/slides/${encodeURIComponent(fileId)}/1`, { headers: sess(wdogBase) });
+          const wAbsentFiles = await fetch(`${wdogBase}/files/${encodeURIComponent(fileId)}`, { headers: sess(wdogBase) });
+          const wAbsentInfo = await fetch(`${wdogBase}/api/slides/info?file=${encodeURIComponent(fileId)}`, { headers: sess(wdogBase) });
           check(
-            "Issue #63: без вчителя демонстрація зупиняється автоматично",
-            wState.file === "" && wState.revision > 0,
-            `file=${JSON.stringify(wState.file)}, rev=${wState.revision}`
+            "Issue #63: без вчителя демонстрація НЕ зупиняється (автозупинку прибрано)",
+            wState.file === fileId &&
+              wAbsentSlides.status === 404 && wAbsentFiles.status === 404 && wAbsentInfo.status === 404,
+            `file=${JSON.stringify(wState.file)}, slides=${wAbsentSlides.status}, files=${wAbsentFiles.status}, info=${wAbsentInfo.status}`
           );
 
-          // Issue #63 (доробка): разом зі станом автозупинка відкликає і ДОСТУП
-          // до медіа прихованого матеріалу — перевірка виконується на сервері
-          // при кожному запиті, тож 404 повертається без дій клієнта
-          const wAutoSlides = await fetch(`${wdogBase}/slides/${encodeURIComponent(fileId)}/1`, { headers: sess(wdogBase) });
-          const wAutoFiles = await fetch(`${wdogBase}/files/${encodeURIComponent(fileId)}`, { headers: sess(wdogBase) });
-          const wAutoInfo = await fetch(`${wdogBase}/api/slides/info?file=${encodeURIComponent(fileId)}`, { headers: sess(wdogBase) });
-          check(
-            "Issue #63 (доробка): після автозупинки медіа прихованого матеріалу закриті (404 на всіх шляхах)",
-            wAutoSlides.status === 404 && wAutoFiles.status === 404 && wAutoInfo.status === 404,
-            `slides=${wAutoSlides.status}, files=${wAutoFiles.status}, info=${wAutoInfo.status}`
-          );
-
-          // Heartbeat викладача утримує показ активним (2 × 1.8 с < 3 с)
+          // Повторний старт показу (матеріал уже прихований у момент старту)
+          // знову відкриває медіа прихованого матеріалу; далі — повернення
+          // початкового стану
           r = await fetch(wdogBase + "/api/control", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ pin: PIN, file: fileId, kind: "slides", page: 1 })
           });
-          await delay(1800);
-          await fetch(wdogBase + "/api/presence/teacher", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "X-Portal-Pin": PIN },
-            body: "{}"
-          });
-          await delay(1800);
-          wState = await (await fetch(wdogBase + "/api/state", { headers: sess(wdogBase) })).json();
-          check(
-            "Issue #63: heartbeat викладача утримує активний показ",
-            r.status === 200 && wState.file === fileId,
-            `file=${wState.file}`
-          );
-
-          // Повторний старт показу знову відкриває медіа прихованого матеріалу
-          // (зворотний бік відкликання); далі — повернення початкового стану
           const wRestartSlides = await fetch(`${wdogBase}/slides/${encodeURIComponent(fileId)}/1`, { headers: sess(wdogBase) });
           check(
             "Issue #63 (доробка): після повторного старту показу медіа прихованого знову відкриті (200)",
-            wRestartSlides.status === 200,
-            `slides=${wRestartSlides.status}`
+            r.status === 200 && wRestartSlides.status === 200,
+            `status=${r.status}, slides=${wRestartSlides.status}`
           );
 
           // Прибрати за собою на тестовому екземплярі: показ зупинено, файл

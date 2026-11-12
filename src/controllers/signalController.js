@@ -108,8 +108,6 @@ class SignalController {
    */
   send(req, res) {
     if (!auth.requirePerm(req, res, "demo")) return;
-    // Взаємодія вчителя зі станом показу — він на зв'язку (як POST /api/control)
-    presenceService.markTeacherSeen();
 
     const body = req.body || {};
     const signalId = typeof body.signalId === "string" ? body.signalId : "";
@@ -146,7 +144,6 @@ class SignalController {
    */
   dismiss(req, res) {
     if (!auth.requirePerm(req, res, "demo")) return;
-    presenceService.markTeacherSeen();
 
     const body = req.body || {};
     const signalId = typeof body.signalId === "string" ? body.signalId : "";

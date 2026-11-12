@@ -238,47 +238,14 @@ function reportActivityChange(active) {
 }
 
 // ---------------------------------------------------------------------------
-// Teacher heartbeat (Issue #63: вихід учителя зупиняє демонстрацію)
+// Вихід вчителя: зупинка демонстрації при закритті вкладки (Issue #63).
+// Довга відсутність вчителя на сайті демонстрацію НЕ зупиняє — автозупинку
+// прибрано рішенням власника (2026-11-12), див. DECISIONS.md.
 // ---------------------------------------------------------------------------
-
-/**
- * Heartbeat викладача: сервер бачить, що вчитель у сесії. Якщо вчитель
- * виходить (закрив вкладку, «Вийти», втрата зв'язку) — heartbeat зникає і
- * сервер сам зупиняє активну демонстрацію, щоб учні не застрягали в режимі
- * показу без керування (див. stateService.getState).
- */
-async function sendTeacherHeartbeat() {
-  if (role !== "teacher" || !pin) return;
-  try {
-    await fetch("/api/presence/teacher", {
-      method: "POST",
-      headers: applyAuthHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({})
-    });
-  } catch { /* silent */ }
-}
-
-let teacherHeartbeatTimer = null;
-
-/** Старт heartbeat викладача (вхід або перезавантаження сторінки) */
-function startTeacherHeartbeat() {
-  if (teacherHeartbeatTimer) clearInterval(teacherHeartbeatTimer);
-  sendTeacherHeartbeat();
-  teacherHeartbeatTimer = setInterval(sendTeacherHeartbeat, HEARTBEAT_MS);
-}
-
-/** Зупинка heartbeat викладача (вихід із ролі) */
-function stopTeacherHeartbeat() {
-  if (teacherHeartbeatTimer) {
-    clearInterval(teacherHeartbeatTimer);
-    teacherHeartbeatTimer = null;
-  }
-}
 
 /**
  * Закриття вкладки викладачем (pagehide): sendBeacon несе PIN у тілі, бо не
  * дозволяє заголовки; якщо показ активний — сервер зупиняє його одразу.
- * Якщо beacon не дійде, сервер доб'є тайм-аутом присутності викладача.
  */
 function reportTeacherLeave() {
   if (role !== "teacher" || !pin) return;
@@ -1181,7 +1148,6 @@ function handleSessionExpired() {
   if (sessionExpiredHandled) return;
   sessionExpiredHandled = true;
   stopHeartbeat();
-  stopTeacherHeartbeat();
   stopPresencePolling();
   // Issue #75: без чинної сесії стан показу не опитується — повертаємо учня
   // до звичайного режиму (разом із виходом із fullscreen, якщо ввійшли нашою
@@ -1602,7 +1568,8 @@ function closeRoleModal() {
  *
  * Порядок:
  *  1) завершити спільну демонстрацію — поки є PIN і сесія ще чинна (якщо запит
- *     не дійде, сервер доб'є тайм-аутом присутності викладача);
+ *     не дійде, показ лишиться активним: автозупинки за відсутності вчителя
+ *     більше немає — рішення власника 2026-11-12);
  *  2) POST /api/auth/logout: сесію знищено на сервері, cookie очищено з тими
  *     самими атрибутами. ПОМИЛКА — не показуємо успішний вихід, ролі не
  *     скидаємо, редіректу немає — зрозуміле повідомлення і повторна спроба;
@@ -1619,7 +1586,7 @@ async function logoutFlow() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pin, teacherId, stop: true })
       });
-    } catch { /* сервер доб'є тайм-аутом присутності — не блокуємо вихід */ }
+    } catch { /* показ лишиться активним — не блокуємо вихід */ }
   }
   // 2) Серверний logout — обов'язково дочекуємося успіху
   try {
@@ -1686,10 +1653,8 @@ function setRole(newRole, newPin = "", newName = "") {
   // (раніше список оновлювався лише після перезавантаження сторінки)
   if (newRole === "teacher") {
     startPresencePolling();
-    startTeacherHeartbeat();
   } else {
     stopPresencePolling();
-    stopTeacherHeartbeat();
   }
   // Симетрично: учень, який увійшов у поточній сесії, шле heartbeat одразу
   if (newRole === "student" && studentDisplayName) startHeartbeat();
@@ -2959,7 +2924,7 @@ async function pollStateCore(force = false) {
     }
 
     if (!state.file) {
-      // Показ завершено (зупинка чи автозупинка): глядач далі веде сама
+      // Показ завершено (зупинка викладачем): глядач далі веде сама
       // сторінка, тож прапорець очищення скидається
       sharedViewerCleared = false;
       if (isDemoPage) {
@@ -3395,9 +3360,6 @@ if (role === "student" && studentDisplayName) startHeartbeat();
 // Issue #7: викладач опитує список присутності та отримує тости
 if (role === "teacher") {
   startPresencePolling();
-  // Issue #63: heartbeat викладача — без нього активний показ зупиняється
-  // автоматично, коли вчитель іде (вкладка, «Вийти», зв'язок)
-  startTeacherHeartbeat();
 // Issue #63 (Етап 5): сесію викладача відновлює bootstrapSession() перед
 // першим pollState — окремо оновлювати cookie тут уже не потрібно
 }

@@ -2,8 +2,7 @@
  * testingController.js — операції системи тестування під час демонстрації (Issue #83).
  *
  *  - start/finish — ЛИШЕ з PIN (приховування блоку «Тестування» в інтерфейсі
- *    не є захистом); будь-яка успішна операція оновлює присутність вчителя,
- *    як і POST /api/control;
+ *    не є захистом);
  *  - answer — лише для ролі «учень» з чинною сесією; studentId береться з
  *    прив'язки сесії (sessionService.bindStudent у heartbeat), а не з тіла
  *    запиту, тому підробити чужу відповідь неможливо;
@@ -15,7 +14,6 @@
  * показував зрозуміле повідомлення, а не JSON-сирість.
  */
 const auth = require("../utils/auth");
-const presenceService = require("../services/presenceService");
 const stateService = require("../services/stateService");
 const testingService = require("../services/testingService");
 
@@ -23,7 +21,6 @@ class TestingController {
   /** POST /api/testing/start { options: 3|4 } — запуск тестування вчителем */
   start(req, res) {
     if (!auth.requirePerm(req, res, "demo")) return;
-    presenceService.markTeacherSeen();
     const body = req.body || {};
     try {
       const state = stateService.getState();
@@ -37,7 +34,6 @@ class TestingController {
   /** POST /api/testing/finish — дострокове ручне завершення приймання */
   finish(req, res) {
     if (!auth.requirePerm(req, res, "demo")) return;
-    presenceService.markTeacherSeen();
     try {
       const state = stateService.getState();
       testingService.finish();
